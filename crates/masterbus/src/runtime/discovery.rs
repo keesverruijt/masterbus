@@ -4,7 +4,9 @@
 //! field/shadow enumeration is keyed by `article + firmware` and may be loaded
 //! from / persisted to the optional on-disk cache.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::waiter::Waiter;
 use super::Config;
@@ -75,24 +77,29 @@ impl Disc<'_> {
             .map(|r| u16::from_le_bytes([r[2], r[3]]))
     }
 
-    fn shadow_u16(&mut self, addr: u32, op: u8, field: u8, retries: usize) -> Option<u16> {
-        let key = format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
-        self.req(&key, shadow_meta_req_raw(addr, op, field as u16), retries)
-            .filter(|r| r.len() >= 6)
-            .map(|r| u16::from_le_bytes([r[4], r[5]]))
-    }
-
-    fn shadow_byte4(&mut self, addr: u32, op: u8, field: u8) -> Option<u8> {
-        let key = format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
-        self.req_std(&key, shadow_meta_req_raw(addr, op, field as u16))
-            .and_then(|r| r.get(4).copied())
-    }
-
-    fn shadow_f32(&mut self, addr: u32, op: u8, field: u8) -> Option<f32> {
-        let key = format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
-        self.req_std(&key, shadow_meta_req_raw(addr, op, field as u16))
-            .filter(|r| r.len() >= 8)
-            .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]))
+    /// Fetch several shadow metadata ops for one field in a single round-trip:
+    /// register all keys, fire all requests back-to-back, then collect within one
+    /// shared timeout window. Absent metadata (silent or a `0x10` "no value")
+    /// resolves within that one window instead of timing out per op — this is the
+    /// main discovery speed-up. Returns op → raw response payload.
+    fn shadow_batch(&mut self, addr: u32, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
+        let key = |op: u8| format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
+        for &op in ops {
+            self.waiter.register(&key(op));
+        }
+        for &op in ops {
+            let frame = shadow_meta_req_raw(addr, op, field as u16);
+            let _ = self.tx.send(frame.0, &frame.1);
+        }
+        let deadline = Instant::now() + self.cfg.discovery_timeout;
+        let mut out = HashMap::with_capacity(ops.len());
+        for &op in ops {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if let Some(r) = self.waiter.wait(&key(op), remaining.max(Duration::from_millis(1))) {
+                out.insert(op, r);
+            }
+        }
+        out
     }
 
     fn group_count(&mut self, addr: u32, selector: u8) -> u32 {
@@ -205,15 +212,29 @@ fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<Grou
 }
 
 fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
+    use crate::protocol::shadow_op as op;
     let f = fid as u8;
-    let name_sid = disc.shadow_u16(addr, 0x28, f, disc.cfg.discovery_retries);
-    let viz_code = disc.shadow_byte4(addr, 0x02, f).unwrap_or(0x01);
-    let n_or_max = disc.shadow_f32(addr, 0x07, f).unwrap_or(0.0);
-    let unit_sid = disc.shadow_u16(addr, 0x2C, f, OPTIONAL_RETRIES);
-    let min = disc.shadow_f32(addr, 0x06, f).unwrap_or(0.0);
-    let step = disc.shadow_f32(addr, 0x08, f).unwrap_or(0.0);
+
+    // All per-field metadata in one pipelined round-trip.
+    let meta = disc.shadow_batch(
+        addr,
+        f,
+        &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::MIN, op::STEP, op::WRITEABLE],
+    );
+    let u16_at4 = |o: u8| meta.get(&o).filter(|r| r.len() >= 6).map(|r| u16::from_le_bytes([r[4], r[5]]));
+    let byte4 = |o: u8| meta.get(&o).and_then(|r| r.get(4).copied());
+    let f32_at4 = |o: u8| {
+        meta.get(&o).filter(|r| r.len() >= 8).map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]))
+    };
+
+    let name_sid = u16_at4(op::NAME);
+    let viz_code = byte4(op::VIZ).unwrap_or(0x01);
+    let n_or_max = f32_at4(op::MAX).unwrap_or(0.0);
+    let unit_sid = u16_at4(op::UNIT);
+    let min = f32_at4(op::MIN).unwrap_or(0.0);
+    let step = f32_at4(op::STEP).unwrap_or(0.0);
     // Writability: shadow op 0x0B, flag at byte[4].
-    let writeable = disc.shadow_byte4(addr, 0x0B, f).map(|b| b != 0).unwrap_or(false);
+    let writeable = byte4(op::WRITEABLE).map(|b| b != 0).unwrap_or(false);
 
     let viz = viz_from_wire(viz_code);
     let n_opts = n_or_max as u32;

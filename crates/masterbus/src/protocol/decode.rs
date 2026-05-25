@@ -159,6 +159,21 @@ pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -
                 None
             }
         }
+        // A shadow "no value" reply (absent metadata / option). Routing it to the
+        // same key as the request lets discovery resolve it instantly instead of
+        // waiting out the timeout. Only shadow-addressed acks are routed; a
+        // non-shadow `0x10` (e.g. a write ack) must NOT masquerade as a value.
+        can_class::WRITE_ACK if device_addr & SHADOW_BIT != 0 => {
+            let real = device_addr & !SHADOW_BIT;
+            if data.len() < 2 {
+                return None;
+            }
+            if data[0] == shadow_op::OPTION && data.len() >= 4 {
+                Some(format!("shadow:{:06X}:26:{}:{}", real, data[1], data[3]))
+            } else {
+                Some(format!("shadow:{:06X}:{:02X}:{}", real, data[0], data[1]))
+            }
+        }
         _ => None,
     }
 }
