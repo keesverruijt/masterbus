@@ -1,14 +1,13 @@
 //! Live end-to-end check of the engine over SocketCAN.
 //!
-//! Usage: `enumerate <can-interface> [cache-dir]`
+//! Usage: `enumerate <can-interface> [cache-dir]` (Linux/SocketCAN only)
 //! Lists alive devices, lazily discovers each (all menus), prints identity and
 //! every group/field (with writability) and the monitoring values.
 
-use std::time::Duration;
-
-use masterbus::{Config, MasterBus, Menu};
-
+#[cfg(target_os = "linux")]
 fn main() {
+    use masterbus::{Config, MasterBus, Menu};
+
     let mut args = std::env::args().skip(1);
     let iface = args.next().unwrap_or_else(|| {
         eprintln!("usage: enumerate <can-interface> [cache-dir]");
@@ -25,8 +24,8 @@ fn main() {
         }
     };
 
-    let devices = bus.devices();
-    println!("{} device(s) alive", devices.len());
+    let devices = bus.devices_all();
+    println!("{} device(s)", devices.len());
     for dev in devices {
         let name = dev.name().unwrap_or_default();
         let article = dev.article_number().unwrap_or_default();
@@ -64,7 +63,9 @@ fn main() {
             }
         }
     }
+}
 
-    // give the scheduler a moment to settle before exit
-    std::thread::sleep(Duration::from_millis(50));
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("the `enumerate` example requires Linux/SocketCAN");
 }

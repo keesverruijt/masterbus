@@ -238,16 +238,16 @@ impl Field {
     }
 
     /// Write a value; returns the value observed after the write.
+    ///
+    /// The supplied [`Value`] must match the field's schema type (e.g. a
+    /// `Boolean` for a checkbox field, a `Float` for a numeric field), otherwise
+    /// [`Error::WrongType`] is returned and nothing is sent.
     pub fn set(&self, value: Value) -> Result<Value> {
-        if !self.info()?.writeable {
+        let info = self.info()?;
+        if !info.writeable {
             return Err(Error::ReadOnly);
         }
-        let wv = match value {
-            Value::Boolean(b) => WriteValue::Bool(b),
-            Value::Float(f) => WriteValue::Float(f),
-            Value::List { index, .. } => WriteValue::ListIndex(index),
-            _ => return Err(Error::WrongType { expected: "Boolean|Float|List" }),
-        };
+        let wv = write_value_for(info.viz_type, value)?;
         self.engine.write(self.device, self.index, wv)
     }
 
@@ -255,6 +255,37 @@ impl Field {
     pub fn subscribe(&self, interval: Duration, change_only: bool) -> Subscription {
         let (id, rx) = self.engine.subscribe(self.device, vec![self.index], interval, change_only);
         Subscription { engine: self.engine.clone(), id, rx }
+    }
+}
+
+/// Validate a [`Value`] against the field's [`VisualizationType`] and convert it
+/// to the wire [`WriteValue`]. Returns [`Error::WrongType`] on a type mismatch.
+fn write_value_for(viz: VisualizationType, value: Value) -> Result<WriteValue> {
+    use VisualizationType as V;
+    let wrong = |expected| Err(Error::WrongType { expected });
+    match viz {
+        V::Float | V::GrayVisualization => match value {
+            Value::Float(f) => Ok(WriteValue::Float(f)),
+            _ => wrong("Float"),
+        },
+        V::CheckBox | V::ToggleButton | V::PushButton => match value {
+            Value::Boolean(b) => Ok(WriteValue::Bool(b)),
+            _ => wrong("Boolean"),
+        },
+        V::Radio | V::DropDown => match value {
+            Value::List { index, .. } => Ok(WriteValue::ListIndex(index)),
+            _ => wrong("List"),
+        },
+        V::Eventable => match value {
+            Value::Eventable { index, .. } => Ok(WriteValue::ListIndex(index)),
+            _ => wrong("Eventable"),
+        },
+        V::DeviceList => match value {
+            Value::DeviceRef { index, .. } => Ok(WriteValue::ListIndex(index)),
+            _ => wrong("DeviceRef"),
+        },
+        // Date/Time/Text fields have no defined write encoding.
+        V::Date | V::Time | V::Text => wrong("a writable type"),
     }
 }
 
@@ -283,5 +314,46 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.engine.unsubscribe(self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::Date;
+
+    #[test]
+    fn write_value_matches_schema_type() {
+        // Right types map through.
+        assert!(matches!(
+            write_value_for(VisualizationType::Float, Value::Float(4.0)),
+            Ok(WriteValue::Float(_))
+        ));
+        assert!(matches!(
+            write_value_for(VisualizationType::CheckBox, Value::Boolean(true)),
+            Ok(WriteValue::Bool(true))
+        ));
+        assert!(matches!(
+            write_value_for(VisualizationType::DropDown, Value::List { index: 2, options: vec![] }),
+            Ok(WriteValue::ListIndex(2))
+        ));
+    }
+
+    #[test]
+    fn write_value_rejects_mismatch() {
+        // Boolean into a numeric field, etc.
+        assert!(matches!(
+            write_value_for(VisualizationType::Float, Value::Boolean(true)),
+            Err(Error::WrongType { .. })
+        ));
+        assert!(matches!(
+            write_value_for(VisualizationType::CheckBox, Value::Float(1.0)),
+            Err(Error::WrongType { .. })
+        ));
+        // Non-writable field types are rejected.
+        assert!(matches!(
+            write_value_for(VisualizationType::Date, Value::Date(Date { day: 1, mon: 1, year: 2026 })),
+            Err(Error::WrongType { .. })
+        ));
     }
 }
