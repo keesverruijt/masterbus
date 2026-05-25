@@ -73,6 +73,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/libmasterbus_ffi.so" "$dist/"
           cp "target/${{ matrix.target }}/release/libmasterbus_ffi.a" "$dist/"
           cp crates/masterbus-ffi/include/masterbus.h "$dist/"
+          cp crates/masterbus-signalk/masterbus-signalk.service "$dist/"
           echo "DIST=$dist" >> "$GITHUB_ENV"
 
       - name: Upload build artifacts
