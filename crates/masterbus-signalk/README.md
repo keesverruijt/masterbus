@@ -28,6 +28,21 @@ Add a **data connection** of type *Signal K* over **TCP**, pointing at this host
 and port (e.g. `merrimac-pi:3009`). The Signal K server connects as a client and
 ingests the delta stream as if from any other provider.
 
+## Run as a service
+
+A hardened systemd unit is provided in
+[`masterbus-signalk.service`](masterbus-signalk.service):
+
+```sh
+sudo cp target/<triple>/release/masterbus-signalk /usr/local/bin/
+sudo cp masterbus-signalk.service /etc/systemd/system/
+echo 'CAN_IFACE=can0' | sudo tee /etc/default/masterbus-signalk   # your interface
+sudo systemctl enable --now masterbus-signalk
+```
+
+It restarts on failure (handy on a noisy bus) and keeps a persistent schema cache
+in `/var/lib/masterbus`.
+
 ## Mapping
 
 The MasterBus-field → Signal K-path mapping lives in `map_field` in

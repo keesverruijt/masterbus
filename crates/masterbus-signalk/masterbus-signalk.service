@@ -1,0 +1,55 @@
+# systemd unit for the MasterBus -> Signal K bridge.
+#
+# Install:
+#   sudo cp target/<triple>/release/masterbus-signalk /usr/local/bin/
+#   sudo cp masterbus-signalk.service /etc/systemd/system/
+#   # set your CAN interface / listen address:
+#   echo 'CAN_IFACE=can0' | sudo tee /etc/default/masterbus-signalk
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now masterbus-signalk
+#
+# Then add a Signal K data connection of type "Signal K" over TCP pointing at
+# this host on the LISTEN port (default 3009).
+
+[Unit]
+Description=Mastervolt MasterBus to Signal K bridge
+Documentation=https://github.com/keesverruijt/masterbus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+SyslogIdentifier=masterbus-signalk
+
+# Defaults; override in /etc/default/masterbus-signalk (CAN_IFACE, LISTEN).
+Environment=CAN_IFACE=can0
+Environment=LISTEN=0.0.0.0:3009
+EnvironmentFile=-/etc/default/masterbus-signalk
+ExecStart=/usr/local/bin/masterbus-signalk ${CAN_IFACE} ${LISTEN} %S/masterbus
+
+Restart=on-failure
+RestartSec=5
+
+# Persistent schema cache in /var/lib/masterbus (created and owned automatically).
+StateDirectory=masterbus
+
+# Hardening. SocketCAN needs CAP_NET_RAW and the AF_CAN address family; the TCP
+# listener needs AF_INET/AF_INET6.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_CAN
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
