@@ -35,6 +35,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   demand); non-blocking boot with live device-name backfill.
 
 ### Fixed
+- Address **direction bit** (`0x080000`): devices announce/respond with it set but
+  must be addressed with it clear. Requests are now sent to the bit-clear address
+  and device ids are canonicalised to it, so non-battery devices (which ignore the
+  bit-set address) are reachable — previously only the lenient lithium batteries
+  answered. Confirmed against MasterAdjust's own USB traffic.
 - Battery "Cluster" group no longer hidden: dropping the cross-device schema
   dedup means each battery (including the cluster master) is discovered on its
   own.

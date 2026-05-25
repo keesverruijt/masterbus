@@ -1,6 +1,6 @@
 //! Decode raw frames into messages and field values.
 
-use super::{can_class, shadow_op, MbFrame, MbMessage, VisualizationType, SHADOW_BIT};
+use super::{can_class, shadow_op, MbFrame, MbMessage, VisualizationType, DIRECTION_BIT, SHADOW_BIT};
 use crate::value::{Date, Time, Value};
 
 /// Decode a raw `(raw_can_id, data)` pair into an [`MbFrame`].
@@ -10,7 +10,9 @@ use crate::value::{Date, Time, Value};
 pub fn frame_from_raw(raw_can_id: u32, data: &[u8]) -> MbFrame {
     let can_id = raw_can_id & 0x1FFF_FFFF;
     MbFrame {
-        device_addr: can_id & 0x00_FF_FF_FF,
+        // Canonicalise to the bit-clear (addressable) form so a device is tracked
+        // by one id whether it's announcing (bit set) or being addressed.
+        device_addr: can_id & 0x00_FF_FF_FF & !DIRECTION_BIT,
         can_class: ((can_id >> 24) & 0x1F) as u8,
         data: data.to_vec(),
     }

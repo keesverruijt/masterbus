@@ -76,6 +76,15 @@ pub mod shadow_op {
 /// Shadow-address bit set on the device address for per-field metadata.
 pub const SHADOW_BIT: u32 = 0x80_0000;
 
+/// Address direction flag (bit 19). A device *announces* and *responds* with this
+/// bit **set** in its address; a master must address the device with it **clear**.
+/// We canonicalise device ids to the bit-clear form (on decode) and clear it on
+/// every outgoing frame (on encode) so requests reach the device. Strict devices
+/// (e.g. the CombiMaster) ignore requests sent to the bit-set address — only the
+/// lenient lithium batteries answered either form, which is why they alone worked
+/// before this was understood.
+pub const DIRECTION_BIT: u32 = 0x08_0000;
+
 /// How a field is presented/edited, decoded from [`shadow_op::VIZ`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VisualizationType {

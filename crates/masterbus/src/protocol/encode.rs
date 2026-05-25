@@ -1,13 +1,15 @@
 //! Encode requests/writes into raw `(can_id, data)` pairs for transmission.
 
-use super::{can_class, menu, shadow_op, SHADOW_BIT, TAB_DEFAULT};
+use super::{can_class, menu, shadow_op, DIRECTION_BIT, SHADOW_BIT, TAB_DEFAULT};
 
 fn id(class: u8, device_addr: u32) -> u32 {
-    ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF)
+    // A master addresses a device with the direction bit clear; clear it here so
+    // callers can pass an address in either form.
+    ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF & !DIRECTION_BIT)
 }
 
 fn shadow_addr(device_addr: u32) -> u32 {
-    (device_addr | SHADOW_BIT) & 0x00_FF_FF_FF
+    (device_addr | SHADOW_BIT) & 0x00_FF_FF_FF & !DIRECTION_BIT
 }
 
 /// Read a monitoring field: class `0x18`, `[field, tab]`.
