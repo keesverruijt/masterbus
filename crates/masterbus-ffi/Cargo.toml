@@ -2,8 +2,13 @@
 name = "masterbus-ffi"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "C ABI bindings for the masterbus crate (single-threaded use)"
+readme = "README.md"
+keywords = ["mastervolt", "canbus", "ffi", "marine"]
+categories = ["external-ffi-bindings", "hardware-support"]
 
 [lib]
 name = "masterbus_ffi"

@@ -9,7 +9,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
+repository = "https://github.com/keesverruijt/masterbus"
 
 [workspace.dependencies]
 thiserror = "2"
@@ -18,7 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socketcan = "3"
 ratatui = "0.30"
-masterbus = { path = "crates/masterbus" }
+masterbus = { path = "crates/masterbus", version = "0.1.0" }
 
 [profile.release]
 opt-level = "z"

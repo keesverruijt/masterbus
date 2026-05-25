@@ -2,8 +2,13 @@
 name = "masterbus-tui"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-description = "Terminal UI to browse and edit MasterBus devices"
+repository.workspace = true
+description = "Terminal UI to browse and edit Mastervolt MasterBus devices"
+readme = "README.md"
+keywords = ["mastervolt", "canbus", "tui", "marine"]
+categories = ["command-line-utilities", "hardware-support"]
 
 [[bin]]
 name = "masterbus-tui"

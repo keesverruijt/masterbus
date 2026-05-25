@@ -2,11 +2,19 @@
 name = "masterbus"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-description = "Idiomatic Rust client for the Mastervolt MasterBus CAN protocol"
+repository.workspace = true
+description = "Idiomatic Rust client for the Mastervolt MasterBus CAN-bus protocol"
+readme = "README.md"
+keywords = ["mastervolt", "canbus", "nmea2000", "marine", "socketcan"]
+categories = ["embedded", "hardware-support", "network-programming"]
 
 [lib]
 name = "masterbus"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 thiserror.workspace = true

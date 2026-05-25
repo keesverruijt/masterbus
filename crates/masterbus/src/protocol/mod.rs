@@ -65,7 +65,7 @@ pub mod shadow_op {
     pub const STEP: u8 = 0x08;
     /// Factory default (f32).
     pub const FACTORY_DEFAULT: u8 = 0x09;
-    /// Writeable flag (byte[4]: 1 = writable).
+    /// Writeable flag (`byte[4]`: 1 = writable).
     pub const WRITEABLE: u8 = 0x0B;
     /// Unit string id.
     pub const UNIT: u8 = 0x2C;
