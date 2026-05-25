@@ -75,7 +75,17 @@ fn run(bus: MasterBus) -> std::io::Result<()> {
     for dev in &devices {
         let name = dev.name().unwrap_or_default();
         let class = name.split_whitespace().next().unwrap_or("").to_string();
-        let instance = sanitize(&dev.serial_number().unwrap_or_else(|_| dev.id().to_string()));
+        // Instance id = the device name without its leading class word (already
+        // implied by the SK path category), path-sanitized; fall back to the name
+        // then the numeric id.
+        let label = name.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+        let instance = if !label.is_empty() {
+            sanitize(&label)
+        } else if !name.is_empty() {
+            sanitize(&name)
+        } else {
+            dev.id().to_string()
+        };
 
         let Ok(groups) = dev.tab(Menu::Monitoring) else { continue };
         let mut fields = Vec::new();

@@ -15,8 +15,11 @@ masterbus-signalk <can-interface> [cache-dir]
 Sample line:
 
 ```json
-{"updates":[{"$source":"masterbus","timestamp":"2026-05-25T18:00:00.000Z","values":[{"path":"electrical.batteries.K821Q2009.voltage","value":26.6}]}]}
+{"updates":[{"$source":"masterbus","timestamp":"2026-05-25T18:00:00.000Z","values":[{"path":"electrical.batteries.Main-Batt-4.voltage","value":26.6}]}]}
 ```
+
+The Signal K instance id is the device's name without its leading class word
+(path-sanitized) — e.g. "BAT Main Batt 4" → `Main-Batt-4`.
 
 ## Use from a Signal K server
 
