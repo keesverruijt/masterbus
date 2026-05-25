@@ -179,24 +179,50 @@ pub extern "C" fn mb_free_ids(ids: *mut u32, len: i32) {
     }
 }
 
-macro_rules! device_str_getter {
-    ($name:ident, $method:ident) => {
-        /// Device identity string (NULL on error). Free with [`mb_free_str`].
-        #[no_mangle]
-        pub extern "C" fn $name(bus: *mut MbBus, id: u32) -> *mut c_char {
-            match bus_ref(bus).and_then(|b| b.device(id).$method().ok()) {
-                Some(s) => to_cstr(s),
-                None => ptr::null_mut(),
-            }
-        }
-    };
+/// Device product name (NULL on error). Free with [`mb_free_str`].
+#[no_mangle]
+pub extern "C" fn mb_device_name(bus: *mut MbBus, id: u32) -> *mut c_char {
+    match bus_ref(bus).and_then(|b| b.device(id).name().ok()) {
+        Some(s) => to_cstr(s),
+        None => ptr::null_mut(),
+    }
 }
 
-device_str_getter!(mb_device_name, name);
-device_str_getter!(mb_device_article, article_number);
-device_str_getter!(mb_device_serial, serial_number);
-device_str_getter!(mb_device_revision, revision_code);
-device_str_getter!(mb_device_firmware, firmware_version);
+/// Device article number (NULL on error). Free with [`mb_free_str`].
+#[no_mangle]
+pub extern "C" fn mb_device_article(bus: *mut MbBus, id: u32) -> *mut c_char {
+    match bus_ref(bus).and_then(|b| b.device(id).article_number().ok()) {
+        Some(s) => to_cstr(s),
+        None => ptr::null_mut(),
+    }
+}
+
+/// Device serial number (NULL on error). Free with [`mb_free_str`].
+#[no_mangle]
+pub extern "C" fn mb_device_serial(bus: *mut MbBus, id: u32) -> *mut c_char {
+    match bus_ref(bus).and_then(|b| b.device(id).serial_number().ok()) {
+        Some(s) => to_cstr(s),
+        None => ptr::null_mut(),
+    }
+}
+
+/// Device revision code (NULL on error). Free with [`mb_free_str`].
+#[no_mangle]
+pub extern "C" fn mb_device_revision(bus: *mut MbBus, id: u32) -> *mut c_char {
+    match bus_ref(bus).and_then(|b| b.device(id).revision_code().ok()) {
+        Some(s) => to_cstr(s),
+        None => ptr::null_mut(),
+    }
+}
+
+/// Device firmware version (NULL on error). Free with [`mb_free_str`].
+#[no_mangle]
+pub extern "C" fn mb_device_firmware(bus: *mut MbBus, id: u32) -> *mut c_char {
+    match bus_ref(bus).and_then(|b| b.device(id).firmware_version().ok()) {
+        Some(s) => to_cstr(s),
+        None => ptr::null_mut(),
+    }
+}
 
 /// Device operational status.
 #[no_mangle]
