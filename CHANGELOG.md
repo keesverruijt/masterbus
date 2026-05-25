@@ -17,6 +17,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery. Edit flags while the service is stopped.
 - `Device::identity()` / `Device::tab_info()` and `DeviceIdentity` for cheap,
   per-menu access without full discovery.
+- Cross-platform **USB-link transport** (`usb` feature, via `hidapi`):
+  `MasterBus::usb()` talks to the class-compliant "MasterBus USB Link" HID device
+  (VID `0x1A64`) directly — no vendor driver/DLL — so the crate runs on
+  macOS/Windows and on Linux hosts without a CAN interface. Includes an `usb`
+  example (`enumerate`/`dump`/`read`/`write`).
 
 ### Changed
 - Rust **edition 2024** across the workspace (MSRV 1.85); updated dependencies
