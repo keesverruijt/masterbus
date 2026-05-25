@@ -1,9 +1,9 @@
-/* mb_switch — write a value to a field, dispatching by the field's type.
+/* mb_set_value — write a value to a field, dispatching by the field's type.
  *
  * Reads the field first to learn its type, then writes a boolean or a float
  * accordingly and reports the value observed afterwards.
  *
- * Usage: mb_switch <can-iface> <device-id> <field> <value>
+ * Usage: mb_set_value <can-iface> <device-id> <field> <value>
  *   <value> for a boolean: on/off, true/false, 1/0
  *   <value> for a float:   a decimal number
  */

@@ -1,6 +1,6 @@
-/* mb_value — read and print one field's current value.
+/* mb_get_value — read and print one field's current value.
  *
- * Usage: mb_value <can-iface> <device-id> <field>
+ * Usage: mb_get_value <can-iface> <device-id> <field>
  */
 #include <stdint.h>
 #include <stdio.h>

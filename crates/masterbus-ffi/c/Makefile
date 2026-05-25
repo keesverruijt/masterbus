@@ -2,7 +2,7 @@
 #
 #   make            # build all demos (cross-compiles the cdylib too)
 #   make deploy     # scp demos + libmasterbus_ffi.so to the Pi
-#   make run        # deploy and run enumerate_bus on the Pi
+#   make run        # deploy and run mb_enumerate on the Pi
 #   make clean
 
 RUST_TARGET := aarch64-unknown-linux-gnu
@@ -19,7 +19,7 @@ PI_HOST := root@merrimac-pi
 PI_DIR  := ~/masterbus-demo
 CAN     := can-masterbus
 
-DEMOS := enumerate_bus mb_switch mb_value
+DEMOS := mb_enumerate mb_set_value mb_get_value
 
 .PHONY: all lib deploy run clean
 
@@ -36,7 +36,7 @@ deploy: $(DEMOS)
 	scp $(DEMOS) $(LIB_SO) $(PI_HOST):$(PI_DIR)/
 
 run: deploy
-	ssh $(PI_HOST) "cd $(PI_DIR) && LD_LIBRARY_PATH=. ./enumerate_bus $(CAN)"
+	ssh $(PI_HOST) "cd $(PI_DIR) && LD_LIBRARY_PATH=. ./mb_enumerate $(CAN)"
 
 clean:
 	rm -f $(DEMOS)

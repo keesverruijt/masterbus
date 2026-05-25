@@ -1,7 +1,7 @@
-/* enumerate_bus — list every device on the bus with its identity and the
+/* mb_enumerate — list every device on the bus with its identity and the
  * monitoring groups/fields (with current values and writability).
  *
- * Usage: enumerate_bus <can-iface> [cache-dir]
+ * Usage: mb_enumerate <can-iface> [cache-dir]
  */
 #include <stdint.h>
 #include <stdio.h>
