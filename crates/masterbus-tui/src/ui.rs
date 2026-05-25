@@ -13,6 +13,9 @@ use crate::app::{menu_label, App, EditKind, Focus, Row, TABS};
 /// Braille spinner frames.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Width of the value column (fits "Nd HH:MM:SS" time values without overflow).
+const VALUE_COL: usize = 11;
+
 pub fn draw(f: &mut Frame, app: &App) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(f.area());
     let panes = Layout::horizontal([Constraint::Length(34), Constraint::Min(0)]).split(outer[0]);
@@ -100,11 +103,13 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
             )),
             Row::Field(field) => {
                 let val = app.values.get(&field.index).map(format_value).unwrap_or_else(|| "…".into());
+                // Cap to the column width so a long value (e.g. a "0d HH:MM:SS"
+                // time) can't push the unit / rw column out of alignment.
+                let val = truncate(&val, VALUE_COL);
                 let rw = if field.writeable { "rw" } else { "ro" };
                 ListItem::new(Line::raw(format!(
-                    "  {:<22} {:>10} {:<4} {}",
+                    "  {:<22} {val:>VALUE_COL$} {:<4} {}",
                     truncate(&field.name, 22),
-                    val,
                     field.unit,
                     rw
                 )))
@@ -169,7 +174,10 @@ pub fn format_value(v: &Value) -> String {
         Value::Float(x) if x.is_nan() => "—".into(),
         Value::Float(x) => format!("{x:.2}"),
         Value::Boolean(b) => if *b { "on" } else { "off" }.into(),
+        // -1 in any component is the device's "no value" sentinel.
+        Value::Date(d) if d.year < 0 || d.mon < 0 || d.day < 0 => "—".into(),
         Value::Date(d) => format!("{:04}-{:02}-{:02}", d.year, d.mon, d.day),
+        Value::Time(t) if t.sec < 0 => "—".into(),
         Value::Time(t) => format!("{}d {:02}:{:02}:{:02}", t.days, t.hour, t.min, t.sec),
         Value::List { index, options } => {
             options.get(*index as usize).cloned().unwrap_or_else(|| format!("[{index}]"))
