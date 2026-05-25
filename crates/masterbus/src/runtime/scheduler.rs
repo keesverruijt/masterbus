@@ -1,0 +1,216 @@
+//! Single bus-TX thread: discovery (high priority), on-demand reads/writes, and
+//! rate-based subscription polling — paced to a bus budget, passive-first.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{Receiver, RecvTimeoutError};
+
+use super::discovery::{discover, Disc};
+use super::reader::value_key;
+use super::state::State;
+use super::waiter::Waiter;
+use super::{Command, Config, SubSpec, ValueUpdate};
+use crate::error::{Error, Result};
+use crate::protocol::{
+    can_class, decode_value, encode_set_boolean, encode_set_float, monitoring_req_raw,
+    TAB_DEFAULT, VisualizationType,
+};
+use crate::transport::TransportTx;
+use crate::value::{Value, WriteValue};
+
+const VALUE_READ_TIMEOUT: Duration = Duration::from_millis(500);
+
+struct SubState {
+    spec: SubSpec,
+    next_due: HashMap<i32, Instant>,
+    last_value: HashMap<i32, Value>,
+}
+
+pub(super) fn spawn(
+    tx: Box<dyn TransportTx>,
+    state: Arc<State>,
+    waiter: Arc<Waiter>,
+    cmd_rx: Receiver<Command>,
+    shutdown: Arc<AtomicBool>,
+    config: Config,
+) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("masterbus-scheduler".into())
+        .spawn(move || Sched { tx, state, waiter, config, last_send: Instant::now() }.run(cmd_rx, &shutdown))
+        .expect("spawn scheduler")
+}
+
+struct Sched {
+    tx: Box<dyn TransportTx>,
+    state: Arc<State>,
+    waiter: Arc<Waiter>,
+    config: Config,
+    last_send: Instant,
+}
+
+impl Sched {
+    fn run(mut self, cmd_rx: Receiver<Command>, shutdown: &AtomicBool) {
+        let mut subs: Vec<SubState> = Vec::new();
+        while !shutdown.load(Ordering::Relaxed) {
+            let timeout = self.next_due_in(&subs).unwrap_or(Duration::from_millis(200));
+            match cmd_rx.recv_timeout(timeout) {
+                Ok(Command::Discover { addr, reply }) => {
+                    self.do_discover(addr);
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(Command::Read { addr, field, max_age, reply }) => {
+                    let r = self.do_read(addr, field, max_age);
+                    let _ = reply.send(r);
+                }
+                Ok(Command::Write { addr, field, value, reply }) => {
+                    let r = self.do_write(addr, field, value);
+                    let _ = reply.send(r);
+                }
+                Ok(Command::Subscribe(spec)) => self.add_sub(&mut subs, spec),
+                Ok(Command::Unsubscribe(id)) => subs.retain(|s| s.spec.id != id),
+                Ok(Command::Shutdown) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            self.process_due(&mut subs);
+        }
+        self.waiter.cancel_all();
+    }
+
+    /// Respect the bus budget: ensure `min_send_interval` between transmissions.
+    fn pace(&mut self) {
+        let since = self.last_send.elapsed();
+        if since < self.config.min_send_interval {
+            std::thread::sleep(self.config.min_send_interval - since);
+        }
+        self.last_send = Instant::now();
+    }
+
+    fn send(&mut self, frame: (u32, Vec<u8>)) {
+        self.pace();
+        let _ = self.tx.send(frame.0, &frame.1);
+    }
+
+    fn do_discover(&mut self, addr: u32) {
+        if self.state.has_schema(addr) {
+            return;
+        }
+        let schema = {
+            let waiter = self.waiter.clone();
+            let cfg = self.config.clone();
+            let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg };
+            discover(&mut disc, addr)
+        };
+        self.last_send = Instant::now();
+        self.state.put_schema(addr, schema);
+    }
+
+    fn viz_of(&mut self, addr: u32, field: i32) -> Result<VisualizationType> {
+        if !self.state.has_schema(addr) {
+            self.do_discover(addr);
+        }
+        self.state
+            .schema(addr)
+            .and_then(|s| s.field(field).map(|f| f.viz_type))
+            .ok_or(Error::FieldNotAvailable(field))
+    }
+
+    fn poll_value(&mut self, addr: u32, field: i32, viz: VisualizationType) -> Result<Value> {
+        let key = value_key(addr, field);
+        self.waiter.register(&key);
+        self.send(monitoring_req_raw(addr, field as u8, TAB_DEFAULT));
+        match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
+            Some(raw) => {
+                let v = decode_value(&raw, viz);
+                self.state.put_value(addr, field, v.clone());
+                Ok(v)
+            }
+            None => Err(Error::Timeout),
+        }
+    }
+
+    fn do_read(&mut self, addr: u32, field: i32, max_age: Duration) -> Result<Value> {
+        if let Some(cv) = self.state.get_value(addr, field) {
+            if !cv.outdated && cv.at.elapsed() <= max_age {
+                return Ok(cv.value);
+            }
+        }
+        let viz = self.viz_of(addr, field)?;
+        self.poll_value(addr, field, viz)
+    }
+
+    fn do_write(&mut self, addr: u32, field: i32, value: WriteValue) -> Result<Value> {
+        let frame = match value {
+            WriteValue::Bool(b) => encode_set_boolean(addr, field as u8, b),
+            WriteValue::Float(f) => encode_set_float(addr, field as u8, f),
+            WriteValue::ListIndex(i) => (
+                ((can_class::MONITORING_REQ as u32) << 24) | (addr & 0x00_FF_FF_FF),
+                vec![field as u8, TAB_DEFAULT, i as u8],
+            ),
+        };
+        self.send(frame);
+        self.state.mark_outdated(addr, field);
+        // Confirm by observing the resulting value.
+        let viz = self.viz_of(addr, field)?;
+        self.poll_value(addr, field, viz)
+    }
+
+    // ── subscriptions ───────────────────────────────────────────────────────
+
+    fn add_sub(&mut self, subs: &mut Vec<SubState>, spec: SubSpec) {
+        if !self.state.has_schema(spec.device) {
+            self.do_discover(spec.device);
+        }
+        let now = Instant::now();
+        let next_due = spec.fields.iter().map(|&f| (f, now)).collect();
+        subs.push(SubState { spec, next_due, last_value: HashMap::new() });
+    }
+
+    fn next_due_in(&self, subs: &[SubState]) -> Option<Duration> {
+        let now = Instant::now();
+        subs.iter()
+            .flat_map(|s| s.next_due.values())
+            .map(|&due| due.saturating_duration_since(now))
+            .min()
+    }
+
+    fn process_due(&mut self, subs: &mut [SubState]) {
+        let now = Instant::now();
+        // Collect work first to avoid borrow issues.
+        let mut work: Vec<(usize, i32)> = Vec::new();
+        for (i, s) in subs.iter().enumerate() {
+            for (&f, &due) in &s.next_due {
+                if due <= now {
+                    work.push((i, f));
+                }
+            }
+        }
+        for (i, field) in work {
+            let (device, interval, change_only) = {
+                let s = &subs[i];
+                (s.spec.device, s.spec.interval, s.spec.change_only)
+            };
+            // passive-first: use a cache value fresh within the interval, else poll.
+            let value = match self.state.get_value(device, field) {
+                Some(cv) if !cv.outdated && cv.at.elapsed() <= interval => Some(cv.value),
+                _ => match self.viz_of(device, field) {
+                    Ok(viz) => self.poll_value(device, field, viz).ok(),
+                    Err(_) => None,
+                },
+            };
+            let s = &mut subs[i];
+            s.next_due.insert(field, now + interval);
+            if let Some(v) = value {
+                let changed = s.last_value.get(&field) != Some(&v);
+                if !change_only || changed {
+                    s.last_value.insert(field, v.clone());
+                    let _ = s.spec.sender.send(ValueUpdate { device, field, value: v });
+                }
+            }
+        }
+    }
+}

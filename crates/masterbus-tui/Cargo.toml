@@ -1,0 +1,13 @@
+[package]
+name = "masterbus-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal UI to browse and edit MasterBus devices"
+
+[[bin]]
+name = "masterbus-tui"
+path = "src/main.rs"
+
+[dependencies]
+masterbus.workspace = true

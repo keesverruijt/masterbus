@@ -1,0 +1,13 @@
+[package]
+name = "masterbus-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI bindings for the masterbus crate (single-threaded use)"
+
+[lib]
+name = "masterbus_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+masterbus.workspace = true

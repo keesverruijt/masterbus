@@ -1,0 +1,27 @@
+[package]
+name = "masterbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Idiomatic Rust client for the Mastervolt MasterBus CAN protocol"
+
+[lib]
+name = "masterbus"
+
+[dependencies]
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-xml-rs = { workspace = true, optional = true }
+
+# The live SocketCAN backend is Linux-only; the crate still builds elsewhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan.workspace = true
+
+[features]
+default = []
+# Cross-platform Mastervolt USB-link transport (HID). (Framing pending RE.)
+usb = []
+# Offline XML backend (vendor dumps) for tests and host-side development.
+xml = ["dep:serde-xml-rs"]
