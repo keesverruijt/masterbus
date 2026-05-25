@@ -12,14 +12,23 @@
 //! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
 //! in [`map_field`]; it currently covers batteries and the CombiMaster and is
 //! easy to extend per device class.
+//!
+//! # Which fields are published
+//!
+//! If the `MAPPING` environment variable points at a file, it gates output per
+//! `<instance>.<menu>[.<group>]`. New devices are auto-added (menu-level = off;
+//! the battery `cluster` group = on) and the file is rewritten; edit the
+//! `true`/`false` flags while the service is stopped. Without `MAPPING`, every
+//! mapped field is published.
 
 // The bus runtime is reachable only on Linux (SocketCAN); elsewhere the helpers
 // type-check but are unused.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +37,9 @@ use serde_json::json;
 
 /// Default TCP listen address.
 const DEFAULT_LISTEN: &str = "0.0.0.0:3009";
+
+/// The menu the sidecar publishes (only monitoring carries mapped data today).
+const MENU: &str = "monitoring";
 
 /// How often each value is (re)emitted.
 const RATE: Duration = Duration::from_millis(1000);
@@ -44,12 +56,13 @@ fn main() {
     };
     let listen = args.next().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let config = Config { cache_path: args.next().map(Into::into), ..Default::default() };
+    let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 
     #[cfg(target_os = "linux")]
     {
         match MasterBus::socketcan(&iface, config) {
             Ok(bus) => {
-                if let Err(e) = run(bus, &listen) {
+                if let Err(e) = run(bus, &listen, mapping.as_deref()) {
                     eprintln!("masterbus-signalk: {e}");
                     std::process::exit(1);
                 }
@@ -62,9 +75,20 @@ fn main() {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (iface, listen, config);
+        let _ = (iface, listen, config, mapping);
         eprintln!("masterbus-signalk requires Linux/SocketCAN");
     }
+}
+
+/// A discovered field and where it lives (used to build the mapping + metadata).
+struct FieldRec {
+    device: u32,
+    index: i32,
+    class: String,
+    instance: String,
+    group: String,
+    name: String,
+    unit: String,
 }
 
 /// Per-field metadata captured at startup so updates can be mapped cheaply.
@@ -75,7 +99,67 @@ struct FieldMeta {
     unit: String,
 }
 
-fn run(bus: MasterBus, listen: &str) -> std::io::Result<()> {
+/// Parse a mapping file (`<instance>.<menu>[.<group>] = true|false`, `#` comments).
+fn load_mapping(path: &Path) -> BTreeMap<String, bool> {
+    let mut map = BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else { return map };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let on = matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+            map.insert(k.trim().to_string(), on);
+        }
+    }
+    map
+}
+
+/// Rewrite the mapping file: a per-instance comment listing its groups, the
+/// menu-level toggle, then any group-level toggles present in `map`.
+fn save_mapping(
+    path: &Path,
+    map: &BTreeMap<String, bool>,
+    groups_by_instance: &BTreeMap<String, BTreeSet<String>>,
+) -> std::io::Result<()> {
+    let mut out = String::new();
+    out.push_str(
+        "# masterbus-signalk Signal K mapping.\n\
+         # Edit the true/false flags below while the service is STOPPED, then restart.\n\
+         # Keys: <instance>.<menu>[.<group>] = true|false  (a group line overrides the\n\
+         # menu line). New devices are added automatically: the menu-level toggle\n\
+         # defaults to false and the battery `cluster` group to true.\n\n",
+    );
+    for (instance, groups) in groups_by_instance {
+        let glist = groups.iter().cloned().collect::<Vec<_>>().join(", ");
+        out.push_str(&format!("# {instance} \u{2014} groups: {glist}\n"));
+        let mk = format!("{instance}.{MENU}");
+        out.push_str(&format!("{mk} = {}\n", map.get(&mk).copied().unwrap_or(false)));
+        for g in groups {
+            let gk = format!("{instance}.{MENU}.{g}");
+            if let Some(&v) = map.get(&gk) {
+                out.push_str(&format!("{gk} = {v}\n"));
+            }
+        }
+        out.push('\n');
+    }
+    std::fs::write(path, out)
+}
+
+/// Resolve whether a field's (instance, menu, group) is enabled: a group-level
+/// entry wins over a menu-level one; the default is on only for `cluster`.
+fn enabled(map: &BTreeMap<String, bool>, instance: &str, menu: &str, group: &str) -> bool {
+    if let Some(&v) = map.get(&format!("{instance}.{menu}.{group}")) {
+        return v;
+    }
+    if let Some(&v) = map.get(&format!("{instance}.{menu}")) {
+        return v;
+    }
+    group == "cluster"
+}
+
+fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Result<()> {
     // TCP server: clients (e.g. a Signal K server) connect and receive the delta
     // stream. The listener thread appends new connections to the shared set.
     let listener = TcpListener::bind(listen)?;
@@ -93,16 +177,16 @@ fn run(bus: MasterBus, listen: &str) -> std::io::Result<()> {
         });
     }
 
+    // Discover the monitoring menu of every device, recording each field with its
+    // (sanitized) group so the mapping file can gate it.
     let devices = bus.devices_all();
-    let mut meta: HashMap<(u32, i32), FieldMeta> = HashMap::new();
-    let mut subs = Vec::new();
-
+    let mut fields: Vec<FieldRec> = Vec::new();
+    let mut groups_by_instance: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for dev in &devices {
         let name = dev.name().unwrap_or_default();
         let class = name.split_whitespace().next().unwrap_or("").to_string();
         // Instance id = the device name without its leading class word (already
-        // implied by the SK path category), path-sanitized; fall back to the name
-        // then the numeric id.
+        // implied by the SK path category), lowercased/sanitized.
         let label = name.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
         let instance = if !label.is_empty() {
             sanitize(&label)
@@ -113,27 +197,74 @@ fn run(bus: MasterBus, listen: &str) -> std::io::Result<()> {
         };
 
         let Ok(groups) = dev.tab(Menu::Monitoring) else { continue };
-        let mut fields = Vec::new();
         for group in groups {
+            let gname = sanitize(&group.name().unwrap_or_default());
+            groups_by_instance.entry(instance.clone()).or_default().insert(gname.clone());
             for field in group.fields().unwrap_or_default() {
-                let fname = field.name().unwrap_or_default();
-                let unit = field.unit().unwrap_or_default();
-                meta.insert(
-                    (dev.id(), field.index()),
-                    FieldMeta { class: class.clone(), instance: instance.clone(), name: fname, unit },
-                );
-                fields.push(field.index());
+                fields.push(FieldRec {
+                    device: dev.id(),
+                    index: field.index(),
+                    class: class.clone(),
+                    instance: instance.clone(),
+                    group: gname.clone(),
+                    name: field.name().unwrap_or_default(),
+                    unit: field.unit().unwrap_or_default(),
+                });
             }
-        }
-        if !fields.is_empty() {
-            subs.push(bus.subscribe(dev.id(), fields, RATE, false));
         }
     }
 
+    // Load / auto-fill / rewrite the mapping file (if configured).
+    let mut mapping = mapping_path.map(load_mapping).unwrap_or_default();
+    if let Some(path) = mapping_path {
+        use std::collections::btree_map::Entry;
+        let mut added = false;
+        for (instance, groups) in &groups_by_instance {
+            // Menu-level toggle defaults off.
+            if let Entry::Vacant(e) = mapping.entry(format!("{instance}.{MENU}")) {
+                e.insert(false);
+                added = true;
+            }
+            // The battery cluster group defaults on.
+            if groups.contains("cluster") {
+                if let Entry::Vacant(e) = mapping.entry(format!("{instance}.{MENU}.cluster")) {
+                    e.insert(true);
+                    added = true;
+                }
+            }
+        }
+        if added || !path.exists() {
+            if let Err(e) = save_mapping(path, &mapping, &groups_by_instance) {
+                eprintln!("masterbus-signalk: could not write {}: {e}", path.display());
+            }
+        }
+    }
+
+    // Build the emit metadata + per-device subscription list for enabled fields.
+    let gated = mapping_path.is_some();
+    let mut meta: HashMap<(u32, i32), FieldMeta> = HashMap::new();
+    let mut per_device: HashMap<u32, Vec<i32>> = HashMap::new();
+    for f in &fields {
+        let on = !gated || enabled(&mapping, &f.instance, MENU, &f.group);
+        if on {
+            meta.insert(
+                (f.device, f.index),
+                FieldMeta { class: f.class.clone(), instance: f.instance.clone(), name: f.name.clone(), unit: f.unit.clone() },
+            );
+            per_device.entry(f.device).or_default().push(f.index);
+        }
+    }
+    let mut subs = Vec::new();
+    for (device, indices) in per_device {
+        subs.push(bus.subscribe(device, indices, RATE, false));
+    }
+
     eprintln!(
-        "masterbus-signalk: streaming {} fields from {} device(s)",
+        "masterbus-signalk: streaming {} of {} fields from {} device(s){}",
         meta.len(),
-        devices.len()
+        fields.len(),
+        devices.len(),
+        if gated { " (mapping-gated)" } else { "" },
     );
 
     loop {

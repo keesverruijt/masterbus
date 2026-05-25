@@ -63,10 +63,11 @@
 //! - **Schema** is discovered **lazily per menu** ([`Menu::Monitoring`],
 //!   [`Menu::Configuration`], [`Menu::Service`]): [`Device::tab`] discovers just
 //!   that menu, while [`Device::groups`]/[`Device::schema`] discover all of them.
-//! - Identical devices (matched by `article + firmware`) are discovered once and
-//!   reused, and an optional on-disk cache ([`Config::cache_path`]) persists
-//!   schemas across runs, so a long-running daemon discovers each device type
-//!   once, ever.
+//! - An optional on-disk cache ([`Config::cache_path`]) persists each device's
+//!   schema across runs (keyed per device, by serial), so a long-running daemon
+//!   discovers a device once and loads it from cache thereafter. Schemas are
+//!   cached per device rather than shared by article/firmware, since same-model
+//!   devices can differ (e.g. one battery in a cluster exposes an extra group).
 //!
 //! All bus access is serialized on a single scheduler thread and paced to a bus
 //! budget, so the crate coexists with the boat's real Mastervolt masters.

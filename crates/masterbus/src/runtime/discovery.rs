@@ -1,8 +1,8 @@
 //! Lazy, single-threaded device discovery (runs on the scheduler thread).
 //!
 //! Identity (firmware + strings) is always fetched (cheap). The expensive group/
-//! field/shadow enumeration is keyed by `article + firmware` and may be loaded
-//! from / persisted to the optional on-disk cache.
+//! field/shadow enumeration is cached **per device** (keyed by serial) and may be
+//! loaded from / persisted to the optional on-disk cache.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -162,18 +162,22 @@ fn menu_range(disc: &mut Disc, addr: u32, menu: Menu) -> (u32, u32) {
     }
 }
 
-/// Discover just one menu's groups: per-menu disk cache, else enumerate live.
-/// (In-session reuse across identical devices is handled by the scheduler.)
+/// Discover just one menu's groups: per-device disk cache, else enumerate live.
+///
+/// The cache is keyed by **serial** (per device), not article+firmware: devices
+/// that share an article/firmware can still have different schemas — e.g. one
+/// battery in a cluster exposes an extra "Cluster" group the others don't — so
+/// sharing a schema across them would hide those differences.
 pub(super) fn discover_menu(
     disc: &mut Disc,
     addr: u32,
     id: &DeviceIdentity,
     menu: Menu,
 ) -> Vec<GroupInfo> {
-    load_cached_menu(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware, menu).unwrap_or_else(
+    load_cached_menu(disc.cfg.cache_path.as_deref(), &id.serial, &id.firmware, menu).unwrap_or_else(
         || {
             let g = enumerate_menu(disc, addr, menu);
-            store_cached_menu(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware, menu, &g);
+            store_cached_menu(disc.cfg.cache_path.as_deref(), &id.serial, &id.firmware, menu, &g);
             g
         },
     )
@@ -284,10 +288,10 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
     }
 }
 
-// ── disk cache (groups keyed by article+firmware+menu) ───────────────────────
+// ── disk cache (groups keyed by serial+firmware+menu, i.e. per device) ────────
 
-fn cache_file(dir: &Path, article: &str, firmware: &str, menu: Menu) -> std::path::PathBuf {
-    let key = format!("{}-{}-{:02x}", article, firmware, menu.selector());
+fn cache_file(dir: &Path, serial: &str, firmware: &str, menu: Menu) -> std::path::PathBuf {
+    let key = format!("{}-{}-{:02x}", serial, firmware, menu.selector());
     let safe: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
@@ -297,25 +301,25 @@ fn cache_file(dir: &Path, article: &str, firmware: &str, menu: Menu) -> std::pat
 
 fn load_cached_menu(
     dir: Option<&Path>,
-    article: &str,
+    serial: &str,
     firmware: &str,
     menu: Menu,
 ) -> Option<Vec<GroupInfo>> {
     let dir = dir?;
-    if article.is_empty() {
+    if serial.is_empty() {
         return None;
     }
-    let data = std::fs::read(cache_file(dir, article, firmware, menu)).ok()?;
+    let data = std::fs::read(cache_file(dir, serial, firmware, menu)).ok()?;
     serde_json::from_slice(&data).ok()
 }
 
-fn store_cached_menu(dir: Option<&Path>, article: &str, firmware: &str, menu: Menu, groups: &[GroupInfo]) {
+fn store_cached_menu(dir: Option<&Path>, serial: &str, firmware: &str, menu: Menu, groups: &[GroupInfo]) {
     let Some(dir) = dir else { return };
-    if article.is_empty() {
+    if serial.is_empty() {
         return;
     }
     let _ = std::fs::create_dir_all(dir);
     if let Ok(json) = serde_json::to_vec_pretty(groups) {
-        let _ = std::fs::write(cache_file(dir, article, firmware, menu), json);
+        let _ = std::fs::write(cache_file(dir, serial, firmware, menu), json);
     }
 }

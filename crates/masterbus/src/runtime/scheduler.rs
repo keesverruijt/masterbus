@@ -129,13 +129,10 @@ impl Sched {
             return;
         }
         let id = self.ensure_identity(addr);
-        // Reuse an identical device's groups for this menu (same article+firmware)
-        // if one was already discovered this session — avoids re-enumerating, e.g.,
-        // each of four matching batteries. Falls back to disk cache / live.
-        let groups = self
-            .state
-            .menu_groups_by_key(&id.article, &id.firmware, menu)
-            .unwrap_or_else(|| self.with_disc(|disc| discover_menu(disc, addr, &id, menu)));
+        // Discover this device's own menu (per-device disk cache inside). We do
+        // not reuse another same-article device's schema: devices that share an
+        // article can differ (e.g. the cluster master battery has an extra group).
+        let groups = self.with_disc(|disc| discover_menu(disc, addr, &id, menu));
         self.last_send = Instant::now();
         self.state.put_menu(addr, menu, groups);
     }

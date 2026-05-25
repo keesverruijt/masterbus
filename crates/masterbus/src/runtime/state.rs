@@ -177,28 +177,6 @@ impl State {
         self.devices.lock().unwrap().get(&addr).and_then(|e| e.schema.clone())
     }
 
-    /// Find one menu's groups from an already-discovered device with the same
-    /// identity key (`article + firmware`). Lets identical devices discover each
-    /// menu once and reuse it.
-    pub fn menu_groups_by_key(
-        &self,
-        article: &str,
-        firmware: &str,
-        menu: Menu,
-    ) -> Option<Vec<GroupInfo>> {
-        if article.is_empty() {
-            return None;
-        }
-        let map = self.devices.lock().unwrap();
-        map.values().find_map(|e| {
-            let s = e.schema.as_ref()?;
-            if s.article == article && s.firmware == firmware && e.menus.contains(&menu) {
-                Some(s.groups.iter().filter(|g| g.menu == menu).cloned().collect())
-            } else {
-                None
-            }
-        })
-    }
 
     /// Device ids currently considered alive (seen within `liveness`).
     pub fn alive_ids(&self, liveness: std::time::Duration) -> Vec<u32> {

@@ -38,9 +38,9 @@ This repository is the fruit of that work.
 
 - **Fast init**: `connect()` returns as soon as the bus is usable and one device
   is heard — no multi-second enumeration wait, so one-shot tools stay snappy.
-- **Lazy, per-menu discovery** with an optional on-disk schema cache (keyed by
-  article + firmware) — only what you look at is discovered, identical devices
-  are discovered once, and long-running programs discover once ever.
+- **Lazy, per-menu discovery** with an optional on-disk schema cache (per device,
+  keyed by serial) — only the menus you look at are discovered, and long-running
+  programs discover each device once and load from cache thereafter.
 - **Live values without polling storms**: a passive value cache fed by bus
   traffic, plus rate-based subscriptions that actively poll only what's needed.
 - **Two API surfaces over one core**: a blocking navigator API for simple

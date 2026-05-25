@@ -163,11 +163,6 @@ impl DeviceSchema {
         }
     }
 
-    /// Disk-cache key: `article + firmware` identifies the schema.
-    pub fn cache_key(article: &str, firmware: &str) -> String {
-        format!("{}-{}", article, firmware)
-    }
-
     /// Find a field anywhere in the schema by its global index.
     pub fn field(&self, index: i32) -> Option<&FieldInfo> {
         self.groups.iter().find_map(|g| g.field(index))
