@@ -106,6 +106,22 @@ impl GroupInfo {
     }
 }
 
+/// A device's identity — the cheap half of discovery (no group/field/shadow
+/// enumeration). Enough to label a device and key its schema cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    /// Article number.
+    pub article: String,
+    /// Serial number.
+    pub serial: String,
+    /// Revision code.
+    pub revision: String,
+    /// Human-readable device name.
+    pub name: String,
+    /// Firmware version string.
+    pub firmware: String,
+}
+
 /// The discovered, cacheable schema of a device (static per firmware).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceSchema {
@@ -124,6 +140,29 @@ pub struct DeviceSchema {
 }
 
 impl DeviceSchema {
+    /// Build a full schema from a fetched identity and enumerated groups.
+    pub fn from_identity(identity: DeviceIdentity, groups: Vec<GroupInfo>) -> DeviceSchema {
+        DeviceSchema {
+            article: identity.article,
+            serial: identity.serial,
+            revision: identity.revision,
+            name: identity.name,
+            firmware: identity.firmware,
+            groups,
+        }
+    }
+
+    /// The identity portion of this schema.
+    pub fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity {
+            article: self.article.clone(),
+            serial: self.serial.clone(),
+            revision: self.revision.clone(),
+            name: self.name.clone(),
+            firmware: self.firmware.clone(),
+        }
+    }
+
     /// Disk-cache key: `article + firmware` identifies the schema.
     pub fn cache_key(article: &str, firmware: &str) -> String {
         format!("{}-{}", article, firmware)

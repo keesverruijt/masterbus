@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::model::{DeviceSchema, DeviceStatus};
+use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus};
 use crate::value::Value;
 
 /// A cached field value with its observation time and a dirty flag.
@@ -28,6 +28,8 @@ pub struct DeviceEntry {
     pub type_code: u8,
     /// Basic firmware hint from the broadcast (u16 LE).
     pub fw_hint: u16,
+    /// Identity (cheap discovery), once available.
+    pub identity: Option<DeviceIdentity>,
     /// Full discovered schema, once available.
     pub schema: Option<DeviceSchema>,
     /// Latest value per field index.
@@ -41,6 +43,7 @@ impl DeviceEntry {
             last_seen: now,
             type_code: 0,
             fw_hint: 0,
+            identity: None,
             schema: None,
             values: HashMap::new(),
         }
@@ -98,11 +101,37 @@ impl State {
         self.devices.lock().unwrap().get(&addr).and_then(|e| e.values.get(&field).cloned())
     }
 
-    /// Store a discovered schema for a device.
+    /// Store a device's identity (cheap discovery result).
+    pub fn put_identity(&self, addr: u32, identity: DeviceIdentity) {
+        let now = Instant::now();
+        let mut map = self.devices.lock().unwrap();
+        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        e.identity = Some(identity);
+    }
+
+    /// Whether a device's identity is known (directly or via a full schema).
+    pub fn has_identity(&self, addr: u32) -> bool {
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .map(|e| e.identity.is_some() || e.schema.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Clone a device's identity if known (preferring the full schema).
+    pub fn identity(&self, addr: u32) -> Option<DeviceIdentity> {
+        let map = self.devices.lock().unwrap();
+        let e = map.get(&addr)?;
+        e.schema.as_ref().map(|s| s.identity()).or_else(|| e.identity.clone())
+    }
+
+    /// Store a discovered schema for a device (also satisfies identity).
     pub fn put_schema(&self, addr: u32, schema: DeviceSchema) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
         let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        e.identity = Some(schema.identity());
         e.schema = Some(schema);
     }
 

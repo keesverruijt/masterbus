@@ -7,7 +7,7 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 
 use crate::error::{Error, Result};
-use crate::model::{DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
+use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
 use crate::runtime::{Config, DeviceEvent, Engine, ValueUpdate};
 use crate::protocol::VisualizationType;
 use crate::transport::Transport;
@@ -101,25 +101,30 @@ impl Device {
         self.engine.state.schema(self.id).ok_or(Error::NotReady)
     }
 
-    /// Article number.
+    /// Fetch (cheaply — identity only, no group enumeration) the device identity.
+    pub fn identity(&self) -> Result<DeviceIdentity> {
+        self.engine.identity(self.id)
+    }
+
+    /// Article number (identity-only discovery).
     pub fn article_number(&self) -> Result<String> {
-        Ok(self.schema()?.article)
+        Ok(self.identity()?.article)
     }
-    /// Serial number.
+    /// Serial number (identity-only discovery).
     pub fn serial_number(&self) -> Result<String> {
-        Ok(self.schema()?.serial)
+        Ok(self.identity()?.serial)
     }
-    /// Revision code.
+    /// Revision code (identity-only discovery).
     pub fn revision_code(&self) -> Result<String> {
-        Ok(self.schema()?.revision)
+        Ok(self.identity()?.revision)
     }
-    /// Human-readable name.
+    /// Human-readable name (identity-only discovery).
     pub fn name(&self) -> Result<String> {
-        Ok(self.schema()?.name)
+        Ok(self.identity()?.name)
     }
-    /// Firmware version.
+    /// Firmware version (identity-only discovery).
     pub fn firmware_version(&self) -> Result<String> {
-        Ok(self.schema()?.firmware)
+        Ok(self.identity()?.firmware)
     }
 
     /// Liveness-derived status.

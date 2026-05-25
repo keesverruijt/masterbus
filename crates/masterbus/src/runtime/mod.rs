@@ -86,6 +86,7 @@ pub(crate) struct SubSpec {
 
 /// Commands sent from the API to the scheduler thread.
 pub(crate) enum Command {
+    Identify { addr: u32, reply: Sender<Result<()>> },
     Discover { addr: u32, reply: Sender<Result<()>> },
     Read { addr: u32, field: i32, max_age: Duration, reply: Sender<Result<Value>> },
     Write { addr: u32, field: i32, value: WriteValue, reply: Sender<Result<Value>> },
@@ -152,6 +153,20 @@ impl Engine {
         let (tx, rx) = bounded::<T>(1);
         self.cmd_tx.send(make(tx)).map_err(|_| Error::Connection("engine stopped".into()))?;
         rx.recv().map_err(|_| Error::Connection("engine stopped".into()))
+    }
+
+    /// Ensure a device's identity is known (cheap discovery; blocks until ready).
+    pub fn ensure_identity(&self, addr: u32) -> Result<()> {
+        if self.state.has_identity(addr) {
+            return Ok(());
+        }
+        self.call(|reply| Command::Identify { addr, reply })?
+    }
+
+    /// Fetch (cheaply, identity-only) a device's identity.
+    pub fn identity(&self, addr: u32) -> Result<crate::model::DeviceIdentity> {
+        self.ensure_identity(addr)?;
+        self.state.identity(addr).ok_or(Error::NotReady)
     }
 
     /// Ensure a device's schema is discovered (blocks until ready or timeout).

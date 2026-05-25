@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
-use super::discovery::{discover, Disc};
+use super::discovery::{discover_groups, fetch_identity, Disc};
+use crate::model::{DeviceIdentity, DeviceSchema};
 use super::reader::value_key;
 use super::state::State;
 use super::waiter::Waiter;
@@ -58,6 +59,10 @@ impl Sched {
         while !shutdown.load(Ordering::Relaxed) {
             let timeout = self.next_due_in(&subs).unwrap_or(Duration::from_millis(200));
             match cmd_rx.recv_timeout(timeout) {
+                Ok(Command::Identify { addr, reply }) => {
+                    self.do_identify(addr);
+                    let _ = reply.send(Ok(()));
+                }
                 Ok(Command::Discover { addr, reply }) => {
                     self.do_discover(addr);
                     let _ = reply.send(Ok(()));
@@ -95,18 +100,41 @@ impl Sched {
         let _ = self.tx.send(frame.0, &frame.1);
     }
 
+    /// Fetch (and cache) just a device's identity — the cheap half of discovery.
+    fn do_identify(&mut self, addr: u32) {
+        if self.state.has_identity(addr) {
+            return;
+        }
+        let id = self.with_disc(|disc| fetch_identity(disc, addr));
+        self.state.put_identity(addr, id);
+    }
+
+    /// Ensure the identity is known (reusing the cache), returning it.
+    fn ensure_identity(&mut self, addr: u32) -> DeviceIdentity {
+        if let Some(id) = self.state.identity(addr) {
+            return id;
+        }
+        let id = self.with_disc(|disc| fetch_identity(disc, addr));
+        self.state.put_identity(addr, id.clone());
+        id
+    }
+
     fn do_discover(&mut self, addr: u32) {
         if self.state.has_schema(addr) {
             return;
         }
-        let schema = {
-            let waiter = self.waiter.clone();
-            let cfg = self.config.clone();
-            let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg };
-            discover(&mut disc, addr)
-        };
+        let id = self.ensure_identity(addr);
+        let groups = self.with_disc(|disc| discover_groups(disc, addr, &id));
         self.last_send = Instant::now();
-        self.state.put_schema(addr, schema);
+        self.state.put_schema(addr, DeviceSchema::from_identity(id, groups));
+    }
+
+    /// Run a closure with a `Disc` bound to this scheduler's transport.
+    fn with_disc<T>(&mut self, f: impl FnOnce(&mut Disc) -> T) -> T {
+        let waiter = self.waiter.clone();
+        let cfg = self.config.clone();
+        let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg };
+        f(&mut disc)
     }
 
     fn viz_of(&mut self, addr: u32, field: i32) -> Result<VisualizationType> {

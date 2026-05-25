@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::waiter::Waiter;
 use super::Config;
-use crate::model::{DeviceSchema, FieldInfo, GroupInfo, Menu};
+use crate::model::{DeviceIdentity, DeviceSchema, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
     fw_req_raw, group_count_req_raw, prop_str_id_req_raw, schema_field_count_req_raw,
     schema_field_id_req_raw, schema_group_name_req_raw, shadow_meta_req_raw, shadow_option_req_raw,
@@ -104,10 +104,9 @@ impl Disc<'_> {
     }
 }
 
-/// Discover a device's full schema. `cache_path`, if set, is a directory for the
-/// `article+firmware`-keyed group cache.
-pub(super) fn discover(disc: &mut Disc, addr: u32) -> DeviceSchema {
-    // ── Identity (always fetched) ───────────────────────────────────────────
+/// Fetch a device's identity (firmware + property strings). This is the cheap
+/// half of discovery — no group/field/shadow enumeration.
+pub(super) fn fetch_identity(disc: &mut Disc, addr: u32) -> DeviceIdentity {
     let firmware = {
         let k0 = format!("p:{:06X}:82:00", addr);
         let k1 = format!("p:{:06X}:82:01", addr);
@@ -131,16 +130,26 @@ pub(super) fn discover(disc: &mut Disc, addr: u32) -> DeviceSchema {
             r
         }
     };
+    DeviceIdentity { article, serial, revision, name, firmware }
+}
 
-    // ── Groups: from disk cache (article+firmware) or full enumeration ───────
-    let groups = load_cached_groups(disc.cfg.cache_path.as_deref(), &article, &firmware)
-        .unwrap_or_else(|| {
+/// Enumerate (or load from the `article+firmware` cache) a device's groups. The
+/// expensive half of discovery.
+pub(super) fn discover_groups(disc: &mut Disc, addr: u32, id: &DeviceIdentity) -> Vec<GroupInfo> {
+    load_cached_groups(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware).unwrap_or_else(
+        || {
             let g = enumerate_groups(disc, addr);
-            store_cached_groups(disc.cfg.cache_path.as_deref(), &article, &firmware, &g);
+            store_cached_groups(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware, &g);
             g
-        });
+        },
+    )
+}
 
-    DeviceSchema { article, serial, revision, name, firmware, groups }
+/// Discover a device's full schema (identity + groups).
+pub(super) fn discover(disc: &mut Disc, addr: u32) -> DeviceSchema {
+    let id = fetch_identity(disc, addr);
+    let groups = discover_groups(disc, addr, &id);
+    DeviceSchema::from_identity(id, groups)
 }
 
 fn enumerate_groups(disc: &mut Disc, addr: u32) -> Vec<GroupInfo> {
