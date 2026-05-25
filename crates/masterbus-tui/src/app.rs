@@ -1,6 +1,7 @@
 //! TUI application state and the logic that mutates it.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use masterbus::{
@@ -9,6 +10,9 @@ use masterbus::{
 
 /// Live-poll rate for the selected device's monitoring fields.
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// Device id → name, shared with the background name-backfill thread.
+pub type Names = Arc<Mutex<HashMap<u32, String>>>;
 
 /// A line in the field pane: either a group header or a field.
 pub enum Row {
@@ -40,7 +44,7 @@ pub enum EditKind {
 pub struct App {
     pub bus: MasterBus,
     pub device_ids: Vec<u32>,
-    pub names: HashMap<u32, String>,
+    pub names: Names,
     pub dev_sel: usize,
     pub focus: Focus,
     pub cur_device: Option<u32>,
@@ -54,12 +58,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(bus: MasterBus) -> App {
-        let device_ids: Vec<u32> = bus.devices_all().iter().map(|d| d.id()).collect();
+    /// Construct without blocking: seed from whatever devices have been heard so
+    /// far; the rest arrive via `note_alive`, and names via the backfill thread.
+    pub fn new(bus: MasterBus, names: Names) -> App {
+        let device_ids: Vec<u32> = bus.devices().iter().map(|d| d.id()).collect();
         App {
             bus,
             device_ids,
-            names: HashMap::new(),
+            names,
             dev_sel: 0,
             focus: Focus::Devices,
             cur_device: None,
@@ -68,7 +74,7 @@ impl App {
             values: HashMap::new(),
             sub: None,
             editor: None,
-            status: "↑/↓ select · Enter open · q quit".into(),
+            status: "scanning bus… ↑/↓ select · Enter open · q quit".into(),
             should_quit: false,
         }
     }
@@ -84,7 +90,7 @@ impl App {
     }
 
     pub fn device_label(&self, id: u32) -> String {
-        self.names.get(&id).cloned().unwrap_or_else(|| id.to_string())
+        self.names.lock().unwrap().get(&id).cloned().unwrap_or_else(|| id.to_string())
     }
 
     pub fn note_alive(&mut self, id: u32) {
@@ -112,7 +118,7 @@ impl App {
                 return;
             }
         };
-        self.names.insert(id, schema.name.clone());
+        self.names.lock().unwrap().insert(id, schema.name.clone());
         self.cur_device = Some(id);
         self.values.clear();
         self.build_rows(&schema);

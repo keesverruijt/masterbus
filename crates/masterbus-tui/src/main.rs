@@ -13,13 +13,16 @@
 mod app;
 mod ui;
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
-use app::{App, Focus};
-use masterbus::Config;
+use app::{App, Focus, Names};
+use masterbus::{Config, MasterBus};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -35,7 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(target_os = "linux")]
     {
-        let bus = masterbus::MasterBus::socketcan(&iface, config)?;
+        println!("masterbus-tui: connecting to {iface}…");
+        let bus = MasterBus::socketcan(&iface, config)?;
+        println!("connected; scanning the bus…");
         run_tui(bus)?;
     }
     #[cfg(not(target_os = "linux"))]
@@ -46,9 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_tui(bus: masterbus::MasterBus) -> std::io::Result<()> {
+fn run_tui(bus: MasterBus) -> std::io::Result<()> {
     let device_events = bus.device_events();
-    let mut app = App::new(bus);
+    let names: Names = Arc::new(Mutex::new(HashMap::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_name_backfill(bus.clone(), names.clone(), stop.clone());
+
+    let mut app = App::new(bus, names);
     let keys = spawn_key_reader();
 
     let mut terminal = ratatui::init();
@@ -69,8 +78,33 @@ fn run_tui(bus: masterbus::MasterBus) -> std::io::Result<()> {
             break Ok(());
         }
     };
+    stop.store(true, Ordering::Relaxed);
     ratatui::restore();
     result
+}
+
+/// Background thread: resolve device names (cheap identity discovery) as devices
+/// appear, so the device list fills in with names over the first seconds.
+fn spawn_name_backfill(bus: MasterBus, names: Names, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            for dev in bus.devices() {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let id = dev.id();
+                if names.lock().unwrap().contains_key(&id) {
+                    continue;
+                }
+                if let Ok(name) = dev.name() {
+                    if !name.is_empty() {
+                        names.lock().unwrap().insert(id, name);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    });
 }
 
 fn spawn_key_reader() -> Receiver<KeyEvent> {
