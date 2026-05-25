@@ -4,6 +4,7 @@ members = [
     "crates/masterbus",
     "crates/masterbus-ffi",
     "crates/masterbus-tui",
+    "crates/masterbus-signalk",
 ]
 
 [workspace.package]

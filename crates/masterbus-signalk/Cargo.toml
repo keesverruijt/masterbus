@@ -1,0 +1,19 @@
+[package]
+name = "masterbus-signalk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Signal K sidecar streaming Mastervolt MasterBus values as deltas"
+readme = "README.md"
+keywords = ["mastervolt", "signalk", "canbus", "marine"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[[bin]]
+name = "masterbus-signalk"
+path = "src/main.rs"
+
+[dependencies]
+masterbus.workspace = true
+serde_json.workspace = true

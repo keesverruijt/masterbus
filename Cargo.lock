@@ -707,6 +707,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "masterbus-signalk"
+version = "0.1.0"
+dependencies = [
+ "masterbus",
+ "serde_json",
+]
+
+[[package]]
 name = "masterbus-tui"
 version = "0.1.0"
 dependencies = [

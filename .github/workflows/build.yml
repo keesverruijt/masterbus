@@ -69,6 +69,7 @@ jobs:
           dist="masterbus-${{ matrix.target }}"
           mkdir -p "$dist"
           cp "target/${{ matrix.target }}/release/masterbus-tui" "$dist/"
+          cp "target/${{ matrix.target }}/release/masterbus-signalk" "$dist/"
           cp "target/${{ matrix.target }}/release/libmasterbus_ffi.so" "$dist/"
           cp "target/${{ matrix.target }}/release/libmasterbus_ffi.a" "$dist/"
           cp crates/masterbus-ffi/include/masterbus.h "$dist/"
