@@ -34,7 +34,9 @@ pub struct Config {
     pub discovery_timeout: Duration,
     /// Discovery attempts before giving up on a query.
     pub discovery_retries: usize,
-    /// How long `connect` waits to hear the first device.
+    /// How long `connect` waits to hear the first device before giving up.
+    /// `connect` returns as soon as one broadcast is heard, so a generous value
+    /// only helps on a quiet or noisy bus; it never slows a healthy one.
     pub connect_timeout: Duration,
     /// Optional on-disk schema cache directory (memory-only if `None`).
     pub cache_path: Option<PathBuf>,
@@ -48,7 +50,7 @@ impl Default for Config {
             min_send_interval: Duration::from_millis(3),
             discovery_timeout: Duration::from_millis(150),
             discovery_retries: 3,
-            connect_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(15),
             cache_path: None,
         }
     }
