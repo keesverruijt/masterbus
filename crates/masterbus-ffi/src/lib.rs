@@ -12,6 +12,11 @@
 //!   matching `mb_free_*` function.
 //! - `NULL` is returned on any error (unknown device/field, not ready, etc.).
 
+// This crate is an inherently-unsafe C boundary: every entry point dereferences
+// pointers supplied by the C caller. The contract is documented above rather
+// than encoded as `unsafe fn` (which would not change the generated C ABI).
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
