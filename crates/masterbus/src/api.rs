@@ -222,7 +222,10 @@ pub struct Field {
 }
 
 impl Field {
-    fn info(&self) -> Result<FieldInfo> {
+    /// The field's full schema entry (name, unit, viz type, writeable flag,
+    /// numeric bounds, and list/enum option labels). Pairs with [`value`](Self::value)
+    /// so a caller can resolve a list value's index to its label.
+    pub fn info(&self) -> Result<FieldInfo> {
         self.engine.ensure_field(self.device, self.index)?;
         self.engine
             .state

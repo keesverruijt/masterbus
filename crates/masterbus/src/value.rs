@@ -40,6 +40,40 @@ pub enum Value {
     Invalid,
 }
 
+impl Value {
+    /// Attach option labels (from the field's schema) to a list/enum value, so a
+    /// caller gets both the numeric index and its meaning. A no-op for other
+    /// value kinds.
+    pub fn with_options(self, options: &[String]) -> Value {
+        match self {
+            Value::List { index, .. } => Value::List { index, options: options.to_vec() },
+            Value::Eventable { index, .. } => Value::Eventable { index, labels: options.to_vec() },
+            other => other,
+        }
+    }
+
+    /// The numeric selection index of a list/enum value, if applicable.
+    pub fn index(&self) -> Option<i32> {
+        match self {
+            Value::List { index, .. }
+            | Value::DeviceRef { index, .. }
+            | Value::Eventable { index, .. } => Some(*index),
+            _ => None,
+        }
+    }
+
+    /// The human-readable label of a list/enum selection, if the option strings
+    /// are known. Pairs with [`index`](Self::index) to get "both the number and
+    /// the explanation".
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Value::List { index, options } => options.get(*index as usize).map(String::as_str),
+            Value::Eventable { index, labels } => labels.get(*index as usize).map(String::as_str),
+            _ => None,
+        }
+    }
+}
+
 /// Calendar date (C-compatible layout for the FFI crate).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +98,25 @@ pub struct Time {
     pub hour: i32,
     /// Whole days.
     pub days: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_carries_index_and_label() {
+        let opts = vec!["Off".to_string(), "On".to_string(), "Auto".to_string()];
+        let v = Value::List { index: 2, options: vec![] }.with_options(&opts);
+        assert_eq!(v.index(), Some(2));
+        assert_eq!(v.label(), Some("Auto"));
+    }
+
+    #[test]
+    fn label_none_for_non_list() {
+        assert_eq!(Value::Float(1.0).label(), None);
+        assert_eq!(Value::Float(1.0).index(), None);
+    }
 }
 
 /// A write request, dispatched by [`crate`] from a typed [`Value`].

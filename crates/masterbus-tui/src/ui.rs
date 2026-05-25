@@ -102,7 +102,11 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                 Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow),
             )),
             Row::Field(field) => {
-                let val = app.values.get(&field.index).map(format_value).unwrap_or_else(|| "…".into());
+                let val = app
+                    .values
+                    .get(&field.index)
+                    .map(|v| format_value_for(v, &field.options))
+                    .unwrap_or_else(|| "…".into());
                 // Cap to the column width so a long value (e.g. a "0d HH:MM:SS"
                 // time) can't push the unit / rw column out of alignment.
                 let val = truncate(&val, VALUE_COL);
@@ -166,6 +170,20 @@ fn status_style(status: DeviceStatus) -> (&'static str, Color) {
         S::Updating => ("⟳", Color::Magenta),
         S::Offline => ("○", Color::DarkGray),
         S::Unknown => ("?", Color::DarkGray),
+    }
+}
+
+/// Format a value, resolving a list/enum index to its label using the value's
+/// own option strings if present, else the field's schema options.
+fn format_value_for(v: &Value, schema_opts: &[String]) -> String {
+    let label = |index: i32, value_opts: &[String]| -> String {
+        let src = if value_opts.is_empty() { schema_opts } else { value_opts };
+        src.get(index as usize).cloned().unwrap_or_else(|| format!("[{index}]"))
+    };
+    match v {
+        Value::List { index, options } => label(*index, options),
+        Value::Eventable { index, labels } => label(*index, labels),
+        _ => format_value(v),
     }
 }
 

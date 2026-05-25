@@ -198,7 +198,12 @@ impl Sched {
         self.send(monitoring_req_raw(addr, field as u8, TAB_DEFAULT));
         match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
             Some(raw) => {
-                let v = decode_value(&raw, viz);
+                let opts = self
+                    .state
+                    .schema(addr)
+                    .and_then(|s| s.field(field).map(|f| f.options.clone()))
+                    .unwrap_or_default();
+                let v = decode_value(&raw, viz).with_options(&opts);
                 self.state.put_value(addr, field, v.clone());
                 Ok(v)
             }

@@ -17,6 +17,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery. Edit flags while the service is stopped.
 - `Device::identity()` / `Device::tab_info()` and `DeviceIdentity` for cheap,
   per-menu access without full discovery.
+- List/enum values now carry their **option labels**: the engine fills a list
+  field's `Value` with the schema's option strings, and `Value::index()` /
+  `Value::label()` return the numeric selection and its meaning. `Field::info()`
+  is public so callers can also get the full `FieldInfo` (options, bounds, …).
 - **Bus-master heartbeat**: with `Config::heartbeat_master` set (signalk:
   `HEARTBEAT_MASTER=<hex>`), the scheduler periodically emits a class-`0x05`
   heartbeat so devices announce (class `0x04`) and stay responsive — needed to

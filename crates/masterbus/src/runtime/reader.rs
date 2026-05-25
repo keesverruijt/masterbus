@@ -87,7 +87,9 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             if let Some(schema) = state.schema(device_addr)
                 && let Some(f) = schema.field(field_index as i32)
             {
-                let v = decode_value(&raw, f.viz_type);
+                // Carry the schema's option labels so callers get both the
+                // numeric index and its meaning.
+                let v = decode_value(&raw, f.viz_type).with_options(&f.options);
                 state.put_value(device_addr, field_index as i32, v);
             }
         }
