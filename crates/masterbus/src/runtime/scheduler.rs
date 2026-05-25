@@ -182,10 +182,11 @@ impl Sched {
     }
 
     fn do_read(&mut self, addr: u32, field: i32, max_age: Duration) -> Result<Value> {
-        if let Some(cv) = self.state.get_value(addr, field) {
-            if !cv.outdated && cv.at.elapsed() <= max_age {
-                return Ok(cv.value);
-            }
+        if let Some(cv) = self.state.get_value(addr, field)
+            && !cv.outdated
+            && cv.at.elapsed() <= max_age
+        {
+            return Ok(cv.value);
         }
         let viz = self.viz_of(addr, field)?;
         self.poll_value(addr, field, viz)

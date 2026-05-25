@@ -209,10 +209,10 @@ fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<Grou
     let mut field_ids: Vec<i32> = Vec::new();
     for idx in 0..field_count {
         let key = format!("schema:{:06X}:03:{}:{}", addr, g, idx as u8);
-        if let Some(r) = disc.req_std(&key, schema_field_id_req_raw(addr, g, idx as u8)) {
-            if r.len() >= 6 {
-                field_ids.push(u16::from_le_bytes([r[4], r[5]]) as i32);
-            }
+        if let Some(r) = disc.req_std(&key, schema_field_id_req_raw(addr, g, idx as u8))
+            && r.len() >= 6
+        {
+            field_ids.push(u16::from_le_bytes([r[4], r[5]]) as i32);
         }
     }
 

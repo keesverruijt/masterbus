@@ -84,11 +84,11 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             // Wake any pending on-demand read/poll for this field.
             waiter.deliver(&value_key(device_addr, field_index as i32), raw.clone());
             // Cache the decoded value if we know the field's type.
-            if let Some(schema) = state.schema(device_addr) {
-                if let Some(f) = schema.field(field_index as i32) {
-                    let v = decode_value(&raw, f.viz_type);
-                    state.put_value(device_addr, field_index as i32, v);
-                }
+            if let Some(schema) = state.schema(device_addr)
+                && let Some(f) = schema.field(field_index as i32)
+            {
+                let v = decode_value(&raw, f.viz_type);
+                state.put_value(device_addr, field_index as i32, v);
             }
         }
         _ => {}

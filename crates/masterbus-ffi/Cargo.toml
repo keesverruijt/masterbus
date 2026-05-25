@@ -13,4 +13,4 @@ crate-type = ["cdylib", "staticlib"]
 masterbus.workspace = true
 
 [build-dependencies]
-cbindgen = { version = "0.27", default-features = false }
+cbindgen = { version = "0.29", default-features = false }

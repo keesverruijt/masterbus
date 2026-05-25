@@ -98,10 +98,10 @@ fn spawn_name_backfill(bus: MasterBus, names: Names, stop: Arc<AtomicBool>) {
                 if names.lock().unwrap().contains_key(&id) {
                     continue;
                 }
-                if let Ok(name) = dev.name() {
-                    if !name.is_empty() {
-                        names.lock().unwrap().insert(id, name);
-                    }
+                if let Ok(name) = dev.name()
+                    && !name.is_empty()
+                {
+                    names.lock().unwrap().insert(id, name);
                 }
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -114,10 +114,11 @@ fn spawn_key_reader() -> Receiver<KeyEvent> {
     std::thread::spawn(move || loop {
         match event::poll(Duration::from_millis(200)) {
             Ok(true) => {
-                if let Ok(Event::Key(k)) = event::read() {
-                    if k.kind == KeyEventKind::Press && tx.send(k).is_err() {
-                        break;
-                    }
+                if let Ok(Event::Key(k)) = event::read()
+                    && k.kind == KeyEventKind::Press
+                    && tx.send(k).is_err()
+                {
+                    break;
                 }
             }
             Ok(false) => {}

@@ -93,10 +93,10 @@ impl State {
 
     /// Mark a field's cached value outdated (e.g. after a write).
     pub fn mark_outdated(&self, addr: u32, field: i32) {
-        if let Some(e) = self.devices.lock().unwrap().get_mut(&addr) {
-            if let Some(v) = e.values.get_mut(&field) {
-                v.outdated = true;
-            }
+        if let Some(e) = self.devices.lock().unwrap().get_mut(&addr)
+            && let Some(v) = e.values.get_mut(&field)
+        {
+            v.outdated = true;
         }
     }
 

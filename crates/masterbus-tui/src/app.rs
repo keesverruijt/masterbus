@@ -397,10 +397,10 @@ impl App {
     }
 
     pub fn editor_char(&mut self, c: char) {
-        if let Some(Editor { kind: EditKind::Number(buf), .. }) = &mut self.editor {
-            if c.is_ascii_digit() || c == '.' || c == '-' {
-                buf.push(c);
-            }
+        if let Some(Editor { kind: EditKind::Number(buf), .. }) = &mut self.editor
+            && (c.is_ascii_digit() || c == '.' || c == '-')
+        {
+            buf.push(c);
         }
     }
 

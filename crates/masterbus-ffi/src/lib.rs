@@ -124,7 +124,7 @@ fn alloc_slice<T>(v: Vec<T>) -> (*mut T, i32) {
 /// Open a SocketCAN connection (Linux only; returns NULL elsewhere).
 ///
 /// `cache_dir` may be NULL (memory-only) or a directory for the schema cache.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_open_socketcan(
     iface: *const c_char,
     cache_dir: *const c_char,
@@ -151,7 +151,7 @@ pub extern "C" fn mb_open_socketcan(
 }
 
 /// Close and free a bus handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_close(bus: *mut MbBus) {
     if !bus.is_null() {
         drop(unsafe { Box::from_raw(bus) });
@@ -163,7 +163,7 @@ pub extern "C" fn mb_close(bus: *mut MbBus) {
 /// Fill `*out_ids` with the ids of every device on the bus and return the count
 /// (waits up to ~2 s for the broadcast list to fill). Returns -1 on error.
 /// Free the array with [`mb_free_ids`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_devices(bus: *mut MbBus, out_ids: *mut *mut u32) -> i32 {
     let Some(bus) = bus_ref(bus) else { return -1 };
     if out_ids.is_null() {
@@ -176,7 +176,7 @@ pub extern "C" fn mb_devices(bus: *mut MbBus, out_ids: *mut *mut u32) -> i32 {
 }
 
 /// Free an id array returned by [`mb_devices`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_free_ids(ids: *mut u32, len: i32) {
     if !ids.is_null() && len > 0 {
         let s = ptr::slice_from_raw_parts_mut(ids, len as usize);
@@ -185,7 +185,7 @@ pub extern "C" fn mb_free_ids(ids: *mut u32, len: i32) {
 }
 
 /// Device product name (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_device_name(bus: *mut MbBus, id: u32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).name().ok()) {
         Some(s) => to_cstr(s),
@@ -194,7 +194,7 @@ pub extern "C" fn mb_device_name(bus: *mut MbBus, id: u32) -> *mut c_char {
 }
 
 /// Device article number (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_device_article(bus: *mut MbBus, id: u32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).article_number().ok()) {
         Some(s) => to_cstr(s),
@@ -203,7 +203,7 @@ pub extern "C" fn mb_device_article(bus: *mut MbBus, id: u32) -> *mut c_char {
 }
 
 /// Device serial number (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_device_serial(bus: *mut MbBus, id: u32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).serial_number().ok()) {
         Some(s) => to_cstr(s),
@@ -212,7 +212,7 @@ pub extern "C" fn mb_device_serial(bus: *mut MbBus, id: u32) -> *mut c_char {
 }
 
 /// Device revision code (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_device_revision(bus: *mut MbBus, id: u32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).revision_code().ok()) {
         Some(s) => to_cstr(s),
@@ -221,7 +221,7 @@ pub extern "C" fn mb_device_revision(bus: *mut MbBus, id: u32) -> *mut c_char {
 }
 
 /// Device firmware version (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_device_firmware(bus: *mut MbBus, id: u32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).firmware_version().ok()) {
         Some(s) => to_cstr(s),
@@ -230,7 +230,7 @@ pub extern "C" fn mb_device_firmware(bus: *mut MbBus, id: u32) -> *mut c_char {
 }
 
 /// Device operational status.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_device_status(bus: *mut MbBus, id: u32) -> MbStatus {
     use masterbus::DeviceStatus as S;
     let Some(bus) = bus_ref(bus) else { return MbStatus::Unknown };
@@ -249,7 +249,7 @@ pub extern "C" fn mb_device_status(bus: *mut MbBus, id: u32) -> MbStatus {
 // ---- groups & fields (monitoring menu) ------------------------------------
 
 /// Number of monitoring groups on a device (-1 on error).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_group_count(bus: *mut MbBus, id: u32) -> i32 {
     match bus_ref(bus).and_then(|b| b.device(id).tab(Menu::Monitoring).ok()) {
         Some(groups) => groups.len() as i32,
@@ -258,7 +258,7 @@ pub extern "C" fn mb_group_count(bus: *mut MbBus, id: u32) -> i32 {
 }
 
 /// Name of the `group_index`-th monitoring group (NULL on error).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_group_name(bus: *mut MbBus, id: u32, group_index: i32) -> *mut c_char {
     let Some(bus) = bus_ref(bus) else { return ptr::null_mut() };
     let Ok(groups) = bus.device(id).tab(Menu::Monitoring) else {
@@ -272,7 +272,7 @@ pub extern "C" fn mb_group_name(bus: *mut MbBus, id: u32, group_index: i32) -> *
 
 /// Fill `*out_fields` with the field indices of the `group_index`-th monitoring
 /// group; returns the count (-1 on error). Free with [`mb_free_fields`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_group_fields(
     bus: *mut MbBus,
     id: u32,
@@ -297,7 +297,7 @@ pub extern "C" fn mb_group_fields(
 }
 
 /// Free a field-index array returned by [`mb_group_fields`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_free_fields(fields: *mut i32, len: i32) {
     if !fields.is_null() && len > 0 {
         let s = ptr::slice_from_raw_parts_mut(fields, len as usize);
@@ -306,7 +306,7 @@ pub extern "C" fn mb_free_fields(fields: *mut i32, len: i32) {
 }
 
 /// Field name (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_field_name(bus: *mut MbBus, id: u32, field: i32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).field(field).name().ok()) {
         Some(s) => to_cstr(s),
@@ -315,7 +315,7 @@ pub extern "C" fn mb_field_name(bus: *mut MbBus, id: u32, field: i32) -> *mut c_
 }
 
 /// Field unit, possibly empty (NULL on error). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_field_unit(bus: *mut MbBus, id: u32, field: i32) -> *mut c_char {
     match bus_ref(bus).and_then(|b| b.device(id).field(field).unit().ok()) {
         Some(s) => to_cstr(s),
@@ -324,7 +324,7 @@ pub extern "C" fn mb_field_unit(bus: *mut MbBus, id: u32, field: i32) -> *mut c_
 }
 
 /// Whether a field is currently writable (false on error).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_field_writable(bus: *mut MbBus, id: u32, field: i32) -> bool {
     bus_ref(bus)
         .and_then(|b| b.device(id).field(field).is_writable().ok())
@@ -334,7 +334,7 @@ pub extern "C" fn mb_field_writable(bus: *mut MbBus, id: u32, field: i32) -> boo
 // ---- reads & writes -------------------------------------------------------
 
 /// Read a field's current value (NULL on error). Free with [`mb_free_value`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_field_value(bus: *mut MbBus, id: u32, field: i32) -> *mut MbValue {
     match bus_ref(bus).and_then(|b| b.device(id).field(field).value().ok()) {
         Some(v) => alloc_value(v),
@@ -344,7 +344,7 @@ pub extern "C" fn mb_field_value(bus: *mut MbBus, id: u32, field: i32) -> *mut M
 
 /// Write a boolean and return the value observed afterwards (NULL on error /
 /// rejected write). Free with [`mb_free_value`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_set_bool(bus: *mut MbBus, id: u32, field: i32, value: bool) -> *mut MbValue {
     match bus_ref(bus).and_then(|b| b.device(id).field(field).set(Value::Boolean(value)).ok()) {
         Some(v) => alloc_value(v),
@@ -354,7 +354,7 @@ pub extern "C" fn mb_set_bool(bus: *mut MbBus, id: u32, field: i32, value: bool)
 
 /// Write a float and return the value observed afterwards (NULL on error /
 /// rejected write). Free with [`mb_free_value`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_set_float(bus: *mut MbBus, id: u32, field: i32, value: f32) -> *mut MbValue {
     match bus_ref(bus).and_then(|b| b.device(id).field(field).set(Value::Float(value)).ok()) {
         Some(v) => alloc_value(v),
@@ -365,7 +365,7 @@ pub extern "C" fn mb_set_float(bus: *mut MbBus, id: u32, field: i32, value: f32)
 // ---- value accessors ------------------------------------------------------
 
 /// Discriminant of a value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_type(v: *const MbValue) -> MbValueType {
     match value_ref(v) {
         Some(Value::Float(_)) => MbValueType::Float,
@@ -381,7 +381,7 @@ pub extern "C" fn mb_value_type(v: *const MbValue) -> MbValueType {
 }
 
 /// Float payload (0.0 if not a float).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_float(v: *const MbValue) -> f32 {
     match value_ref(v) {
         Some(Value::Float(f)) => *f,
@@ -390,13 +390,13 @@ pub extern "C" fn mb_value_float(v: *const MbValue) -> f32 {
 }
 
 /// Boolean payload (false if not a boolean).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_bool(v: *const MbValue) -> bool {
     matches!(value_ref(v), Some(Value::Boolean(true)))
 }
 
 /// Date payload (day=-1 if not a date).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_date(v: *const MbValue) -> MbDate {
     match value_ref(v) {
         Some(Value::Date(d)) => MbDate { day: d.day, mon: d.mon, year: d.year },
@@ -405,7 +405,7 @@ pub extern "C" fn mb_value_date(v: *const MbValue) -> MbDate {
 }
 
 /// Time payload (sec=-1 if not a time).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_time(v: *const MbValue) -> MbTime {
     match value_ref(v) {
         Some(Value::Time(t)) => MbTime { sec: t.sec, min: t.min, hour: t.hour, days: t.days },
@@ -414,7 +414,7 @@ pub extern "C" fn mb_value_time(v: *const MbValue) -> MbTime {
 }
 
 /// Text payload (NULL if not text). Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_text(v: *const MbValue) -> *mut c_char {
     match value_ref(v) {
         Some(Value::Text(s)) => to_cstr(s.clone()),
@@ -423,7 +423,7 @@ pub extern "C" fn mb_value_text(v: *const MbValue) -> *mut c_char {
 }
 
 /// Selected index for list/enum/device-ref/eventable values (-1 otherwise).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_list_index(v: *const MbValue) -> i32 {
     match value_ref(v) {
         Some(Value::List { index, .. })
@@ -434,7 +434,7 @@ pub extern "C" fn mb_value_list_index(v: *const MbValue) -> i32 {
 }
 
 /// Number of options/entries for list/eventable/device-ref values (0 otherwise).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_list_size(v: *const MbValue) -> i32 {
     match value_ref(v) {
         Some(Value::List { options, .. }) => options.len() as i32,
@@ -446,7 +446,7 @@ pub extern "C" fn mb_value_list_size(v: *const MbValue) -> i32 {
 
 /// Label of the `index`-th option of a list/eventable value (NULL otherwise).
 /// Free with [`mb_free_str`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_list_label(v: *const MbValue, index: i32) -> *mut c_char {
     let i = index as usize;
     let label = match value_ref(v) {
@@ -461,7 +461,7 @@ pub extern "C" fn mb_value_list_label(v: *const MbValue, index: i32) -> *mut c_c
 }
 
 /// Referenced device id at `index` for a device-ref value (0 otherwise).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_value_device_id(v: *const MbValue, index: i32) -> u32 {
     match value_ref(v) {
         Some(Value::DeviceRef { device_ids, .. }) => {
@@ -472,7 +472,7 @@ pub extern "C" fn mb_value_device_id(v: *const MbValue, index: i32) -> u32 {
 }
 
 /// Free a value returned by `mb_field_value` / `mb_set_*`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_free_value(v: *mut MbValue) {
     if !v.is_null() {
         drop(unsafe { Box::from_raw(v) });
@@ -480,7 +480,7 @@ pub extern "C" fn mb_free_value(v: *mut MbValue) {
 }
 
 /// Free a string returned by any `mb_*` function.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mb_free_str(s: *mut c_char) {
     if !s.is_null() {
         drop(unsafe { CString::from_raw(s) });
