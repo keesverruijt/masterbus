@@ -1,15 +1,19 @@
 //! TUI application state and the logic that mutates it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use masterbus::{
-    DeviceSchema, DeviceStatus, FieldInfo, MasterBus, Menu, Subscription, Value, VisualizationType,
+    DeviceStatus, FieldInfo, GroupInfo, MasterBus, Menu, Subscription, Value, VisualizationType,
 };
 
 /// Live-poll rate for the selected device's monitoring fields.
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// The tabs (menus) the UI exposes, in display order.
+pub const TABS: [Menu; 3] = [Menu::Monitoring, Menu::Configuration, Menu::Service];
 
 /// Device id → name, shared with the background name-backfill thread.
 pub type Names = Arc<Mutex<HashMap<u32, String>>>;
@@ -41,6 +45,15 @@ pub enum EditKind {
     Choice { options: Vec<String>, sel: usize },
 }
 
+/// A single-menu discovery running on a worker thread.
+pub struct Pending {
+    pub id: u32,
+    pub menu: Menu,
+    pub name: String,
+    pub started: Instant,
+    rx: Receiver<Vec<GroupInfo>>,
+}
+
 pub struct App {
     pub bus: MasterBus,
     pub device_ids: Vec<u32>,
@@ -48,11 +61,17 @@ pub struct App {
     pub dev_sel: usize,
     pub focus: Focus,
     pub cur_device: Option<u32>,
+    /// The currently-displayed tab (menu).
+    pub cur_menu: Menu,
+    /// Menus already discovered for `cur_device`.
+    pub loaded_menus: HashSet<Menu>,
     pub rows: Vec<Row>,
     pub row_sel: usize,
     pub values: HashMap<i32, Value>,
     pub sub: Option<Subscription>,
     pub editor: Option<Editor>,
+    pub pending: Option<Pending>,
+    pub tick: usize,
     pub status: String,
     pub should_quit: bool,
 }
@@ -69,11 +88,15 @@ impl App {
             dev_sel: 0,
             focus: Focus::Devices,
             cur_device: None,
+            cur_menu: Menu::Monitoring,
+            loaded_menus: HashSet::new(),
             rows: Vec::new(),
             row_sel: 0,
             values: HashMap::new(),
             sub: None,
             editor: None,
+            pending: None,
+            tick: 0,
             status: "scanning bus… ↑/↓ select · Enter open · q quit".into(),
             should_quit: false,
         }
@@ -107,56 +130,140 @@ impl App {
         self.dev_sel = (self.dev_sel as i32 + delta).clamp(0, n - 1) as usize;
     }
 
-    /// Drill into the selected device: discover, build rows, subscribe.
+    /// Drill into the selected device, showing the Monitoring tab first. Other
+    /// tabs are discovered lazily when selected.
     pub fn open_device(&mut self) {
         let Some(&id) = self.device_ids.get(self.dev_sel) else { return };
-        let dev = self.bus.device(id);
-        let schema = match dev.schema() {
-            Ok(s) => s,
-            Err(e) => {
-                self.status = format!("discovery failed: {e}");
-                return;
-            }
-        };
-        self.names.lock().unwrap().insert(id, schema.name.clone());
         self.cur_device = Some(id);
+        self.cur_menu = Menu::Monitoring;
+        self.loaded_menus.clear();
+        self.sub = None;
+        self.rows.clear();
         self.values.clear();
-        self.build_rows(&schema);
-        self.subscribe_monitoring(id, &schema);
-        self.focus = Focus::Fields;
         self.row_sel = 0;
-        self.select_first_field();
-        self.status = format!("{} — Enter edit · Esc back · q quit", schema.name);
+        self.focus = Focus::Fields;
+        self.start_tab_discovery(id, Menu::Monitoring);
     }
 
-    fn build_rows(&mut self, schema: &DeviceSchema) {
+    /// Cycle to the next / previous tab.
+    pub fn next_tab(&mut self) {
+        self.cycle_tab(1);
+    }
+    pub fn prev_tab(&mut self) {
+        self.cycle_tab(-1);
+    }
+
+    fn cycle_tab(&mut self, delta: i32) {
+        if self.cur_device.is_none() || self.pending.is_some() {
+            return;
+        }
+        let i = TABS.iter().position(|&m| m == self.cur_menu).unwrap_or(0) as i32;
+        let n = TABS.len() as i32;
+        let menu = TABS[(((i + delta) % n + n) % n) as usize];
+        self.switch_tab(menu);
+    }
+
+    fn switch_tab(&mut self, menu: Menu) {
+        let Some(id) = self.cur_device else { return };
+        self.cur_menu = menu;
+        if self.loaded_menus.contains(&menu) {
+            // Already discovered — rebuild instantly from the cached schema.
+            let groups = self.bus.device(id).tab_info(menu).unwrap_or_default();
+            self.show_tab(id, menu, groups);
+        } else {
+            self.rows.clear();
+            self.row_sel = 0;
+            self.start_tab_discovery(id, menu);
+        }
+    }
+
+    /// Spawn a worker to discover one menu's groups (UI shows a spinner).
+    fn start_tab_discovery(&mut self, id: u32, menu: Menu) {
+        let name = self.device_label(id);
+        self.status = format!("discovering {} / {}…", name, menu_label(menu));
+        let (tx, rx) = bounded(1);
+        let bus = self.bus.clone();
+        std::thread::spawn(move || {
+            if let Ok(groups) = bus.device(id).tab_info(menu) {
+                let _ = tx.send(groups);
+            }
+        });
+        self.pending = Some(Pending { id, menu, name, started: Instant::now(), rx });
+    }
+
+    /// Whether a tab discovery is in flight.
+    pub fn discovering(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// (name, menu, elapsed seconds) of the in-flight discovery, if any.
+    pub fn pending_info(&self) -> Option<(&str, Menu, u64)> {
+        self.pending.as_ref().map(|p| (p.name.as_str(), p.menu, p.started.elapsed().as_secs()))
+    }
+
+    /// Check the discovery worker; when the menu's groups arrive, show them.
+    pub fn poll_pending(&mut self) {
+        let Some(p) = &self.pending else { return };
+        match p.rx.try_recv() {
+            Ok(groups) => {
+                let (id, menu) = (p.id, p.menu);
+                self.pending = None;
+                self.loaded_menus.insert(menu);
+                if let Ok(n) = self.bus.device(id).name() {
+                    self.names.lock().unwrap().insert(id, n);
+                }
+                self.show_tab(id, menu, groups);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                self.focus = Focus::Devices;
+                self.status = "discovery failed".into();
+            }
+        }
+    }
+
+    /// Abandon the in-flight discovery and return to the device list.
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
+        self.cur_device = None;
+        self.focus = Focus::Devices;
+        self.status = "discovery cancelled".into();
+    }
+
+    fn show_tab(&mut self, id: u32, menu: Menu, groups: Vec<GroupInfo>) {
+        self.build_rows(&groups);
+        self.values.clear();
+        // Monitoring fields get live updates; other tabs are read lazily on
+        // selection (they're mostly static settings).
+        let fields: Vec<i32> = groups.iter().flat_map(|g| g.fields.iter().map(|f| f.index)).collect();
+        self.sub = if menu == Menu::Monitoring && !fields.is_empty() {
+            Some(self.bus.subscribe(id, fields, POLL_INTERVAL, false))
+        } else {
+            None
+        };
+        self.row_sel = 0;
+        self.select_first_field();
+        self.status =
+            format!("{} / {} — Tab switch · Enter edit · Esc back", self.device_label(id), menu_label(menu));
+    }
+
+    fn build_rows(&mut self, groups: &[GroupInfo]) {
         self.rows.clear();
-        for g in &schema.groups {
-            self.rows.push(Row::Group(format!("[{}] {}", menu_label(g.menu), g.name)));
+        for g in groups {
+            self.rows.push(Row::Group(g.name.clone()));
             for f in &g.fields {
                 self.rows.push(Row::Field(f.clone()));
             }
         }
     }
 
-    fn subscribe_monitoring(&mut self, id: u32, schema: &DeviceSchema) {
-        let fields: Vec<i32> = schema
-            .groups
-            .iter()
-            .filter(|g| g.menu == Menu::Monitoring)
-            .flat_map(|g| g.fields.iter().map(|f| f.index))
-            .collect();
-        self.sub = if fields.is_empty() {
-            None
-        } else {
-            Some(self.bus.subscribe(id, fields, POLL_INTERVAL, false))
-        };
-    }
-
     pub fn back_to_devices(&mut self) {
         self.focus = Focus::Devices;
         self.sub = None;
+        self.pending = None;
         self.rows.clear();
+        self.loaded_menus.clear();
         self.cur_device = None;
         self.status = "↑/↓ select · Enter open · q quit".into();
     }
@@ -329,7 +436,7 @@ impl App {
     }
 }
 
-fn menu_label(menu: Menu) -> String {
+pub fn menu_label(menu: Menu) -> String {
     match menu {
         Menu::Monitoring => "Monitoring".into(),
         Menu::Configuration => "Config".into(),

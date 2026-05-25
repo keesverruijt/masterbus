@@ -1,14 +1,17 @@
 //! Rendering of the [`App`] state with ratatui.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::Frame;
 
 use masterbus::{DeviceStatus, Value};
 
-use crate::app::{App, EditKind, Focus, Row};
+use crate::app::{menu_label, App, EditKind, Focus, Row, TABS};
+
+/// Braille spinner frames.
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 pub fn draw(f: &mut Frame, app: &App) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(f.area());
@@ -45,10 +48,47 @@ fn draw_devices(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
-    let title = match app.cur_device {
-        Some(id) => app.device_label(id),
-        None => "Fields".into(),
+    let Some(id) = app.cur_device else {
+        f.render_widget(bordered("Fields".into(), app.focus == Focus::Fields), area);
+        return;
     };
+
+    let block = bordered(app.device_label(id), app.focus == Focus::Fields);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Tab bar (menus) + content below it.
+    let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    let titles: Vec<Line> = TABS.iter().map(|&m| Line::raw(menu_label(m))).collect();
+    let sel = TABS.iter().position(|&m| m == app.cur_menu).unwrap_or(0);
+    f.render_widget(
+        Tabs::new(titles)
+            .select(sel)
+            .highlight_style(Style::new().fg(Color::Cyan).add_modifier(Modifier::REVERSED)),
+        parts[0],
+    );
+    let content = parts[1];
+
+    // While a tab is being discovered, show an animated progress panel.
+    if let Some((name, menu, secs)) = app.pending_info() {
+        let spin = SPINNER[app.tick % SPINNER.len()];
+        let lines = vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                format!("{spin}  Discovering {name} / {}…  ({secs}s)", menu_label(menu)),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "enumerating this tab's groups & fields",
+                Style::new().fg(Color::DarkGray),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled("Esc to cancel", Style::new().fg(Color::DarkGray))),
+        ];
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), content);
+        return;
+    }
 
     let items: Vec<ListItem> = app
         .rows
@@ -78,10 +118,9 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let list = List::new(items)
-        .block(bordered(title, app.focus == Focus::Fields))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ");
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, content, &mut state);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {

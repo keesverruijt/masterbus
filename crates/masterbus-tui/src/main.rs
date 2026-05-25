@@ -68,11 +68,13 @@ fn run_tui(bus: MasterBus) -> std::io::Result<()> {
         if let Ok(key) = keys.recv_timeout(Duration::from_millis(100)) {
             handle_key(&mut app, key);
         }
+        app.tick = app.tick.wrapping_add(1);
         while let Ok(ev) = device_events.try_recv() {
             if let masterbus::DeviceEvent::Alive(id) = ev {
                 app.note_alive(id);
             }
         }
+        app.poll_pending();
         app.pump_subscription();
         if app.should_quit {
             break Ok(());
@@ -139,6 +141,16 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // While a device is being enumerated, only quit or cancel are allowed.
+    if app.discovering() {
+        match key.code {
+            KeyCode::Char('q') => app.quit(),
+            KeyCode::Esc => app.cancel_pending(),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') => app.quit(),
         _ => match app.focus {
@@ -151,6 +163,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             Focus::Fields => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => app.move_row(-1),
                 KeyCode::Down | KeyCode::Char('j') => app.move_row(1),
+                KeyCode::Tab => app.next_tab(),
+                KeyCode::BackTab => app.prev_tab(),
                 KeyCode::Enter | KeyCode::Char('e') => app.begin_edit(),
                 KeyCode::Char('r') => app.reread_selected(),
                 KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => app.back_to_devices(),

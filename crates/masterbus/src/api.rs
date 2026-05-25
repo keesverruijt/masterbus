@@ -155,6 +155,15 @@ impl Device {
             .collect())
     }
 
+    /// Discover (only) `menu` and return its groups as raw [`GroupInfo`]
+    /// (name, fields with metadata). Convenient for building a UI tab without
+    /// triggering full-device discovery.
+    pub fn tab_info(&self, menu: Menu) -> Result<Vec<GroupInfo>> {
+        self.engine.ensure_menu(self.id, menu)?;
+        let schema = self.engine.state.schema(self.id).ok_or(Error::NotReady)?;
+        Ok(schema.groups.into_iter().filter(|g| g.menu == menu).collect())
+    }
+
     /// A handle to a field by its global index.
     pub fn field(&self, index: i32) -> Field {
         Field { engine: self.engine.clone(), device: self.id, index }
