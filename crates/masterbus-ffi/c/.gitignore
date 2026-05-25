@@ -2,3 +2,6 @@
 mb_enumerate
 mb_set_value
 mb_get_value
+
+# Cross-compiled (remote) artifacts
+/remote-bin/
