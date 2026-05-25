@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus};
+use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, GroupInfo};
 use crate::value::Value;
 
 /// A cached field value with its observation time and a dirty flag.
@@ -143,6 +143,22 @@ impl State {
     /// Clone a device's schema if present.
     pub fn schema(&self, addr: u32) -> Option<DeviceSchema> {
         self.devices.lock().unwrap().get(&addr).and_then(|e| e.schema.clone())
+    }
+
+    /// Find groups from an already-discovered device with the same identity key
+    /// (`article + firmware`). Lets identical devices (e.g. four matching
+    /// batteries) be discovered once and reused, since their schema is identical.
+    pub fn groups_by_key(&self, article: &str, firmware: &str) -> Option<Vec<GroupInfo>> {
+        if article.is_empty() {
+            return None;
+        }
+        let map = self.devices.lock().unwrap();
+        map.values().find_map(|e| {
+            e.schema
+                .as_ref()
+                .filter(|s| s.article == article && s.firmware == firmware)
+                .map(|s| s.groups.clone())
+        })
     }
 
     /// Device ids currently considered alive (seen within `liveness`).

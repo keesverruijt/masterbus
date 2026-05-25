@@ -124,7 +124,13 @@ impl Sched {
             return;
         }
         let id = self.ensure_identity(addr);
-        let groups = self.with_disc(|disc| discover_groups(disc, addr, &id));
+        // Reuse an identical device's groups (same article+firmware) if one was
+        // already discovered this session — avoids re-enumerating, e.g., each of
+        // four matching batteries. Falls back to the disk cache / live enumeration.
+        let groups = self
+            .state
+            .groups_by_key(&id.article, &id.firmware)
+            .unwrap_or_else(|| self.with_disc(|disc| discover_groups(disc, addr, &id)));
         self.last_send = Instant::now();
         self.state.put_schema(addr, DeviceSchema::from_identity(id, groups));
     }
