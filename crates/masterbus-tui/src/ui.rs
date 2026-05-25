@@ -53,7 +53,7 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let block = bordered(app.device_label(id), app.focus == Focus::Fields);
+    let block = bordered(format!("{}  [{:06X}]", app.device_label(id), id), app.focus == Focus::Fields);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
