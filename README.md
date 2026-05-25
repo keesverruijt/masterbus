@@ -84,11 +84,11 @@ exercised against a live bus.
 
 ## TODO
 
-- [ ] **USB link transport (multi-OS)** — the Mastervolt USB interface is a typed
-  stub behind the `usb` feature; its HID report framing still needs to be
-  reverse-engineered. Once done, the same engine runs over it, making the library
-  and TUI usable on **macOS and Windows** (and on Linux without a CAN interface) —
-  not just on a machine wired to SocketCAN.
+- [x] **USB link transport (multi-OS)** — the Mastervolt USB link is a
+  class-compliant HID device; `MasterBus::usb()` talks to it directly (no vendor
+  driver), so the engine runs on **macOS and Windows** and on Linux without a CAN
+  interface. HID framing reverse-engineered and validated (incl. writes) against a
+  live bus.
 - [ ] **Dealer access level** — installer/service fields are viewable but
   write-gated at the CAN level until a dealer-login frame is sent; capturing that
   frame is deferred, so for now only already-writable fields can be set.

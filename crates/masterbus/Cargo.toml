@@ -13,26 +13,14 @@ categories = ["embedded", "hardware-support", "network-programming"]
 [lib]
 name = "masterbus"
 
-[package.metadata.docs.rs]
-all-features = true
-
 [dependencies]
 thiserror.workspace = true
 crossbeam-channel.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Pulled in only by the `usb` feature (cross-platform HID transport).
-hidapi = { workspace = true, optional = true }
+# Cross-platform Mastervolt USB-link (HID) transport.
+hidapi.workspace = true
 
 # The live SocketCAN backend is Linux-only; the crate still builds elsewhere.
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan.workspace = true
-
-[features]
-default = []
-# Cross-platform Mastervolt USB-link transport (HID).
-usb = ["dep:hidapi"]
-
-[[example]]
-name = "usb"
-required-features = ["usb"]

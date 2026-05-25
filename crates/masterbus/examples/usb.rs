@@ -1,10 +1,10 @@
 //! Explore / read / write the bus over the Mastervolt USB link (HID).
 //!
-//! Usage (build with `--features usb`):
-//!   cargo run --example usb --features usb                 # enumerate devices
-//!   cargo run --example usb --features usb -- dump <addrHex>        # full schema
-//!   cargo run --example usb --features usb -- read <addrHex> <idx>  # read a field
-//!   cargo run --example usb --features usb -- write <addrHex> <idx> <float>
+//! Usage:
+//!   cargo run --example usb                 # enumerate devices
+//!   cargo run --example usb -- dump <addrHex>        # full schema
+//!   cargo run --example usb -- read <addrHex> <idx>  # read a field
+//!   cargo run --example usb -- write <addrHex> <idx> <float>
 
 use masterbus::{Config, MasterBus, Value};
 

@@ -28,7 +28,6 @@ impl MasterBus {
     }
 
     /// Connect over the Mastervolt USB link (cross-platform).
-    #[cfg(feature = "usb")]
     pub fn usb(serial: Option<&str>, config: Config) -> Result<Self> {
         let t = crate::transport::usb::UsbTransport::open(serial)?;
         Self::with_transport(Box::new(t), config)

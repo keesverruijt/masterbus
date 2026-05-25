@@ -77,13 +77,8 @@
 //! The engine runs over any [`transport::Transport`]:
 //!
 //! - `MasterBus::socketcan` — Linux SocketCAN, built in on Linux.
-//! - `MasterBus::usb` — the Mastervolt USB link, behind the `usb` feature
-//!   (its HID report framing is still being reverse-engineered).
+//! - `MasterBus::usb` — the Mastervolt USB link (cross-platform, HID).
 //! - [`MasterBus::with_transport`] — bring your own [`transport::Transport`].
-//!
-//! # Cargo features
-//!
-//! - `usb` — enable the (cross-platform) Mastervolt USB-link transport.
 //!
 //! # Values
 //!
