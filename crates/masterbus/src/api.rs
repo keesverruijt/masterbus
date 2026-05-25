@@ -48,6 +48,16 @@ impl MasterBus {
             .collect()
     }
 
+    /// Like [`devices`](Self::devices) but first waits until the broadcast
+    /// window (2 s after connect) has elapsed, so the whole bus is present.
+    pub fn devices_all(&self) -> Vec<Device> {
+        self.engine
+            .device_ids_all()
+            .into_iter()
+            .map(|id| Device { engine: self.engine.clone(), id })
+            .collect()
+    }
+
     /// A handle to a specific device id (does not check presence).
     pub fn device(&self, id: u32) -> Device {
         Device { engine: self.engine.clone(), id }

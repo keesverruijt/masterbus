@@ -94,10 +94,14 @@ pub(crate) enum Command {
     Shutdown,
 }
 
+/// How long after start `devices_all` waits for the broadcast list to fill.
+const DEVICE_LIST_WINDOW: Duration = Duration::from_millis(2000);
+
 /// The shared engine behind every API handle.
 pub(crate) struct Engine {
     pub state: Arc<State>,
     pub config: Config,
+    started: Instant,
     cmd_tx: Sender<Command>,
     device_events: Receiver<DeviceEvent>,
     next_sub_id: AtomicU64,
@@ -110,6 +114,7 @@ impl Engine {
     /// Connect over a transport; returns once the bus is usable and ≥1 device is
     /// heard (or `connect_timeout` elapses).
     pub fn connect(transport: Box<dyn Transport>, config: Config) -> Result<Arc<Engine>> {
+        let started = Instant::now();
         let (rx, tx) = transport.split();
         let state = Arc::new(State::new());
         let waiter = Arc::new(Waiter::new());
@@ -133,6 +138,7 @@ impl Engine {
         Ok(Arc::new(Engine {
             state,
             config,
+            started,
             cmd_tx,
             device_events: dev_rx,
             next_sub_id: AtomicU64::new(1),
@@ -191,6 +197,17 @@ impl Engine {
     /// Currently-alive device ids.
     pub fn device_ids(&self) -> Vec<u32> {
         self.state.alive_ids(self.config.liveness)
+    }
+
+    /// Wait until the broadcast-collection window has elapsed since start, then
+    /// return all alive device ids (the full bus).
+    pub fn device_ids_all(&self) -> Vec<u32> {
+        let target = self.started + DEVICE_LIST_WINDOW;
+        let now = Instant::now();
+        if target > now {
+            std::thread::sleep(target - now);
+        }
+        self.device_ids()
     }
 
     /// Device presence event stream.
