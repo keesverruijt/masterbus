@@ -80,14 +80,18 @@ target to cross-compile and deploy to a Pi. See that directory's `Makefile`.
 ## Status
 
 Works over SocketCAN on Linux; the navigator API, FFI demos and TUI have all been
-exercised against a live bus. Not yet done:
+exercised against a live bus.
 
-- **USB link transport** — the Mastervolt USB interface is a typed stub behind the
-  `usb` feature; its HID framing still needs to be reverse-engineered, after which
-  the same engine runs over it (usable on macOS/Windows without a CAN interface).
-- **Dealer access level** — installer/service fields are viewable but write-gated
-  at the CAN level until a dealer-login frame is sent; capturing that frame is
-  deferred, so for now only already-writable fields can be set.
+## TODO
+
+- [ ] **USB link transport (multi-OS)** — the Mastervolt USB interface is a typed
+  stub behind the `usb` feature; its HID report framing still needs to be
+  reverse-engineered. Once done, the same engine runs over it, making the library
+  and TUI usable on **macOS and Windows** (and on Linux without a CAN interface) —
+  not just on a machine wired to SocketCAN.
+- [ ] **Dealer access level** — installer/service fields are viewable but
+  write-gated at the CAN level until a dealer-login frame is sent; capturing that
+  frame is deferred, so for now only already-writable fields can be set.
 
 ## License
 
