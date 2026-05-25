@@ -17,8 +17,8 @@ use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
 use crate::protocol::{
-    can_class, decode_value, encode_set_boolean, encode_set_float, monitoring_req_raw,
-    TAB_DEFAULT, VisualizationType,
+    can_class, decode_value, encode_set_boolean, encode_set_float, heartbeat_raw,
+    monitoring_req_raw, TAB_DEFAULT, VisualizationType,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
@@ -41,7 +41,13 @@ pub(super) fn spawn(
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("masterbus-scheduler".into())
-        .spawn(move || Sched { tx, state, waiter, config, last_send: Instant::now() }.run(cmd_rx, &shutdown))
+        .spawn(move || {
+            // Fire the first heartbeat immediately (if configured) to prompt
+            // device announcements as soon as we connect.
+            let next_heartbeat = config.heartbeat_master.map(|_| Instant::now());
+            Sched { tx, state, waiter, config, last_send: Instant::now(), next_heartbeat }
+                .run(cmd_rx, &shutdown)
+        })
         .expect("spawn scheduler")
 }
 
@@ -51,13 +57,14 @@ struct Sched {
     waiter: Arc<Waiter>,
     config: Config,
     last_send: Instant,
+    next_heartbeat: Option<Instant>,
 }
 
 impl Sched {
     fn run(mut self, cmd_rx: Receiver<Command>, shutdown: &AtomicBool) {
         let mut subs: Vec<SubState> = Vec::new();
         while !shutdown.load(Ordering::Relaxed) {
-            let timeout = self.next_due_in(&subs).unwrap_or(Duration::from_millis(200));
+            let timeout = self.loop_timeout(&subs);
             match cmd_rx.recv_timeout(timeout) {
                 Ok(Command::Identify { addr, reply }) => {
                     self.do_identify(addr);
@@ -85,9 +92,30 @@ impl Sched {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+            self.maybe_heartbeat();
             self.process_due(&mut subs);
         }
         self.waiter.cancel_all();
+    }
+
+    /// How long to block on the command channel: the soonest of the next due
+    /// poll, the next heartbeat, and a 200 ms idle tick.
+    fn loop_timeout(&self, subs: &[SubState]) -> Duration {
+        let mut t = self.next_due_in(subs).unwrap_or(Duration::from_millis(200));
+        if let Some(hb) = self.next_heartbeat {
+            t = t.min(hb.saturating_duration_since(Instant::now()));
+        }
+        t
+    }
+
+    /// Emit the bus-master heartbeat if it's due (no-op unless configured).
+    fn maybe_heartbeat(&mut self) {
+        let Some(master) = self.config.heartbeat_master else { return };
+        let now = Instant::now();
+        if self.next_heartbeat.is_some_and(|t| now >= t) {
+            self.send(heartbeat_raw(master));
+            self.next_heartbeat = Some(now + self.config.heartbeat_interval);
+        }
     }
 
     /// Respect the bus budget: ensure `min_send_interval` between transmissions.

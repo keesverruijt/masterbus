@@ -1,15 +1,20 @@
 //! Encode requests/writes into raw `(can_id, data)` pairs for transmission.
 
-use super::{can_class, menu, shadow_op, DIRECTION_BIT, SHADOW_BIT, TAB_DEFAULT};
+use super::{can_class, menu, shadow_op, SHADOW_BIT, TAB_DEFAULT};
 
 fn id(class: u8, device_addr: u32) -> u32 {
-    // A master addresses a device with the direction bit clear; clear it here so
-    // callers can pass an address in either form.
-    ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF & !DIRECTION_BIT)
+    ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF)
 }
 
 fn shadow_addr(device_addr: u32) -> u32 {
-    (device_addr | SHADOW_BIT) & 0x00_FF_FF_FF & !DIRECTION_BIT
+    (device_addr | SHADOW_BIT) & 0x00_FF_FF_FF
+}
+
+/// Bus-master heartbeat: class `0x05` from the master's own address, no data.
+/// Devices announce (class `0x04`) in response, so emitting this lets us act as
+/// the bus master and discover the bus when no hardware master is present.
+pub fn heartbeat_raw(master_addr: u32) -> (u32, Vec<u8>) {
+    (id(can_class::BUS_POLL, master_addr), Vec::new())
 }
 
 /// Read a monitoring field: class `0x18`, `[field, tab]`.
@@ -83,4 +88,23 @@ pub fn encode_set_float(device_addr: u32, field_index: u8, value: f32) -> (u32, 
     let mut data = vec![field_index, TAB_DEFAULT];
     data.extend_from_slice(&value.to_le_bytes());
     (id(can_class::MONITORING_REQ, device_addr), data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_is_class05_empty() {
+        // Matches the observed master heartbeat on the wire: 0553A493# (no data).
+        assert_eq!(heartbeat_raw(0x53A493), (0x0553A493, Vec::new()));
+    }
+
+    #[test]
+    fn requests_use_address_as_is() {
+        // No address munging: e.g. a monitoring read of the CombiMaster (0x188EA2)
+        // is class 0x18 to that exact address.
+        assert_eq!(monitoring_req_raw(0x188EA2, 0x17, 0).0, 0x18188EA2);
+        assert_eq!(monitoring_req_raw(0x6E96CF, 0, 0).0, 0x186E96CF);
+    }
 }

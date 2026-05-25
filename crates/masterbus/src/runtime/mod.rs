@@ -40,6 +40,14 @@ pub struct Config {
     pub connect_timeout: Duration,
     /// Optional on-disk schema cache directory (memory-only if `None`).
     pub cache_path: Option<PathBuf>,
+    /// If set, act as a bus master: periodically emit a class-`0x05` heartbeat
+    /// from this address. Devices announce (class `0x04`) and stay responsive in
+    /// response, which is what lets us enumerate the bus when no hardware master
+    /// is present. Leave `None` to stay passive (a hardware master must drive the
+    /// bus, e.g. an EasyView panel).
+    pub heartbeat_master: Option<u32>,
+    /// Interval between heartbeats when `heartbeat_master` is set.
+    pub heartbeat_interval: Duration,
 }
 
 impl Default for Config {
@@ -52,6 +60,8 @@ impl Default for Config {
             discovery_retries: 3,
             connect_timeout: Duration::from_secs(15),
             cache_path: None,
+            heartbeat_master: None,
+            heartbeat_interval: Duration::from_secs(1),
         }
     }
 }

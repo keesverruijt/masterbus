@@ -8,8 +8,8 @@ mod encode;
 
 pub use decode::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame};
 pub use encode::{
-    encode_set_boolean, encode_set_float, fw_req_raw, group_count_req_raw, monitoring_req_raw,
-    prop_str_id_req_raw, schema_field_count_req_raw, schema_field_id_req_raw,
+    encode_set_boolean, encode_set_float, fw_req_raw, group_count_req_raw, heartbeat_raw,
+    monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_raw, schema_field_id_req_raw,
     schema_group_name_req_raw, shadow_meta_req_raw, shadow_option_req_raw, string_chunk_req_raw,
 };
 
@@ -75,15 +75,6 @@ pub mod shadow_op {
 
 /// Shadow-address bit set on the device address for per-field metadata.
 pub const SHADOW_BIT: u32 = 0x80_0000;
-
-/// Address direction flag (bit 19). A device *announces* and *responds* with this
-/// bit **set** in its address; a master must address the device with it **clear**.
-/// We canonicalise device ids to the bit-clear form (on decode) and clear it on
-/// every outgoing frame (on encode) so requests reach the device. Strict devices
-/// (e.g. the CombiMaster) ignore requests sent to the bit-set address — only the
-/// lenient lithium batteries answered either form, which is why they alone worked
-/// before this was understood.
-pub const DIRECTION_BIT: u32 = 0x08_0000;
 
 /// How a field is presented/edited, decoded from [`shadow_op::VIZ`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

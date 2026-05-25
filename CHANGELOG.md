@@ -17,6 +17,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery. Edit flags while the service is stopped.
 - `Device::identity()` / `Device::tab_info()` and `DeviceIdentity` for cheap,
   per-menu access without full discovery.
+- **Bus-master heartbeat**: with `Config::heartbeat_master` set (signalk:
+  `HEARTBEAT_MASTER=<hex>`), the scheduler periodically emits a class-`0x05`
+  heartbeat so devices announce (class `0x04`) and stay responsive — needed to
+  enumerate the bus when no hardware master (e.g. an EasyView) is present.
 - Cross-platform **USB-link transport** (via `hidapi`, always built):
   `MasterBus::usb()` talks to the class-compliant "MasterBus USB Link" HID device
   (VID `0x1A64`) directly — no vendor driver/DLL — so the crate runs on
@@ -40,11 +44,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   need no `libudev`/C toolchain.
 
 ### Fixed
-- Address **direction bit** (`0x080000`): devices announce/respond with it set but
-  must be addressed with it clear. Requests are now sent to the bit-clear address
-  and device ids are canonicalised to it, so non-battery devices (which ignore the
-  bit-set address) are reachable — previously only the lenient lithium batteries
-  answered. Confirmed against MasterAdjust's own USB traffic.
 - Battery "Cluster" group no longer hidden: dropping the cross-device schema
   dedup means each battery (including the cluster master) is discovered on its
   own.

@@ -55,7 +55,16 @@ fn main() {
         }
     };
     let listen = args.next().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
-    let config = Config { cache_path: args.next().map(Into::into), ..Default::default() };
+    // HEARTBEAT_MASTER=<hex addr> makes us drive the bus as master (class-0x05
+    // heartbeat) so devices announce/respond when no hardware master is present.
+    let heartbeat_master = std::env::var("HEARTBEAT_MASTER").ok().and_then(|s| {
+        u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+    });
+    let config = Config {
+        cache_path: args.next().map(Into::into),
+        heartbeat_master,
+        ..Default::default()
+    };
     let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 
     #[cfg(target_os = "linux")]
