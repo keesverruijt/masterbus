@@ -18,9 +18,13 @@ thiserror.workspace = true
 crossbeam-channel.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Cross-platform Mastervolt USB-link (HID) transport.
-hidapi.workspace = true
 
-# The live SocketCAN backend is Linux-only; the crate still builds elsewhere.
+# Cross-platform Mastervolt USB-link (HID) transport. On Linux use hidapi's
+# pure-Rust hidraw backend (no libudev, no C toolchain) so cross-compiles stay
+# clean; macOS/Windows use the default (IOKit / windows-sys) backends.
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan.workspace = true
+hidapi = { version = "2", default-features = false, features = ["linux-native-basic-udev"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+hidapi = "2"

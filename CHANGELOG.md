@@ -33,6 +33,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   those differences.
 - TUI: tab-lazy discovery (render Monitoring immediately, load other tabs on
   demand); non-blocking boot with live device-name backfill.
+- TUI now runs on **macOS/Windows** over the USB link with **no argument**
+  (the only transport there); on Linux pass `<can-iface>` or `usb [serial]`.
+- USB transport is built unconditionally (no `usb` feature). On Linux it uses
+  hidapi's pure-Rust hidraw backend (`linux-native-basic-udev`) so cross-builds
+  need no `libudev`/C toolchain.
 
 ### Fixed
 - Address **direction bit** (`0x080000`): devices announce/respond with it set but

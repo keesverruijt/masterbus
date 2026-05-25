@@ -1,14 +1,13 @@
 //! Terminal UI for browsing and editing MasterBus devices.
 //!
-//! Usage: `masterbus-tui <can-iface> [cache-dir]` (Linux/SocketCAN).
+//! Usage:
+//!   masterbus-tui <can-iface> [cache-dir]    # Linux SocketCAN
+//!   masterbus-tui usb [serial] [cache-dir]   # explicit USB link (any OS)
+//!   masterbus-tui [serial] [cache-dir]       # macOS/Windows: USB link (no arg needed)
 //!
 //! Left pane: devices (with liveness). Right pane: the selected device's groups
 //! and fields with live monitoring values. Writable fields can be edited:
 //! booleans toggle, numbers open a text editor, lists cycle with ←/→.
-
-// The TUI runtime is only reachable on Linux (SocketCAN); on other hosts the
-// modules type-check but are unused.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod app;
 mod ui;
@@ -25,30 +24,40 @@ use app::{App, Focus, Names};
 use masterbus::{Config, MasterBus};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    let iface = match args.next() {
-        Some(s) => s,
-        None => {
-            eprintln!("usage: masterbus-tui <can-iface> [cache-dir]");
-            std::process::exit(1);
-        }
-    };
-    let cache = args.next();
-    let config = Config { cache_path: cache.map(Into::into), ..Default::default() };
-
-    #[cfg(target_os = "linux")]
-    {
-        println!("masterbus-tui: connecting to {iface}…");
-        let bus = MasterBus::socketcan(&iface, config)?;
-        println!("connected; scanning the bus…");
-        run_tui(bus)?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (iface, config);
-        eprintln!("masterbus-tui requires Linux/SocketCAN");
-    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let bus = connect(&args)?;
+    println!("connected; scanning the bus…");
+    run_tui(bus)?;
     Ok(())
+}
+
+/// On Linux both SocketCAN and the USB link are available, so a transport must be
+/// chosen: the first argument is a CAN interface, or `usb [serial]` for the link.
+#[cfg(target_os = "linux")]
+fn connect(args: &[String]) -> Result<MasterBus, Box<dyn std::error::Error>> {
+    let Some(first) = args.first() else {
+        eprintln!("usage: masterbus-tui <can-iface> [cache-dir]");
+        eprintln!("       masterbus-tui usb [serial] [cache-dir]");
+        std::process::exit(1);
+    };
+    if first == "usb" {
+        let config = Config { cache_path: args.get(2).map(Into::into), ..Default::default() };
+        println!("masterbus-tui: connecting to USB link…");
+        Ok(MasterBus::usb(args.get(1).map(String::as_str), config)?)
+    } else {
+        let config = Config { cache_path: args.get(1).map(Into::into), ..Default::default() };
+        println!("masterbus-tui: connecting to {first}…");
+        Ok(MasterBus::socketcan(first, config)?)
+    }
+}
+
+/// Off Linux the USB link is the only transport, so no interface argument is
+/// needed; an optional first argument selects a specific link by serial number.
+#[cfg(not(target_os = "linux"))]
+fn connect(args: &[String]) -> Result<MasterBus, Box<dyn std::error::Error>> {
+    let config = Config { cache_path: args.get(1).map(Into::into), ..Default::default() };
+    println!("masterbus-tui: connecting to USB link…");
+    Ok(MasterBus::usb(args.first().map(String::as_str), config)?)
 }
 
 fn run_tui(bus: MasterBus) -> std::io::Result<()> {
