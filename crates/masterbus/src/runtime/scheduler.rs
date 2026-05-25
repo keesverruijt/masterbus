@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
-use super::discovery::{discover_groups, fetch_identity, Disc};
-use crate::model::{DeviceIdentity, DeviceSchema};
+use super::discovery::{discover_menu, fetch_identity, Disc, MENUS};
+use crate::model::{DeviceIdentity, Menu};
 use super::reader::value_key;
 use super::state::State;
 use super::waiter::Waiter;
@@ -63,8 +63,12 @@ impl Sched {
                     self.do_identify(addr);
                     let _ = reply.send(Ok(()));
                 }
+                Ok(Command::DiscoverMenu { addr, menu, reply }) => {
+                    self.do_discover_menu(addr, menu);
+                    let _ = reply.send(Ok(()));
+                }
                 Ok(Command::Discover { addr, reply }) => {
-                    self.do_discover(addr);
+                    self.do_discover_all(addr);
                     let _ = reply.send(Ok(()));
                 }
                 Ok(Command::Read { addr, field, max_age, reply }) => {
@@ -119,20 +123,28 @@ impl Sched {
         id
     }
 
-    fn do_discover(&mut self, addr: u32) {
-        if self.state.has_schema(addr) {
+    /// Discover one menu's groups for a device (the lazy unit of discovery).
+    fn do_discover_menu(&mut self, addr: u32, menu: Menu) {
+        if self.state.has_menu(addr, menu) {
             return;
         }
         let id = self.ensure_identity(addr);
-        // Reuse an identical device's groups (same article+firmware) if one was
-        // already discovered this session — avoids re-enumerating, e.g., each of
-        // four matching batteries. Falls back to the disk cache / live enumeration.
+        // Reuse an identical device's groups for this menu (same article+firmware)
+        // if one was already discovered this session — avoids re-enumerating, e.g.,
+        // each of four matching batteries. Falls back to disk cache / live.
         let groups = self
             .state
-            .groups_by_key(&id.article, &id.firmware)
-            .unwrap_or_else(|| self.with_disc(|disc| discover_groups(disc, addr, &id)));
+            .menu_groups_by_key(&id.article, &id.firmware, menu)
+            .unwrap_or_else(|| self.with_disc(|disc| discover_menu(disc, addr, &id, menu)));
         self.last_send = Instant::now();
-        self.state.put_schema(addr, DeviceSchema::from_identity(id, groups));
+        self.state.put_menu(addr, menu, groups);
+    }
+
+    /// Discover every menu (a full schema).
+    fn do_discover_all(&mut self, addr: u32) {
+        for menu in MENUS {
+            self.do_discover_menu(addr, menu);
+        }
     }
 
     /// Run a closure with a `Disc` bound to this scheduler's transport.
@@ -144,8 +156,10 @@ impl Sched {
     }
 
     fn viz_of(&mut self, addr: u32, field: i32) -> Result<VisualizationType> {
-        if !self.state.has_schema(addr) {
-            self.do_discover(addr);
+        // If the field isn't known yet, fall back to a full discovery (we don't
+        // know which menu it belongs to).
+        if !self.state.has_field(addr, field) {
+            self.do_discover_all(addr);
         }
         self.state
             .schema(addr)
@@ -196,8 +210,10 @@ impl Sched {
     // ── subscriptions ───────────────────────────────────────────────────────
 
     fn add_sub(&mut self, subs: &mut Vec<SubState>, spec: SubSpec) {
-        if !self.state.has_schema(spec.device) {
-            self.do_discover(spec.device);
+        // Ensure the subscribed fields' types are known. We don't know which menus
+        // they live in, so discover the full schema (one-time; disk-cached).
+        if !spec.fields.iter().all(|&f| self.state.has_field(spec.device, f)) {
+            self.do_discover_all(spec.device);
         }
         let now = Instant::now();
         let next_due = spec.fields.iter().map(|&f| (f, now)).collect();

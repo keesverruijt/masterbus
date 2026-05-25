@@ -142,9 +142,11 @@ impl Device {
             .collect())
     }
 
-    /// Groups belonging to a particular menu / access level.
+    /// Groups belonging to a particular menu / access level. Only that menu is
+    /// discovered (lazily), not the whole device.
     pub fn tab(&self, menu: Menu) -> Result<Vec<Group>> {
-        let schema = self.schema()?;
+        self.engine.ensure_menu(self.id, menu)?;
+        let schema = self.engine.state.schema(self.id).ok_or(Error::NotReady)?;
         Ok(schema
             .groups
             .iter()
@@ -169,11 +171,16 @@ pub struct Group {
 
 impl Group {
     fn info(&self) -> Result<GroupInfo> {
+        let find = |s: DeviceSchema| s.groups.into_iter().find(|g| g.id == self.group_id);
+        // The group usually came from `tab()`/`groups()`, so it's already known.
+        if let Some(g) = self.engine.state.schema(self.device).and_then(find) {
+            return Ok(g);
+        }
         self.engine.ensure_schema(self.device)?;
         self.engine
             .state
             .schema(self.device)
-            .and_then(|s| s.groups.into_iter().find(|g| g.id == self.group_id))
+            .and_then(find)
             .ok_or(Error::GroupNotAvailable(self.group_id))
     }
 
@@ -208,7 +215,7 @@ pub struct Field {
 
 impl Field {
     fn info(&self) -> Result<FieldInfo> {
-        self.engine.ensure_schema(self.device)?;
+        self.engine.ensure_field(self.device, self.index)?;
         self.engine
             .state
             .schema(self.device)

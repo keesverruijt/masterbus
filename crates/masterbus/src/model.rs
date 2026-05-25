@@ -28,7 +28,7 @@ pub enum DeviceStatus {
 
 /// A menu / access level (the `[0x08, selector]` partition of the global group
 /// list — e.g. monitoring, configuration/installer, service).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Menu {
     /// User-visible monitoring (selector 0x02).
     Monitoring,

@@ -87,6 +87,7 @@ pub(crate) struct SubSpec {
 /// Commands sent from the API to the scheduler thread.
 pub(crate) enum Command {
     Identify { addr: u32, reply: Sender<Result<()>> },
+    DiscoverMenu { addr: u32, menu: crate::model::Menu, reply: Sender<Result<()>> },
     Discover { addr: u32, reply: Sender<Result<()>> },
     Read { addr: u32, field: i32, max_age: Duration, reply: Sender<Result<Value>> },
     Write { addr: u32, field: i32, value: WriteValue, reply: Sender<Result<Value>> },
@@ -169,9 +170,26 @@ impl Engine {
         self.state.identity(addr).ok_or(Error::NotReady)
     }
 
-    /// Ensure a device's schema is discovered (blocks until ready or timeout).
+    /// Ensure a device's full schema (all menus) is discovered.
     pub fn ensure_schema(&self, addr: u32) -> Result<()> {
-        if self.state.has_schema(addr) {
+        if self.state.has_menus(addr, &discovery::MENUS) {
+            return Ok(());
+        }
+        self.call(|reply| Command::Discover { addr, reply })?
+    }
+
+    /// Ensure one menu's groups are discovered (the lazy unit).
+    pub fn ensure_menu(&self, addr: u32, menu: crate::model::Menu) -> Result<()> {
+        if self.state.has_menu(addr, menu) {
+            return Ok(());
+        }
+        self.call(|reply| Command::DiscoverMenu { addr, menu, reply })?
+    }
+
+    /// Ensure a specific field is discovered (full discovery fallback if its menu
+    /// isn't known yet).
+    pub fn ensure_field(&self, addr: u32, field: i32) -> Result<()> {
+        if self.state.has_field(addr, field) {
             return Ok(());
         }
         self.call(|reply| Command::Discover { addr, reply })?

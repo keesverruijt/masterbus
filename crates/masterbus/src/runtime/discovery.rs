@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::waiter::Waiter;
 use super::Config;
-use crate::model::{DeviceIdentity, DeviceSchema, FieldInfo, GroupInfo, Menu};
+use crate::model::{DeviceIdentity, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
     fw_req_raw, group_count_req_raw, prop_str_id_req_raw, schema_field_count_req_raw,
     schema_field_id_req_raw, schema_group_name_req_raw, shadow_meta_req_raw, shadow_option_req_raw,
@@ -140,39 +140,52 @@ pub(super) fn fetch_identity(disc: &mut Disc, addr: u32) -> DeviceIdentity {
     DeviceIdentity { article, serial, revision, name, firmware }
 }
 
-/// Enumerate (or load from the `article+firmware` cache) a device's groups. The
-/// expensive half of discovery.
-pub(super) fn discover_groups(disc: &mut Disc, addr: u32, id: &DeviceIdentity) -> Vec<GroupInfo> {
-    load_cached_groups(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware).unwrap_or_else(
+/// The menus enumerated for a "full" discovery, in global group-id order.
+pub(super) const MENUS: [Menu; 3] = [Menu::Monitoring, Menu::Configuration, Menu::Service];
+
+/// Base global group id of `menu` (number of groups in the menus before it) and
+/// the count of groups in `menu` itself. Groups are a single global list ordered
+/// monitoring → config → service.
+fn menu_range(disc: &mut Disc, addr: u32, menu: Menu) -> (u32, u32) {
+    match menu {
+        Menu::Monitoring => (0, disc.group_count(addr, 0x02)),
+        Menu::Configuration => {
+            let mon = disc.group_count(addr, 0x02);
+            (mon, disc.group_count(addr, 0x03))
+        }
+        Menu::Service => {
+            let mon = disc.group_count(addr, 0x02);
+            let cfg = disc.group_count(addr, 0x03);
+            (mon + cfg, disc.group_count(addr, 0x04))
+        }
+        Menu::Other(_) => (0, 0),
+    }
+}
+
+/// Discover just one menu's groups: per-menu disk cache, else enumerate live.
+/// (In-session reuse across identical devices is handled by the scheduler.)
+pub(super) fn discover_menu(
+    disc: &mut Disc,
+    addr: u32,
+    id: &DeviceIdentity,
+    menu: Menu,
+) -> Vec<GroupInfo> {
+    load_cached_menu(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware, menu).unwrap_or_else(
         || {
-            let g = enumerate_groups(disc, addr);
-            store_cached_groups(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware, &g);
+            let g = enumerate_menu(disc, addr, menu);
+            store_cached_menu(disc.cfg.cache_path.as_deref(), &id.article, &id.firmware, menu, &g);
             g
         },
     )
 }
 
-/// Discover a device's full schema (identity + groups).
-pub(super) fn discover(disc: &mut Disc, addr: u32) -> DeviceSchema {
-    let id = fetch_identity(disc, addr);
-    let groups = discover_groups(disc, addr, &id);
-    DeviceSchema::from_identity(id, groups)
-}
-
-fn enumerate_groups(disc: &mut Disc, addr: u32) -> Vec<GroupInfo> {
+fn enumerate_menu(disc: &mut Disc, addr: u32, menu: Menu) -> Vec<GroupInfo> {
+    let (offset, count) = menu_range(disc, addr, menu);
     let mut groups = Vec::new();
-    let mut gid: u32 = 0; // global group id, contiguous across menus
-    for (menu, selector) in [
-        (Menu::Monitoring, 0x02u8),
-        (Menu::Configuration, 0x03u8),
-        (Menu::Service, 0x04u8),
-    ] {
-        let count = disc.group_count(addr, selector);
-        for _ in 0..count {
-            if let Some(g) = enumerate_group(disc, addr, gid as u8, menu) {
-                groups.push(g);
-            }
-            gid += 1;
+    for i in 0..count {
+        let gid = (offset + i) as u8;
+        if let Some(g) = enumerate_group(disc, addr, gid, menu) {
+            groups.push(g);
         }
     }
     groups
@@ -215,12 +228,11 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
     use crate::protocol::shadow_op as op;
     let f = fid as u8;
 
-    // All per-field metadata in one pipelined round-trip.
-    let meta = disc.shadow_batch(
-        addr,
-        f,
-        &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::MIN, op::STEP, op::WRITEABLE],
-    );
+    // Per-field metadata in one pipelined round-trip. Numeric editing bounds
+    // (MIN/STEP) are deferred — they aren't needed to enumerate or read a field,
+    // so we skip them here (op::MAX is still fetched: it doubles as the option
+    // count for lists).
+    let meta = disc.shadow_batch(addr, f, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
     let u16_at4 = |o: u8| meta.get(&o).filter(|r| r.len() >= 6).map(|r| u16::from_le_bytes([r[4], r[5]]));
     let byte4 = |o: u8| meta.get(&o).and_then(|r| r.get(4).copied());
     let f32_at4 = |o: u8| {
@@ -231,8 +243,6 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
     let viz_code = byte4(op::VIZ).unwrap_or(0x01);
     let n_or_max = f32_at4(op::MAX).unwrap_or(0.0);
     let unit_sid = u16_at4(op::UNIT);
-    let min = f32_at4(op::MIN).unwrap_or(0.0);
-    let step = f32_at4(op::STEP).unwrap_or(0.0);
     // Writability: shadow op 0x0B, flag at byte[4].
     let writeable = byte4(op::WRITEABLE).map(|b| b != 0).unwrap_or(false);
 
@@ -266,39 +276,46 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
         unit: field_unit,
         viz_type: viz,
         writeable,
-        min: min as f64,
+        // Deferred numeric bounds (not fetched during enumeration).
+        min: 0.0,
         max: n_or_max as f64,
-        step: step as f64,
+        step: 0.0,
         options,
     }
 }
 
-// ── disk cache (groups keyed by article+firmware) ───────────────────────────
+// ── disk cache (groups keyed by article+firmware+menu) ───────────────────────
 
-fn cache_file(dir: &Path, article: &str, firmware: &str) -> std::path::PathBuf {
-    let safe: String = DeviceSchema::cache_key(article, firmware)
+fn cache_file(dir: &Path, article: &str, firmware: &str, menu: Menu) -> std::path::PathBuf {
+    let key = format!("{}-{}-{:02x}", article, firmware, menu.selector());
+    let safe: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
         .collect();
     dir.join(format!("{}.json", safe))
 }
 
-fn load_cached_groups(dir: Option<&Path>, article: &str, firmware: &str) -> Option<Vec<GroupInfo>> {
+fn load_cached_menu(
+    dir: Option<&Path>,
+    article: &str,
+    firmware: &str,
+    menu: Menu,
+) -> Option<Vec<GroupInfo>> {
     let dir = dir?;
     if article.is_empty() {
         return None;
     }
-    let data = std::fs::read(cache_file(dir, article, firmware)).ok()?;
+    let data = std::fs::read(cache_file(dir, article, firmware, menu)).ok()?;
     serde_json::from_slice(&data).ok()
 }
 
-fn store_cached_groups(dir: Option<&Path>, article: &str, firmware: &str, groups: &[GroupInfo]) {
+fn store_cached_menu(dir: Option<&Path>, article: &str, firmware: &str, menu: Menu, groups: &[GroupInfo]) {
     let Some(dir) = dir else { return };
-    if article.is_empty() || groups.is_empty() {
+    if article.is_empty() {
         return;
     }
     let _ = std::fs::create_dir_all(dir);
     if let Ok(json) = serde_json::to_vec_pretty(groups) {
-        let _ = std::fs::write(cache_file(dir, article, firmware), json);
+        let _ = std::fs::write(cache_file(dir, article, firmware, menu), json);
     }
 }

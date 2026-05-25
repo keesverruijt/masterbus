@@ -1,10 +1,10 @@
 //! Shared in-memory state: device liveness, discovered schema, value cache.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, GroupInfo};
+use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, GroupInfo, Menu};
 use crate::value::Value;
 
 /// A cached field value with its observation time and a dirty flag.
@@ -30,8 +30,11 @@ pub struct DeviceEntry {
     pub fw_hint: u16,
     /// Identity (cheap discovery), once available.
     pub identity: Option<DeviceIdentity>,
-    /// Full discovered schema, once available.
+    /// Schema discovered so far; `groups` accumulates menu-by-menu as menus are
+    /// lazily discovered. `None` until at least the identity is known.
     pub schema: Option<DeviceSchema>,
+    /// Which menus have been discovered into `schema.groups`.
+    pub menus: HashSet<Menu>,
     /// Latest value per field index.
     pub values: HashMap<i32, CachedValue>,
 }
@@ -45,6 +48,7 @@ impl DeviceEntry {
             fw_hint: 0,
             identity: None,
             schema: None,
+            menus: HashSet::new(),
             values: HashMap::new(),
         }
     }
@@ -126,38 +130,73 @@ impl State {
         e.schema.as_ref().map(|s| s.identity()).or_else(|| e.identity.clone())
     }
 
-    /// Store a discovered schema for a device (also satisfies identity).
-    pub fn put_schema(&self, addr: u32, schema: DeviceSchema) {
+    /// Add a discovered menu's groups to a device's schema (identity must already
+    /// be stored). Replaces any previously-held groups for that menu.
+    pub fn put_menu(&self, addr: u32, menu: Menu, groups: Vec<GroupInfo>) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
         let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
-        e.identity = Some(schema.identity());
-        e.schema = Some(schema);
+        let id = e.identity.clone().unwrap_or_else(|| DeviceIdentity {
+            article: String::new(),
+            serial: String::new(),
+            revision: String::new(),
+            name: String::new(),
+            firmware: String::new(),
+        });
+        let schema = e.schema.get_or_insert_with(|| DeviceSchema::from_identity(id, Vec::new()));
+        schema.groups.retain(|g| g.menu != menu);
+        schema.groups.extend(groups);
+        e.menus.insert(menu);
     }
 
-    /// Whether a device's schema has been discovered.
-    pub fn has_schema(&self, addr: u32) -> bool {
-        self.devices.lock().unwrap().get(&addr).map(|e| e.schema.is_some()).unwrap_or(false)
+    /// Whether a specific menu has been discovered for a device.
+    pub fn has_menu(&self, addr: u32, menu: Menu) -> bool {
+        self.devices.lock().unwrap().get(&addr).map(|e| e.menus.contains(&menu)).unwrap_or(false)
     }
 
-    /// Clone a device's schema if present.
+    /// Whether every menu in `menus` has been discovered for a device.
+    pub fn has_menus(&self, addr: u32, menus: &[Menu]) -> bool {
+        let map = self.devices.lock().unwrap();
+        match map.get(&addr) {
+            Some(e) => menus.iter().all(|m| e.menus.contains(m)),
+            None => false,
+        }
+    }
+
+    /// Whether a particular field has been discovered for a device.
+    pub fn has_field(&self, addr: u32, field: i32) -> bool {
+        let map = self.devices.lock().unwrap();
+        map.get(&addr)
+            .and_then(|e| e.schema.as_ref())
+            .map(|s| s.field(field).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Clone a device's schema-so-far (groups of all discovered menus).
     pub fn schema(&self, addr: u32) -> Option<DeviceSchema> {
         self.devices.lock().unwrap().get(&addr).and_then(|e| e.schema.clone())
     }
 
-    /// Find groups from an already-discovered device with the same identity key
-    /// (`article + firmware`). Lets identical devices (e.g. four matching
-    /// batteries) be discovered once and reused, since their schema is identical.
-    pub fn groups_by_key(&self, article: &str, firmware: &str) -> Option<Vec<GroupInfo>> {
+    /// Find one menu's groups from an already-discovered device with the same
+    /// identity key (`article + firmware`). Lets identical devices discover each
+    /// menu once and reuse it.
+    pub fn menu_groups_by_key(
+        &self,
+        article: &str,
+        firmware: &str,
+        menu: Menu,
+    ) -> Option<Vec<GroupInfo>> {
         if article.is_empty() {
             return None;
         }
         let map = self.devices.lock().unwrap();
         map.values().find_map(|e| {
-            e.schema
-                .as_ref()
-                .filter(|s| s.article == article && s.firmware == firmware)
-                .map(|s| s.groups.clone())
+            let s = e.schema.as_ref()?;
+            if s.article == article && s.firmware == firmware && e.menus.contains(&menu) {
+                Some(s.groups.iter().filter(|g| g.menu == menu).cloned().collect())
+            } else {
+                None
+            }
         })
     }
 
