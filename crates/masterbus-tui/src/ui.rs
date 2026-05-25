@@ -60,10 +60,15 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Tab bar (menus) + content below it.
+    // Tab bar (Information + menus) + content below it.
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
-    let titles: Vec<Line> = TABS.iter().map(|&m| Line::raw(menu_label(m))).collect();
-    let sel = TABS.iter().position(|&m| m == app.cur_menu).unwrap_or(0);
+    let mut titles: Vec<Line> = vec![Line::raw("Information")];
+    titles.extend(TABS.iter().map(|&m| Line::raw(menu_label(m))));
+    let sel = if app.on_info {
+        0
+    } else {
+        1 + TABS.iter().position(|&m| m == app.cur_menu).unwrap_or(0)
+    };
     f.render_widget(
         Tabs::new(titles)
             .select(sel)
@@ -71,6 +76,12 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         parts[0],
     );
     let content = parts[1];
+
+    // Information tab: device identity, not a field list.
+    if app.on_info {
+        draw_info(f, app, id, content);
+        return;
+    }
 
     // While a tab is being discovered, show an animated progress panel.
     if let Some((name, menu, secs)) = app.pending_info() {
@@ -130,6 +141,33 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ");
     f.render_stateful_widget(list, content, &mut state);
+}
+
+fn draw_info(f: &mut Frame, app: &App, id: u32, area: Rect) {
+    let row = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!("  {k:<11}"), Style::new().fg(Color::DarkGray)),
+            Span::raw(v),
+        ])
+    };
+    let mut lines = vec![Line::raw("")];
+    if let Some(info) = &app.cur_info {
+        lines.push(row("Name", info.name.clone()));
+        lines.push(row("Device id", format!("{id:06X}")));
+        lines.push(row("Article", info.article.clone()));
+        lines.push(row("Serial", info.serial.clone()));
+        lines.push(row("Revision", info.revision.clone()));
+        lines.push(row("Firmware", info.firmware.clone()));
+        let status = app.device_status(id);
+        let (sym, color) = status_style(status);
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<11}", "Status"), Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("{sym} {status:?}"), Style::new().fg(color)),
+        ]));
+    } else {
+        lines.push(Line::raw("  (identity unavailable)"));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {

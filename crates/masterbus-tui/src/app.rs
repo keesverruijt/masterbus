@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use masterbus::{
-    DeviceStatus, FieldInfo, GroupInfo, MasterBus, Menu, Subscription, Value, VisualizationType,
+    DeviceIdentity, DeviceStatus, FieldInfo, GroupInfo, MasterBus, Menu, Subscription, Value,
+    VisualizationType,
 };
 
 /// Live-poll rate for the selected device's monitoring fields.
@@ -61,6 +62,10 @@ pub struct App {
     pub dev_sel: usize,
     pub focus: Focus,
     pub cur_device: Option<u32>,
+    /// Whether the Information tab (device identity) is showing instead of a menu.
+    pub on_info: bool,
+    /// Cached identity for the Information tab.
+    pub cur_info: Option<DeviceIdentity>,
     /// The currently-displayed tab (menu).
     pub cur_menu: Menu,
     /// Menus already discovered for `cur_device`.
@@ -88,6 +93,8 @@ impl App {
             dev_sel: 0,
             focus: Focus::Devices,
             cur_device: None,
+            on_info: false,
+            cur_info: None,
             cur_menu: Menu::Monitoring,
             loaded_menus: HashSet::new(),
             rows: Vec::new(),
@@ -135,6 +142,8 @@ impl App {
     pub fn open_device(&mut self) {
         let Some(&id) = self.device_ids.get(self.dev_sel) else { return };
         self.cur_device = Some(id);
+        self.on_info = false;
+        self.cur_info = None;
         self.cur_menu = Menu::Monitoring;
         self.loaded_menus.clear();
         self.sub = None;
@@ -157,10 +166,31 @@ impl App {
         if self.cur_device.is_none() || self.pending.is_some() {
             return;
         }
-        let i = TABS.iter().position(|&m| m == self.cur_menu).unwrap_or(0) as i32;
-        let n = TABS.len() as i32;
-        let menu = TABS[(((i + delta) % n + n) % n) as usize];
-        self.switch_tab(menu);
+        // Tab 0 is Information; tabs 1.. are the menus in `TABS` order.
+        let n = TABS.len() as i32 + 1;
+        let cur = if self.on_info {
+            0
+        } else {
+            1 + TABS.iter().position(|&m| m == self.cur_menu).unwrap_or(0) as i32
+        };
+        let next = ((cur + delta) % n + n) % n;
+        if next == 0 {
+            self.enter_info();
+        } else {
+            self.on_info = false;
+            self.switch_tab(TABS[(next - 1) as usize]);
+        }
+    }
+
+    /// Switch to the Information tab: device identity, no field list.
+    fn enter_info(&mut self) {
+        let Some(id) = self.cur_device else { return };
+        self.on_info = true;
+        self.sub = None;
+        self.rows.clear();
+        self.row_sel = 0;
+        self.cur_info = self.bus.device(id).identity().ok();
+        self.status = format!("{} / Information — Tab switch · Esc back", self.device_label(id));
     }
 
     fn switch_tab(&mut self, menu: Menu) {
@@ -264,6 +294,8 @@ impl App {
         self.pending = None;
         self.rows.clear();
         self.loaded_menus.clear();
+        self.on_info = false;
+        self.cur_info = None;
         self.cur_device = None;
         self.status = "↑/↓ select · Enter open · q quit".into();
     }
