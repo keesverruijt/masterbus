@@ -1,0 +1,91 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach release assets on tag builds
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+          - target: armv7-unknown-linux-gnueabihf # armhf
+            packages: gcc-arm-linux-gnueabihf
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross linker
+        if: matrix.packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Lint and test once, on the native target (cross targets can't run here).
+      - name: Clippy & tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Build release (whole workspace)
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      # The shippable binaries are the TUI executable and the FFI library + its
+      # generated header. (The `masterbus` core crate is a Rust library — consumed
+      # via crates.io as an rlib — so it has no standalone binary; it is still
+      # built and checked as part of the workspace above.)
+      - name: Stage artifacts
+        run: |
+          dist="masterbus-${{ matrix.target }}"
+          mkdir -p "$dist"
+          cp "target/${{ matrix.target }}/release/masterbus-tui" "$dist/"
+          cp "target/${{ matrix.target }}/release/libmasterbus_ffi.so" "$dist/"
+          cp "target/${{ matrix.target }}/release/libmasterbus_ffi.a" "$dist/"
+          cp crates/masterbus-ffi/include/masterbus.h "$dist/"
+          echo "DIST=$dist" >> "$GITHUB_ENV"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DIST }}
+          path: ${{ env.DIST }}/
+
+      - name: Package tarball (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: tar czf "${{ env.DIST }}.tar.gz" "${{ env.DIST }}"
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DIST }}.tar.gz
