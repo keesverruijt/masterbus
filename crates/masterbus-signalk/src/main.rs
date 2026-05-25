@@ -1,11 +1,12 @@
 //! Signal K sidecar for Mastervolt MasterBus.
 //!
-//! Subscribes to the monitoring values of every device on the bus and prints
-//! **Signal K deltas** (one JSON object per line) to stdout. Point a Signal K
-//! server "Execute" connection (data format: Signal K) at this binary:
+//! Subscribes to the monitoring values of every device on the bus and serves
+//! **Signal K deltas** as newline-delimited JSON over **TCP**. It listens on
+//! `0.0.0.0:3009` by default; a Signal K server connects to it as a client
+//! (data connection type: Signal K, over TCP).
 //!
 //! ```text
-//! masterbus-signalk <can-interface> [cache-dir]
+//! masterbus-signalk <can-interface> [listen-addr] [cache-dir]
 //! ```
 //!
 //! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
@@ -18,10 +19,15 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use masterbus::{Config, MasterBus, Menu, Value};
 use serde_json::json;
+
+/// Default TCP listen address.
+const DEFAULT_LISTEN: &str = "0.0.0.0:3009";
 
 /// How often each value is (re)emitted.
 const RATE: Duration = Duration::from_millis(1000);
@@ -31,17 +37,19 @@ fn main() {
     let iface = match args.next() {
         Some(s) => s,
         None => {
-            eprintln!("usage: masterbus-signalk <can-interface> [cache-dir]");
+            eprintln!("usage: masterbus-signalk <can-interface> [listen-addr] [cache-dir]");
+            eprintln!("       listen-addr defaults to {DEFAULT_LISTEN}");
             std::process::exit(1);
         }
     };
+    let listen = args.next().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let config = Config { cache_path: args.next().map(Into::into), ..Default::default() };
 
     #[cfg(target_os = "linux")]
     {
         match MasterBus::socketcan(&iface, config) {
             Ok(bus) => {
-                if let Err(e) = run(bus) {
+                if let Err(e) = run(bus, &listen) {
                     eprintln!("masterbus-signalk: {e}");
                     std::process::exit(1);
                 }
@@ -54,7 +62,7 @@ fn main() {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (iface, config);
+        let _ = (iface, listen, config);
         eprintln!("masterbus-signalk requires Linux/SocketCAN");
     }
 }
@@ -67,7 +75,24 @@ struct FieldMeta {
     unit: String,
 }
 
-fn run(bus: MasterBus) -> std::io::Result<()> {
+fn run(bus: MasterBus, listen: &str) -> std::io::Result<()> {
+    // TCP server: clients (e.g. a Signal K server) connect and receive the delta
+    // stream. The listener thread appends new connections to the shared set.
+    let listener = TcpListener::bind(listen)?;
+    eprintln!("masterbus-signalk: listening on {} (Signal K delta, ndjson)", listener.local_addr()?);
+    let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let clients = clients.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let _ = stream.set_nodelay(true);
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                eprintln!("masterbus-signalk: client connected: {:?}", stream.peer_addr().ok());
+                clients.lock().unwrap().push(stream);
+            }
+        });
+    }
+
     let devices = bus.devices_all();
     let mut meta: HashMap<(u32, i32), FieldMeta> = HashMap::new();
     let mut subs = Vec::new();
@@ -111,17 +136,19 @@ fn run(bus: MasterBus) -> std::io::Result<()> {
         devices.len()
     );
 
-    let stdout = std::io::stdout();
     loop {
-        let mut out = stdout.lock();
-        let mut wrote = false;
+        // Skip building deltas when nobody is listening (the channels are still
+        // drained below so they don't grow unbounded).
+        let have_clients = !clients.lock().unwrap().is_empty();
+        let mut batch: Vec<u8> = Vec::new();
         for sub in &subs {
             // Coalesce to the latest value per path this cycle: a field can be
             // updated many times between polls (the boat's real masters poll some
             // values rapidly, and we emit those too).
             let mut latest: HashMap<String, serde_json::Value> = HashMap::new();
             while let Some(u) = sub.try_recv() {
-                if let Some(m) = meta.get(&(u.device, u.field))
+                if have_clients
+                    && let Some(m) = meta.get(&(u.device, u.field))
                     && let Some((path, value)) = map_field(&m.class, &m.instance, &m.name, &m.unit, &u.value)
                 {
                     latest.insert(path, value);
@@ -137,14 +164,19 @@ fn run(bus: MasterBus) -> std::io::Result<()> {
                         "values": values,
                     }]
                 });
-                writeln!(out, "{}", serde_json::to_string(&delta).unwrap())?;
-                wrote = true;
+                batch.extend_from_slice(serde_json::to_string(&delta).unwrap().as_bytes());
+                batch.push(b'\n');
             }
         }
-        if wrote {
-            out.flush()?;
+        if !batch.is_empty() {
+            let mut cs = clients.lock().unwrap();
+            let before = cs.len();
+            cs.retain_mut(|c| c.write_all(&batch).and_then(|()| c.flush()).is_ok());
+            let dropped = before - cs.len();
+            if dropped > 0 {
+                eprintln!("masterbus-signalk: {dropped} client(s) disconnected");
+            }
         }
-        drop(out);
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -216,10 +248,13 @@ fn map_field(
     }
 }
 
-/// Keep only Signal K path-segment-safe characters in an instance id.
+/// Lowercase and keep only Signal K path-segment-safe characters in an instance
+/// id (lowercase reads more idiomatically in Signal K paths).
 fn sanitize(s: &str) -> String {
-    let cleaned: String =
-        s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .collect();
     if cleaned.is_empty() { "0".into() } else { cleaned }
 }
 
