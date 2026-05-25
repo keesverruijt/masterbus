@@ -264,7 +264,7 @@ fn write_value_for(viz: VisualizationType, value: Value) -> Result<WriteValue> {
     use VisualizationType as V;
     let wrong = |expected| Err(Error::WrongType { expected });
     match viz {
-        V::Float | V::GrayVisualization => match value {
+        V::Float => match value {
             Value::Float(f) => Ok(WriteValue::Float(f)),
             _ => wrong("Float"),
         },
@@ -284,8 +284,8 @@ fn write_value_for(viz: VisualizationType, value: Value) -> Result<WriteValue> {
             Value::DeviceRef { index, .. } => Ok(WriteValue::ListIndex(index)),
             _ => wrong("DeviceRef"),
         },
-        // Date/Time/Text fields have no defined write encoding.
-        V::Date | V::Time | V::Text => wrong("a writable type"),
+        // Greyed (read-only display) and Date/Time/Text have no write encoding.
+        V::GrayVisualization | V::Date | V::Time | V::Text => wrong("a writable type"),
     }
 }
 
