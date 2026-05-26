@@ -50,6 +50,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   need no `libudev`/C toolchain.
 
 ### Fixed
+- Boolean/list writes now send the field's full **4-byte value** (a `CheckBox`
+  is a float `1.0`/`0.0`), matching MasterAdjust; the old 1-byte boolean write
+  was ignored by e.g. the CombiMaster's inverter/charger. `CheckBox` reads now
+  decode any non-zero value as true (an "on" can arrive as float `1.0`, whose
+  byte 0 is `0`).
 - Battery "Cluster" group no longer hidden: dropping the cross-device schema
   dedup means each battery (including the cluster master) is discovered on its
   own.

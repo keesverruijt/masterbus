@@ -17,7 +17,7 @@ use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
 use crate::protocol::{
-    can_class, decode_value, encode_set_boolean, encode_set_float, heartbeat_raw,
+    decode_value, encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw,
     monitoring_req_raw, TAB_DEFAULT, VisualizationType,
 };
 use crate::transport::TransportTx;
@@ -226,10 +226,7 @@ impl Sched {
         let frame = match value {
             WriteValue::Bool(b) => encode_set_boolean(addr, field as u8, b),
             WriteValue::Float(f) => encode_set_float(addr, field as u8, f),
-            WriteValue::ListIndex(i) => (
-                ((can_class::MONITORING_REQ as u32) << 24) | (addr & 0x00_FF_FF_FF),
-                vec![field as u8, TAB_DEFAULT, i as u8],
-            ),
+            WriteValue::ListIndex(i) => encode_set_list(addr, field as u8, i),
         };
         self.send(frame);
         self.state.mark_outdated(addr, field);

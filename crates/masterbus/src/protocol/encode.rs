@@ -75,12 +75,18 @@ pub fn shadow_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u3
     )
 }
 
-/// Boolean write: class `0x18`, `[field, tab, 0|1]`.
+/// Boolean write: class `0x18`, `[field, tab, f32 LE]` with `1.0`=true / `0.0`=false.
+/// Booleans go on the wire as the field's full 4-byte value (a `CheckBox` is just
+/// a float that's 0 or 1), so a 1-byte write is ignored by e.g. the CombiMaster.
 pub fn encode_set_boolean(device_addr: u32, field_index: u8, value: bool) -> (u32, Vec<u8>) {
-    (
-        id(can_class::MONITORING_REQ, device_addr),
-        vec![field_index, TAB_DEFAULT, value as u8],
-    )
+    encode_set_float(device_addr, field_index, if value { 1.0 } else { 0.0 })
+}
+
+/// List/enum write: class `0x18`, `[field, tab, index, 0, 0, 0]` (4-byte value,
+/// index in the low byte to mirror how a list value is read).
+pub fn encode_set_list(device_addr: u32, field_index: u8, index: i32) -> (u32, Vec<u8>) {
+    let data = vec![field_index, TAB_DEFAULT, index as u8, 0, 0, 0];
+    (id(can_class::MONITORING_REQ, device_addr), data)
 }
 
 /// Float write: class `0x18`, `[field, tab, f32 LE]`.
@@ -98,6 +104,18 @@ mod tests {
     fn heartbeat_is_class05_empty() {
         // Matches the observed master heartbeat on the wire: 0553A493# (no data).
         assert_eq!(heartbeat_raw(0x53A493), (0x0553A493, Vec::new()));
+    }
+
+    #[test]
+    fn boolean_write_is_4byte_float() {
+        // Matches MasterAdjust's inverter toggle: field, tab, float 1.0 / 0.0.
+        assert_eq!(encode_set_boolean(0x188EA2, 0x13, true).1, vec![0x13, 0x00, 0x00, 0x00, 0x80, 0x3f]);
+        assert_eq!(encode_set_boolean(0x188EA2, 0x13, false).1, vec![0x13, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn list_write_is_4byte() {
+        assert_eq!(encode_set_list(0x188EA2, 0x05, 2).1, vec![0x05, 0x00, 0x02, 0, 0, 0]);
     }
 
     #[test]

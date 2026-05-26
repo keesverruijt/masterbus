@@ -8,9 +8,10 @@ mod encode;
 
 pub use decode::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame};
 pub use encode::{
-    encode_set_boolean, encode_set_float, fw_req_raw, group_count_req_raw, heartbeat_raw,
-    monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_raw, schema_field_id_req_raw,
-    schema_group_name_req_raw, shadow_meta_req_raw, shadow_option_req_raw, string_chunk_req_raw,
+    encode_set_boolean, encode_set_float, encode_set_list, fw_req_raw, group_count_req_raw,
+    heartbeat_raw, monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_raw,
+    schema_field_id_req_raw, schema_group_name_req_raw, shadow_meta_req_raw, shadow_option_req_raw,
+    string_chunk_req_raw,
 };
 
 /// CAN class bytes (bits 28:24 of the 29-bit id).

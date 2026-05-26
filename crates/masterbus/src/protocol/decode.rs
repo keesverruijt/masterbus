@@ -68,7 +68,9 @@ pub fn decode_value(raw: &[u8], viz: VisualizationType) -> Value {
             Value::Float(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
         }
         V::CheckBox | V::ToggleButton | V::PushButton => {
-            Value::Boolean(raw.first().map(|&b| b != 0).unwrap_or(false))
+            // "On" may be a 1-byte 0x01 or a 4-byte float 1.0 (byte0=0); treat any
+            // non-zero in the value as true.
+            Value::Boolean(raw.iter().take(4).any(|&b| b != 0))
         }
         V::Time => {
             if raw.len() < 4 {
@@ -200,5 +202,8 @@ mod tests {
     fn float_and_bool() {
         assert_eq!(decode_value(&9.0f32.to_le_bytes(), VisualizationType::Float), Value::Float(9.0));
         assert_eq!(decode_value(&[1, 0, 0, 0], VisualizationType::CheckBox), Value::Boolean(true));
+        // "On" can also arrive as a 4-byte float 1.0 (byte0 = 0).
+        assert_eq!(decode_value(&1.0f32.to_le_bytes(), VisualizationType::CheckBox), Value::Boolean(true));
+        assert_eq!(decode_value(&[0, 0, 0, 0], VisualizationType::CheckBox), Value::Boolean(false));
     }
 }
