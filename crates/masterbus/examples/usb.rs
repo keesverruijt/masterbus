@@ -10,7 +10,16 @@ use masterbus::{Config, MasterBus, Value};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let bus = match MasterBus::usb(None, Config::default()) {
+    // HEARTBEAT_MASTER=<hex> makes us drive the bus as master (class-0x05
+    // heartbeat) so devices announce/respond without a hardware master present.
+    let heartbeat_master = std::env::var("HEARTBEAT_MASTER")
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+    if let Some(m) = heartbeat_master {
+        eprintln!("(heartbeat master {m:06X})");
+    }
+    let config = Config { heartbeat_master, ..Config::default() };
+    let bus = match MasterBus::usb(None, config) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("connect failed: {e}");
