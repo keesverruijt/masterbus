@@ -1,15 +1,18 @@
 # masterbus
 
 An idiomatic Rust client for the Mastervolt **MasterBus** CAN-bus protocol, with
-a terminal UI and a C-ABI wrapper.
+a terminal UI, a Signal K sidecar, and a C-ABI wrapper. Talks to the bus over
+**Linux SocketCAN**, or over the **Mastervolt USB link** (a class-compliant HID
+device — no vendor driver) on **Linux, macOS, and Windows**.
 
 A Cargo workspace:
 
 | crate | what |
 |-------|------|
 | [`masterbus`](crates/masterbus) | core library (the protocol, discovery, caching, subscriptions, the `MasterBus`/`Device`/`Group`/`Field` navigator API and a non-blocking channel API) |
-| [`masterbus-ffi`](crates/masterbus-ffi) | C ABI `cdylib` (single-threaded), header generated with cbindgen, plus C demos |
 | [`masterbus-tui`](crates/masterbus-tui) | terminal UI to browse devices/values and edit settings |
+| [`masterbus-signalk`](crates/masterbus-signalk) | long-running sidecar that streams MasterBus values as Signal K deltas (newline-delimited JSON) over TCP |
+| [`masterbus-ffi`](crates/masterbus-ffi) | C ABI `cdylib` (single-threaded), header generated with cbindgen, plus C demos (not published to crates.io) |
 
 The wire protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
@@ -48,9 +51,10 @@ This repository is the fruit of that work.
 
 ## Building
 
-The core talks to the bus over **Linux SocketCAN**, so the library and tools run
-on Linux (e.g. a Raspberry Pi wired to the bus). The crates build on any host;
-the SocketCAN transport is compiled in only on Linux.
+The core ships two transports: **Linux SocketCAN** (for hosts wired to the bus —
+e.g. a Raspberry Pi) and the **Mastervolt USB link** (a class-compliant HID
+device — no vendor driver — usable on Linux, macOS, and Windows). SocketCAN is
+compiled in only on Linux; the USB transport is built unconditionally.
 
 ```sh
 cargo build --workspace                 # build everything (host)
@@ -61,13 +65,34 @@ cargo build --release --target aarch64-unknown-linux-gnu   # cross-compile for a
 ### TUI
 
 ```sh
-masterbus-tui <can-interface> [cache-dir]      # e.g. masterbus-tui can0 ~/.cache/masterbus
+# Linux: SocketCAN, or the USB link
+masterbus-tui can0 [cache-dir]               # e.g. masterbus-tui can0 ~/.cache/masterbus
+masterbus-tui usb  [serial] [cache-dir]      # over the Mastervolt USB link
+
+# macOS / Windows: USB link only (no argument needed)
+masterbus-tui
 ```
 
 Browse devices on the left; the selected device's groups/fields are on the right.
 `Tab` switches between the Monitoring / Config / Service tabs (each discovered on
 demand). Writable fields are editable: booleans toggle, numbers open an editor,
 lists cycle with the arrow keys.
+
+### Signal K sidecar
+
+`masterbus-signalk` is a long-running service that publishes MasterBus monitoring
+values as **Signal K deltas** (newline-delimited JSON) over TCP (default
+`0.0.0.0:3009`), with SI-unit conversion. A `mapping.ini` controls which
+devices/menus/groups are published; new devices are auto-added with sane defaults.
+Ships with a hardened systemd unit.
+
+```sh
+masterbus-signalk <can-interface> [listen-addr] [cache-dir]
+# e.g. masterbus-signalk can0 0.0.0.0:3009 /var/lib/masterbus
+```
+
+To act as the bus master (so devices keep responding when no hardware master is
+present), set `HEARTBEAT_MASTER=<24-bit hex>` in the environment.
 
 ### C library and demos
 
@@ -79,19 +104,17 @@ target to cross-compile and deploy to a Pi. See that directory's `Makefile`.
 
 ## Status
 
-Works over SocketCAN on Linux; the navigator API, FFI demos and TUI have all been
-exercised against a live bus.
+Works over SocketCAN on Linux and over the Mastervolt USB link on Linux, macOS,
+and Windows. The navigator API, FFI demos, TUI, and Signal K sidecar have all
+been exercised against a live bus.
 
 ## TODO
 
-- [x] **USB link transport (multi-OS)** — the Mastervolt USB link is a
-  class-compliant HID device; `MasterBus::usb()` talks to it directly (no vendor
-  driver), so the engine runs on **macOS and Windows** and on Linux without a CAN
-  interface. HID framing reverse-engineered and validated (incl. writes) against a
-  live bus.
 - [ ] **Dealer access level** — installer/service fields are viewable but
   write-gated at the CAN level until a dealer-login frame is sent; capturing that
   frame is deferred, so for now only already-writable fields can be set.
+- [ ] **Alarms and Events** — the per-device Alarm tab and event streams are not
+  yet exposed by the API.
 
 ## License
 
