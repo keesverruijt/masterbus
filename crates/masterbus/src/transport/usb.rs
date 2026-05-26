@@ -11,18 +11,19 @@
 //! ```text
 //! byte 0      : N = number of valid 14-byte records that follow
 //! bytes 1..   : N records, 14 bytes each:
-//!                 [0]   hdr   = can_class << 3  (top 3 bits duplicate addr[23:21])
-//!                 [1]   addr hi   (bits 23:16)
-//!                 [2]   addr mid  (bits 15:8)
-//!                 [3]   addr lo   (bits 7:0)
+//!                 [0]   hdr  = (can_class << 3) | addr[23:21]
+//!                 [1]   addr high byte, scrambled (see `decode_can_id`)
+//!                 [2]   addr mid  (bits 15:8, plain)
+//!                 [3]   addr lo   (bits 7:0, plain)
 //!                 [4]   dlc       (0..=8)
 //!                 [5..13] data, zero-padded to 8 bytes
 //!                 [13]  trailing (unused, 0)
 //! tail        : device-appended trailer (ignored)
 //! ```
 //!
-//! `can_id = (can_class << 24) | addr24`. A single 64-byte report can batch up to
-//! four CAN frames (host→device we only ever emit one per report).
+//! `can_id = (can_class << 24) | addr24`, reconstructed so it matches the bus /
+//! SocketCAN view. A single 64-byte report can batch up to four CAN frames
+//! (host→device we only ever emit one per report).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -79,29 +80,45 @@ impl Transport for UsbTransport {
     }
 }
 
+/// Decode a 14-byte record's header into the real 29-bit CAN id.
+///
+/// The HID framing scrambles the **address high byte** across the header byte
+/// and a second byte; the mid/low bytes are plain. (`b1` bit 3 is a direction
+/// marker — set on device→host, clear on host→device — and is not part of the
+/// address.) This reconstructs the same id the bus / SocketCAN sees.
+fn decode_can_id(rec: &[u8]) -> u32 {
+    let class = u32::from(rec[0] >> 3);
+    let addr_hi = (u32::from(rec[0] & 0x07) << 5)
+        | ((u32::from(rec[1] >> 5) & 0x07) << 2)
+        | u32::from(rec[1] & 0x03);
+    let addr = (addr_hi << 16) | (u32::from(rec[2]) << 8) | u32::from(rec[3]);
+    (class << 24) | addr
+}
+
 /// Split a 64-byte input report into its CAN frames.
 fn parse_report(report: &[u8], out: &mut VecDeque<(u32, Vec<u8>)>) {
     let count = report.first().copied().unwrap_or(0) as usize;
     for i in 0..count {
         let base = 1 + i * REC_LEN;
         let Some(rec) = report.get(base..base + REC_LEN) else { break };
-        let class = u32::from(rec[0] >> 3);
-        let addr = (u32::from(rec[1]) << 16) | (u32::from(rec[2]) << 8) | u32::from(rec[3]);
+        let can_id = decode_can_id(rec);
         let dlc = (rec[4] as usize).min(MAX_DATA);
-        let can_id = (class << 24) | addr;
         out.push_back((can_id, rec[5..5 + dlc].to_vec()));
     }
 }
 
 /// Build a 64-byte output report carrying a single CAN frame, prefixed with the
-/// report-id byte (0) that `hid_write` requires.
+/// report-id byte (0) that `hid_write` requires. Inverse of [`decode_can_id`]
+/// (host→device, so the direction-marker bit is left clear).
 fn build_report(can_id: u32, data: &[u8]) -> [u8; REPORT_LEN + 1] {
+    let class = (can_id >> 24) & 0x1F;
+    let addr_hi = (can_id >> 16) & 0xFF;
     let mut buf = [0u8; REPORT_LEN + 1];
     buf[0] = 0x00; // report id
     let p = &mut buf[1..]; // 64-byte payload
     p[0] = 1; // one record
-    p[1] = ((can_id >> 21) & 0xFF) as u8; // hdr = class<<3 | addr[23:21]
-    p[2] = ((can_id >> 16) & 0xFF) as u8;
+    p[1] = ((class << 3) | (addr_hi >> 5)) as u8; // hdr = class<<3 | addr[23:21]
+    p[2] = ((((addr_hi >> 2) & 0x07) << 5) | (addr_hi & 0x03)) as u8; // scrambled addr[20:16]
     p[3] = ((can_id >> 8) & 0xFF) as u8;
     p[4] = (can_id & 0xFF) as u8;
     let dlc = data.len().min(MAX_DATA);
@@ -153,31 +170,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decode_real_addresses() {
+        // Real captured records → the same ids SocketCAN reports.
+        // Battery 6E96CF: hdr c3, b1 6a.
+        assert_eq!(decode_can_id(&[0xc3, 0x6a, 0x96, 0xcf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0x18_6E_96_CF);
+        // CombiMaster 188EA2: hdr c0, b1 c8 (device→host marker bit set).
+        assert_eq!(decode_can_id(&[0xc0, 0xc8, 0x8e, 0xa2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0x18_18_8E_A2);
+        // Class-04 broadcast of the CombiMaster: hdr 0x20.
+        assert_eq!(decode_can_id(&[0x20, 0xc8, 0x8e, 0xa2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0x04_18_8E_A2);
+    }
+
+    #[test]
     fn parse_two_records() {
-        // count=2, then a class-0x18 request (dlc 2) and a class-0x08 value (dlc 6).
         let mut r = [0u8; REPORT_LEN];
         r[0] = 2;
-        // record 0: c3 6a 96 cf 02 8b 00 ...
+        // class-0x18 request (dlc 2) and class-0x08 value (dlc 6) from battery 6E96CF.
         r[1..1 + REC_LEN].copy_from_slice(&[0xc3, 0x6a, 0x96, 0xcf, 0x02, 0x8b, 0x00, 0, 0, 0, 0, 0, 0, 0]);
-        // record 1: 43 6a 96 cf 06 8b 00 bb 49 de 41 ...
         r[15..15 + REC_LEN]
             .copy_from_slice(&[0x43, 0x6a, 0x96, 0xcf, 0x06, 0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41, 0, 0, 0]);
         let mut q = VecDeque::new();
         parse_report(&r, &mut q);
         assert_eq!(q.len(), 2);
-        assert_eq!(q[0], (0x18_6a_96_cf, vec![0x8b, 0x00]));
-        assert_eq!(q[1], (0x08_6a_96_cf, vec![0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41]));
+        assert_eq!(q[0], (0x18_6E_96_CF, vec![0x8b, 0x00]));
+        assert_eq!(q[1], (0x08_6E_96_CF, vec![0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41]));
     }
 
     #[test]
-    fn build_round_trips_class_and_addr() {
-        let buf = build_report(0x18_6a_96_cf, &[0x8c, 0x00, 0x00, 0x00, 0x10, 0x41]);
+    fn build_matches_masteradjust_write() {
+        // MasterAdjust's AC-IN-limit write to the CombiMaster was: 01 c0 c0 8e a2 06 17 00 00 00 a0 40
+        let buf = build_report(0x18_18_8E_A2, &[0x17, 0x00, 0x00, 0x00, 0xa0, 0x40]);
         let p = &buf[1..];
         assert_eq!(buf[0], 0x00); // report id
-        assert_eq!(p[0], 1); // one record
-        assert_eq!(p[1], 0xc3); // class 0x18 << 3 | addr[23:21]=0b011
-        assert_eq!(&p[2..5], &[0x6a, 0x96, 0xcf]);
+        assert_eq!(&p[0..5], &[0x01, 0xc0, 0xc0, 0x8e, 0xa2]);
         assert_eq!(p[5], 6); // dlc
-        assert_eq!(&p[6..12], &[0x8c, 0x00, 0x00, 0x00, 0x10, 0x41]);
+        assert_eq!(&p[6..12], &[0x17, 0x00, 0x00, 0x00, 0xa0, 0x40]);
+    }
+
+    #[test]
+    fn build_then_decode_round_trips() {
+        for id in [0x18_18_8E_A2u32, 0x07_43_DF_24, 0x18_6E_96_CF, 0x04_30_47_2A] {
+            let buf = build_report(id, &[1, 2, 3]);
+            assert_eq!(decode_can_id(&buf[2..16]), id);
+        }
     }
 }
