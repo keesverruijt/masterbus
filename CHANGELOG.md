@@ -55,6 +55,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was ignored by e.g. the CombiMaster's inverter/charger. `CheckBox` reads now
   decode any non-zero value as true (an "on" can arrive as float `1.0`, whose
   byte 0 is `0`).
+- Relay-style boolean controls now actually switch: after the value write the
+  scheduler emits a fixed **commit token** (`14 9f 3c 02`) to the adjacent hidden
+  command register at `field+1` — captured from MasterAdjust toggling the
+  CombiMaster inverter/charger (constant across both, on/off). Only sent when
+  `field+1` is not a real schema field, so it never clobbers a neighbour.
+- **List/dropdown** values are the selected index as a 4-byte **float** (e.g.
+  option 1 = `1.0`), not a low-byte integer — so both reads and writes of
+  drop-downs (e.g. the Solar "Override" enable) now match the device.
 - Battery "Cluster" group no longer hidden: dropping the cross-device schema
   dedup means each battery (including the cluster master) is discovered on its
   own.

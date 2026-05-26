@@ -105,7 +105,13 @@ pub fn decode_value(raw: &[u8], viz: VisualizationType) -> Value {
             })
         }
         V::Radio | V::DropDown => {
-            Value::List { index: raw.first().map(|&b| b as i32).unwrap_or(0), options: Vec::new() }
+            // The selection is the index as a 4-byte float (e.g. 1.0 = option 1).
+            let index = if raw.len() >= 4 {
+                f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]).round() as i32
+            } else {
+                raw.first().map(|&b| b as i32).unwrap_or(0)
+            };
+            Value::List { index, options: Vec::new() }
         }
         V::Eventable => {
             Value::Eventable { index: raw.first().map(|&b| b as i32).unwrap_or(0), labels: Vec::new() }

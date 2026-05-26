@@ -82,10 +82,22 @@ pub fn encode_set_boolean(device_addr: u32, field_index: u8, value: bool) -> (u3
     encode_set_float(device_addr, field_index, if value { 1.0 } else { 0.0 })
 }
 
-/// List/enum write: class `0x18`, `[field, tab, index, 0, 0, 0]` (4-byte value,
-/// index in the low byte to mirror how a list value is read).
+/// List/enum write: the selected index as a 4-byte float (e.g. option 1 -> `1.0`),
+/// matching how the device reports it.
 pub fn encode_set_list(device_addr: u32, field_index: u8, index: i32) -> (u32, Vec<u8>) {
-    let data = vec![field_index, TAB_DEFAULT, index as u8, 0, 0, 0];
+    encode_set_float(device_addr, field_index, index as f32)
+}
+
+/// "Commit" token some relay-style controls (e.g. the CombiMaster inverter and
+/// charger) require: after writing the value, write this fixed token to the
+/// adjacent hidden command register (value field + 1) for the change to take
+/// effect. Captured constant from MasterAdjust across inverter/charger, on/off.
+pub const COMMIT_TOKEN: [u8; 4] = [0x14, 0x9f, 0x3c, 0x02];
+
+/// Build the commit-token write for the command register `cmd_field`.
+pub fn encode_commit(device_addr: u32, cmd_field: u8) -> (u32, Vec<u8>) {
+    let mut data = vec![cmd_field, TAB_DEFAULT];
+    data.extend_from_slice(&COMMIT_TOKEN);
     (id(can_class::MONITORING_REQ, device_addr), data)
 }
 
@@ -114,8 +126,16 @@ mod tests {
     }
 
     #[test]
-    fn list_write_is_4byte() {
-        assert_eq!(encode_set_list(0x188EA2, 0x05, 2).1, vec![0x05, 0x00, 0x02, 0, 0, 0]);
+    fn list_write_is_index_as_float() {
+        // Matches MasterAdjust's dropdown write (Solar "Override" -> option 1 = 1.0).
+        assert_eq!(encode_set_list(0x387028, 0x01, 1).1, vec![0x01, 0x00, 0x00, 0x00, 0x80, 0x3f]);
+        assert_eq!(encode_set_list(0x188EA2, 0x05, 2).1, vec![0x05, 0x00, 0x00, 0x00, 0x00, 0x40]);
+    }
+
+    #[test]
+    fn commit_token_is_fixed() {
+        // CombiMaster inverter commit: field 0x14, tab 0, then the constant token.
+        assert_eq!(encode_commit(0x188EA2, 0x14).1, vec![0x14, 0x00, 0x14, 0x9f, 0x3c, 0x02]);
     }
 
     #[test]

@@ -17,8 +17,8 @@ use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
 use crate::protocol::{
-    decode_value, encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw,
-    monitoring_req_raw, TAB_DEFAULT, VisualizationType,
+    decode_value, encode_commit, encode_set_boolean, encode_set_float, encode_set_list,
+    heartbeat_raw, monitoring_req_raw, TAB_DEFAULT, VisualizationType,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
@@ -229,6 +229,22 @@ impl Sched {
             WriteValue::ListIndex(i) => encode_set_list(addr, field as u8, i),
         };
         self.send(frame);
+        // Relay-style boolean controls (e.g. the CombiMaster inverter/charger)
+        // only act when the value write is followed by a fixed "commit" token to
+        // the adjacent hidden command register at field+1. Only emit it when that
+        // register is hidden (not a real schema field), so we never clobber a
+        // neighbouring setting on devices that don't use this pattern.
+        if matches!(value, WriteValue::Bool(_)) {
+            let cmd = field + 1;
+            let cmd_hidden = self
+                .state
+                .schema(addr)
+                .map(|s| s.field(cmd).is_none())
+                .unwrap_or(true);
+            if cmd_hidden {
+                self.send(encode_commit(addr, cmd as u8));
+            }
+        }
         self.state.mark_outdated(addr, field);
         // Confirm by observing the resulting value.
         let viz = self.viz_of(addr, field)?;
