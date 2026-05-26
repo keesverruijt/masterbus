@@ -9,6 +9,9 @@ description = "C ABI bindings for the masterbus crate (single-threaded use)"
 readme = "README.md"
 keywords = ["mastervolt", "canbus", "ffi", "marine"]
 categories = ["external-ffi-bindings", "hardware-support"]
+# Not on crates.io: a cdylib/staticlib is consumed via the GitHub release
+# artifacts (the prebuilt libs + generated masterbus.h), not via `cargo add`.
+publish = false
 
 [lib]
 name = "masterbus_ffi"
