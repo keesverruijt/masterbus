@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "hidapi",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cbindgen",
  "masterbus",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-signalk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "masterbus",
  "serde_json",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "masterbus",

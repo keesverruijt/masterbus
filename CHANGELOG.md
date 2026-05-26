@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-25
+
 ### Added
 - `masterbus-signalk`: a Signal K sidecar that streams MasterBus monitoring
   values as Signal K deltas (newline-delimited JSON) over **TCP** (default
@@ -88,5 +90,6 @@ Initial release.
 - CI building release binaries for `x86_64`, `armhf` and `aarch64`, attached to
   tagged releases.
 
-[Unreleased]: https://github.com/keesverruijt/masterbus/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/keesverruijt/masterbus/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/keesverruijt/masterbus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/keesverruijt/masterbus/releases/tag/v0.1.0
