@@ -216,11 +216,47 @@ Response: class `0x08`, payload `[field_index, tab_index, b0, b1, b2, b3]` — a
 
 Tab indices: `0 = Monitoring`, `1 = Alarm`, `2 = History`, `3 = Configuration`.
 
-### 7.2 Write a boolean
+### 7.2 Write a value
 
-Request: class `0x18` to `device_addr`, payload `[field_index, tab_index,
-value_byte]` (`0x01` = true, `0x00` = false). The device replies with a normal
-monitoring-data frame carrying the new value.
+Writes use the **same class `0x18`** as a read, but carry the field's full
+**4-byte value** after `[field_index, tab_index]`. Every settable field — numeric,
+boolean, or list — is written as the same 4-byte representation it is read back as:
+
+```
+[field_index, tab_index, b0, b1, b2, b3]
+```
+
+| Field type | 4-byte value                                     |
+|------------|--------------------------------------------------|
+| Float      | IEEE-754 single, little-endian                   |
+| Boolean    | float `1.0` (`00 00 80 3f`) / `0.0` (`00 00 00 00`) |
+| List/enum  | the selected index as a float (`1.0` = option 1) |
+
+A **1-byte boolean write is ignored** by at least the CombiMaster — booleans must
+be the full 4-byte float. The device confirms by pushing the new value (class
+`0x08`); the immediate echo is unreliable, so confirm by re-reading.
+
+### 7.3 Relay-control "commit" token
+
+Some controls do **not** act on the value write alone. Toggling the CombiMaster's
+**inverter** or **charger** emits the value write **plus** a second write to an
+**adjacent hidden command register** at `field_index + 1`, carrying a fixed token:
+
+```
+inverter on:   [0x13, 0x00, 00 00 80 3f]   then  [0x14, 0x00, 14 9f 3c 02]
+charger  off:  [0x15, 0x00, 00 00 00 00]   then  [0x16, 0x00, 14 9f 3c 02]
+```
+
+The token `14 9f 3c 02` is **constant** — identical for inverter and charger, for
+on and off, and across sessions (not a counter, timestamp, or checksum). The
+command register (`0x14`, `0x16`) is **write-only**: absent from the schema, it
+returns no value when read. Without the commit write the value write is accepted
+but the relay does not change.
+
+A safe rule for emitting it: send the token after a boolean write **only when
+`field_index + 1` is not a real schema field**, so devices that don't use this
+pattern are never disturbed. Float and list writes (e.g. an AC-input limit or a
+drop-down) need no commit write.
 
 ---
 
@@ -262,7 +298,9 @@ IEEE-754 single, little-endian. The quiet-NaN `0x7FC00000` means
 "unknown / not available" (render as null).
 
 ### Boolean (CheckBox / ToggleButton / PushButton)
-`byte[0] != 0`.
+The value is a 4-byte float (`1.0` = on, `0.0` = off), so decode as **any non-zero
+byte in the 4-byte value**. An "on" arriving as the float `1.0` (`00 00 80 3f`)
+has `byte[0] == 0`, so testing only `byte[0]` would misread it as off.
 
 ### Time  → `DD:HH:MM:SS`
 The 4 bytes are an IEEE-754 single holding **total seconds** `t`:
@@ -295,9 +333,15 @@ NaN / ±inf ⇒ null. Example: `843000.0` → `2026*416 + 5*32 + 24` → `24/05/
 > verified bit-for-bit against the library across every date from 2000–2100,
 > including leap years. See FINDINGS §3.
 
-### Radio / DropDown / Eventable / DeviceList
-`byte[0]` = selected index (the human-readable label comes from the option
-strings, §6 opcode 0x26).
+### Radio / DropDown
+The selected **index as a 4-byte float** (e.g. `1.0` = option 1), not a low byte:
+the Solar "Override" drop-down read/wrote `00 00 80 3f` for option 1. Decode as
+`round(f32)`. The human-readable label comes from the option strings (§6 opcode
+0x26).
+
+### Eventable / DeviceList
+`byte[0]` = selected index (not yet re-checked against the float form above —
+likely also a float, given Radio/DropDown).
 
 ### Text
 UTF-8 bytes of the payload (lossy decode).
