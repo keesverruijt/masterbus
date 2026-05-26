@@ -43,6 +43,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   demand); non-blocking boot with live device-name backfill.
 - TUI now runs on **macOS/Windows** over the USB link with **no argument**
   (the only transport there); on Linux pass `<can-iface>` or `usb [serial]`.
+- CI now also builds **Windows** (`x86_64-pc-windows-msvc`, statically linked)
+  and **macOS** (`aarch64`/`x86_64-apple-darwin`) alongside the Linux targets.
 - USB transport is built unconditionally (no `usb` feature). On Linux it uses
   hidapi's pure-Rust hidraw backend (`linux-native-basic-udev`) so cross-builds
   need no `libudev`/C toolchain.

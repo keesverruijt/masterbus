@@ -16,19 +16,19 @@ permissions:
 jobs:
   build:
     name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write # attach release assets on tag builds
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            packages: ""
-          - target: armv7-unknown-linux-gnueabihf # armhf
-            packages: gcc-arm-linux-gnueabihf
-          - target: aarch64-unknown-linux-gnu
-            packages: gcc-aarch64-linux-gnu
+          - { target: x86_64-unknown-linux-gnu,      os: ubuntu-latest,  packages: "",                      rustflags: "" }
+          - { target: armv7-unknown-linux-gnueabihf, os: ubuntu-latest,  packages: gcc-arm-linux-gnueabihf, rustflags: "" } # armhf
+          - { target: aarch64-unknown-linux-gnu,     os: ubuntu-latest,  packages: gcc-aarch64-linux-gnu,   rustflags: "" }
+          - { target: x86_64-pc-windows-msvc,        os: windows-latest, packages: "",                      rustflags: "-C target-feature=+crt-static" }
+          - { target: aarch64-apple-darwin,          os: macos-latest,   packages: "",                      rustflags: "" }
+          - { target: x86_64-apple-darwin,           os: macos-latest,   packages: "",                      rustflags: "" }
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +37,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross linker
+      - name: Install cross linker (Linux cross targets)
         if: matrix.packages != ''
         run: |
           sudo apt-get update
@@ -47,7 +47,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Lint and test once, on the native target (cross targets can't run here).
+      # Lint and test once, on the native Linux target.
       - name: Clippy & tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
@@ -58,22 +58,34 @@ jobs:
         env:
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
-      # The shippable binaries are the TUI executable and the FFI library + its
-      # generated header. (The `masterbus` core crate is a Rust library — consumed
-      # via crates.io as an rlib — so it has no standalone binary; it is still
-      # built and checked as part of the workspace above.)
+      # Shippable artifacts: the TUI executable, the FFI library + header, and
+      # (Linux only) the Signal K sidecar + its systemd unit. The `masterbus`
+      # core crate is an rlib (consumed via crates.io) and has no standalone
+      # binary; it is still built/checked as part of the workspace above.
       - name: Stage artifacts
+        shell: bash
         run: |
+          out="target/${{ matrix.target }}/release"
           dist="masterbus-${{ matrix.target }}"
           mkdir -p "$dist"
-          cp "target/${{ matrix.target }}/release/masterbus-tui" "$dist/"
-          cp "target/${{ matrix.target }}/release/masterbus-signalk" "$dist/"
-          cp "target/${{ matrix.target }}/release/libmasterbus_ffi.so" "$dist/"
-          cp "target/${{ matrix.target }}/release/libmasterbus_ffi.a" "$dist/"
           cp crates/masterbus-ffi/include/masterbus.h "$dist/"
-          cp crates/masterbus-signalk/masterbus-signalk.service "$dist/"
+          # TUI (with or without .exe)
+          if [ -f "$out/masterbus-tui.exe" ]; then cp "$out/masterbus-tui.exe" "$dist/"; else cp "$out/masterbus-tui" "$dist/"; fi
+          # FFI library + static lib (whichever names this platform produced)
+          for f in libmasterbus_ffi.so libmasterbus_ffi.dylib libmasterbus_ffi.a \
+                   masterbus_ffi.dll masterbus_ffi.dll.lib masterbus_ffi.lib; do
+            [ -f "$out/$f" ] && cp "$out/$f" "$dist/"
+          done
+          # Signal K sidecar is Linux/SocketCAN-only.
+          case "${{ matrix.target }}" in
+            *linux*)
+              cp "$out/masterbus-signalk" "$dist/"
+              cp crates/masterbus-signalk/masterbus-signalk.service "$dist/"
+              ;;
+          esac
           echo "DIST=$dist" >> "$GITHUB_ENV"
 
       - name: Upload build artifacts
@@ -84,6 +96,7 @@ jobs:
 
       - name: Package tarball (tags only)
         if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         run: tar czf "${{ env.DIST }}.tar.gz" "${{ env.DIST }}"
 
       - name: Attach to release (tags only)
