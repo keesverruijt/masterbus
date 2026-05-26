@@ -1,28 +1,26 @@
-//! Live end-to-end check of the engine over SocketCAN.
+//! Full end-to-end check of the engine: list devices, lazily discover every
+//! menu, and print every group/field (with writability) plus the monitoring
+//! values.
 //!
-//! Usage: `enumerate <can-interface> [cache-dir]` (Linux/SocketCAN only)
-//! Lists alive devices, lazily discovers each (all menus), prints identity and
-//! every group/field (with writability) and the monitoring values.
+//! Usage (Linux):     `enumerate <can-iface>`     SocketCAN
+//!                    `enumerate usb [serial]`    USB link
+//! Usage (others):    `enumerate [serial]`        USB link (the only transport)
+//!
+//! Env: `CACHE_DIR=<path>`              on-disk schema cache (per device, by serial).
+//!      `HEARTBEAT_MASTER=<24-bit hex>` drive the bus as master.
 
-#[cfg(target_os = "linux")]
+use masterbus::{Config, MasterBus, Menu};
+
 fn main() {
-    use masterbus::{Config, MasterBus, Menu};
-
-    let mut args = std::env::args().skip(1);
-    let iface = args.next().unwrap_or_else(|| {
-        eprintln!("usage: enumerate <can-interface> [cache-dir]");
-        std::process::exit(1);
-    });
-    let cache = args.next().map(std::path::PathBuf::from);
-
-    let config = Config { cache_path: cache, ..Default::default() };
-    let bus = match MasterBus::socketcan(&iface, config) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("connect failed: {e}");
-            std::process::exit(2);
-        }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let config = Config {
+        heartbeat_master: std::env::var("HEARTBEAT_MASTER")
+            .ok()
+            .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()),
+        cache_path: std::env::var_os("CACHE_DIR").map(Into::into),
+        ..Config::default()
     };
+    let bus = connect(&args, config);
 
     let devices = bus.devices_all();
     println!("{} device(s)", devices.len());
@@ -33,8 +31,14 @@ fn main() {
         let rev = dev.revision_code().unwrap_or_default();
         let fw = dev.firmware_version().unwrap_or_default();
         println!(
-            "\n=== {} (id {}) art={} ser={} rev={} fw={} status={:?} ===",
-            name, dev.id(), article, serial, rev, fw, dev.status()
+            "\n=== {} (id {:06X}) art={} ser={} rev={} fw={} status={:?} ===",
+            name,
+            dev.id(),
+            article,
+            serial,
+            rev,
+            fw,
+            dev.status()
         );
         let groups = match dev.groups() {
             Ok(g) => g,
@@ -65,7 +69,28 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn connect(args: &[String], config: Config) -> MasterBus {
+    let r = match args.first().map(String::as_str) {
+        Some("usb") => MasterBus::usb(args.get(1).map(String::as_str), config),
+        Some(iface) => MasterBus::socketcan(iface, config),
+        None => {
+            eprintln!("usage: enumerate <can-iface>      # SocketCAN");
+            eprintln!("       enumerate usb [serial]     # USB link");
+            eprintln!("       (env: CACHE_DIR, HEARTBEAT_MASTER)");
+            std::process::exit(1);
+        }
+    };
+    r.unwrap_or_else(|e| {
+        eprintln!("connect failed: {e}");
+        std::process::exit(2)
+    })
+}
+
 #[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("the `enumerate` example requires Linux/SocketCAN");
+fn connect(args: &[String], config: Config) -> MasterBus {
+    MasterBus::usb(args.first().map(String::as_str), config).unwrap_or_else(|e| {
+        eprintln!("connect failed: {e}");
+        std::process::exit(2)
+    })
 }
