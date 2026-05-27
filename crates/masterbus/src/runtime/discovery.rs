@@ -14,9 +14,8 @@ use crate::model::{DeviceIdentity, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
     can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
     schema_field_count_req_class_raw, schema_field_id_req_class_raw,
-    schema_group_name_req_class_raw, shadow_meta_req_magic_raw, shadow_meta_req_raw,
-    shadow_option_req_magic_raw, shadow_option_req_raw, string_chunk_req_raw, viz_from_wire,
-    VisualizationType,
+    schema_group_name_req_class_raw, shadow_meta_req_raw, shadow_option_req_raw,
+    string_chunk_req_raw, viz_from_wire, VisualizationType,
 };
 use crate::transport::TransportTx;
 
@@ -44,27 +43,6 @@ impl Disc<'_> {
     fn req_std(&mut self, key: &str, frame: (u32, Vec<u8>)) -> Option<Vec<u8>> {
         let n = self.cfg.discovery_retries;
         self.req(key, frame, n)
-    }
-
-    /// Like [`req`], but fires *two* frames per attempt that resolve to the
-    /// same waiter key (e.g. a standard-channel + Magic-channel pair). The
-    /// first response wins.
-    fn req_dual(
-        &mut self,
-        key: &str,
-        frame_a: (u32, Vec<u8>),
-        frame_b: (u32, Vec<u8>),
-        retries: usize,
-    ) -> Option<Vec<u8>> {
-        for _ in 0..retries {
-            self.waiter.register(key);
-            let _ = self.tx.send(frame_a.0, &frame_a.1);
-            let _ = self.tx.send(frame_b.0, &frame_b.1);
-            if let Some(r) = self.waiter.wait(key, self.cfg.discovery_timeout) {
-                return Some(r);
-            }
-        }
-        None
     }
 
     /// Fetch a string by id via chunked reads.
@@ -106,23 +84,20 @@ impl Disc<'_> {
     /// resolves within that one window instead of timing out per op — this is the
     /// main discovery speed-up. Returns op → raw response payload.
     ///
-    /// Each op is fired on **both** the standard shadow channel (`0x18` to the
-    /// shadow address, response on `0x08`) and the Magic-class shadow channel
-    /// (`0x1C` to the real address, response on `0x0C`); the waiter key is the
-    /// same in both cases, so whichever response lands first is what we use.
-    /// Devices that don't speak the Magic channel ignore the second frame and
-    /// vice versa — this is the cheapest fallback we can do without a per-device
-    /// preference. See PROTOCOL.md §6.
+    /// **Only the standard shadow channel** (`0x18` → `0x08` to the shadow
+    /// address) is queried. The alternative channel on class `0x1C` exposes a
+    /// **separate field namespace** with different names/values per index; mixing
+    /// the two into one cache produced incorrect metadata. The alt channel will
+    /// be re-introduced as an explicit per-channel field collection — see
+    /// FINDINGS §3f and the open redesign discussion.
     fn shadow_batch(&mut self, addr: u32, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
         let key = |op: u8| format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
         for &op in ops {
             self.waiter.register(&key(op));
         }
         for &op in ops {
-            let std_frame = shadow_meta_req_raw(addr, op, field as u16);
-            let _ = self.tx.send(std_frame.0, &std_frame.1);
-            let magic_frame = shadow_meta_req_magic_raw(addr, op, field as u16);
-            let _ = self.tx.send(magic_frame.0, &magic_frame.1);
+            let frame = shadow_meta_req_raw(addr, op, field as u16);
+            let _ = self.tx.send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
         let mut out = HashMap::with_capacity(ops.len());
@@ -379,15 +354,10 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
         let mut opts = Vec::new();
         for opt in 0..n_opts {
             let key = format!("shadow:{:06X}:26:{}:{}", addr, f, opt as u8);
-            // Fire standard + Magic option requests together; the waiter key
-            // is the same so whichever channel answers first delivers.
+            // Standard channel only — see `shadow_batch` for why mixing
+            // channels was wrong.
             let osid = disc
-                .req_dual(
-                    &key,
-                    shadow_option_req_raw(addr, f, opt as u8),
-                    shadow_option_req_magic_raw(addr, f, opt as u8),
-                    OPTIONAL_RETRIES,
-                )
+                .req(&key, shadow_option_req_raw(addr, f, opt as u8), OPTIONAL_RETRIES)
                 .filter(|r| r.len() >= 6)
                 .map(|r| u16::from_le_bytes([r[4], r[5]]));
             opts.push(osid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default());
