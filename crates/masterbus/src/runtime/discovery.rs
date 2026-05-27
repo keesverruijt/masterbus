@@ -10,15 +10,21 @@ use std::time::{Duration, Instant};
 
 use super::waiter::Waiter;
 use super::Config;
-use crate::model::{field_id, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu};
+use crate::model::{field_id, Channel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
-    btm1_meta_option_req_raw, btm1_meta_req_raw, can_class, fw_req_raw, group_count_req_raw,
-    prop_str_id_req_raw, schema_field_count_req_class_raw, schema_field_id_req_class_raw,
+    btm1_meta_option_req_raw, btm1_meta_req_raw, btm3_meta_option_req_raw, btm3_meta_req_raw,
+    can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
+    schema_field_count_req_class_raw, schema_field_id_req_class_raw,
     schema_group_name_req_class_raw, string_chunk_req_raw, viz_from_wire, VisualizationType,
 };
 use crate::transport::TransportTx;
 
 const OPTIONAL_RETRIES: usize = 1;
+
+/// Wire-frame encoder for a metadata request: `(addr, opcode, field_id) → frame`.
+type MetaEncode = fn(DeviceId, u8, u16) -> (u32, Vec<u8>);
+/// Wire-frame encoder for an option-string request: `(addr, field, opt) → frame`.
+type MetaOptionEncode = fn(DeviceId, u8, u8) -> (u32, Vec<u8>);
 
 /// Bundle of what discovery needs from the scheduler.
 pub(super) struct Disc<'a> {
@@ -77,23 +83,29 @@ impl Disc<'_> {
             .map(|r| u16::from_le_bytes([r[2], r[3]]))
     }
 
-    /// Fetch several Btm1 per-field metadata ops in a single round-trip:
-    /// register all keys, fire all requests back-to-back, then collect within
-    /// one shared timeout window. Absent metadata (silent or a `0x10` "no
-    /// value") resolves within that one window instead of timing out per op —
-    /// this is the main discovery speed-up. Returns op → raw response payload.
+    /// Fetch several per-field metadata ops in one pipelined round-trip on
+    /// the given channel. Returns op → raw response payload.
     ///
-    /// **Only the Btm1 metadata channel** (`0x18` → `0x08` to `addr | 0x800000`)
-    /// is queried. The Btm3 channel (class `0x1C`) exposes a **separate field
-    /// namespace** with different names/values per index; the in-flight
-    /// redesign moves Btm3 onto its own field-id space so the two can coexist.
-    fn btm1_meta_batch(&mut self, addr: DeviceId, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
-        let key = |op: u8| format!("btm1_meta:{:06X}:{:02X}:{}", addr, op, field);
+    /// The two channels speak the same opcode set (see [`crate::protocol::meta_op`])
+    /// but expose **independent field namespaces** — a Btm1 field id `0x17` is
+    /// a different field than a Btm3 field id `0x17`. The caller therefore
+    /// passes a channel-tagged [`FieldId`]; this function picks the right
+    /// encoder + waiter-key family internally.
+    ///
+    /// Absent metadata (silent or a `0x10` "no value") resolves within one
+    /// shared timeout window — that batching is the main discovery speed-up.
+    fn meta_batch(&mut self, addr: DeviceId, fid: FieldId, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
+        let wire = field_id::wire_index(fid);
+        let (prefix, encode): (&str, MetaEncode) = match field_id::channel(fid) {
+            Channel::Btm1 => ("btm1_meta", btm1_meta_req_raw),
+            Channel::Btm3 => ("btm3_meta", btm3_meta_req_raw),
+        };
+        let key = |op: u8| format!("{}:{:06X}:{:02X}:{}", prefix, addr, op, wire);
         for &op in ops {
             self.waiter.register(&key(op));
         }
         for &op in ops {
-            let frame = btm1_meta_req_raw(addr, op, field as u16);
+            let frame = encode(addr, op, wire as u16);
             let _ = self.tx.send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
@@ -105,6 +117,26 @@ impl Disc<'_> {
             }
         }
         out
+    }
+
+    /// Per-channel option-string query. Used during list/enum field discovery
+    /// to resolve each option's label string id. Same channel dispatch as
+    /// [`Self::meta_batch`].
+    fn meta_option_req(
+        &mut self,
+        addr: DeviceId,
+        fid: FieldId,
+        opt: u8,
+    ) -> Option<u16> {
+        let wire = field_id::wire_index(fid);
+        let (prefix, encode): (&str, MetaOptionEncode) = match field_id::channel(fid) {
+            Channel::Btm1 => ("btm1_meta", btm1_meta_option_req_raw),
+            Channel::Btm3 => ("btm3_meta", btm3_meta_option_req_raw),
+        };
+        let key = format!("{}:{:06X}:26:{}:{}", prefix, addr, wire, opt);
+        self.req(&key, encode(addr, wire, opt), OPTIONAL_RETRIES)
+            .filter(|r| r.len() >= 6)
+            .map(|r| u16::from_le_bytes([r[4], r[5]]))
     }
 
     fn group_count(&mut self, addr: DeviceId, selector: u8) -> u32 {
@@ -292,44 +324,82 @@ fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option
     Some(GroupInfo { id: g as i32, name, menu, fields })
 }
 
-/// Probe every field index in the device's full index space (selector `0x01`,
-/// see PROTOCOL.md §4.3 + the Nav Chg / TDevice_MacMagic discussion in
-/// FINDINGS), dropping indices that don't respond to any metadata query.
+/// Probe every reachable field across **both** metadata channels (Btm1 +
+/// Btm3), dropping indices that don't respond. Returns one `FieldInfo` per
+/// reachable index per channel — channels are distinguished by bit 8 of the
+/// id, so callers can store the combined result in one `HashMap<FieldId, _>`.
 ///
 /// This is the only way to enumerate Configuration items on devices whose
 /// `0x08 0x03` group count lies (e.g. the Magic-class Nav Chg, which reports
-/// zero config groups despite having ~25 settings). The grouping that
-/// MasterAdjust shows comes from a hard-coded per-device-family layout
+/// zero config groups despite ~25 Btm3 settings). The grouping MasterAdjust
+/// shows comes from hard-coded per-device-family layout
 /// (`TDevice_MacMagic` etc. inside `MasterAdjust.exe`); the wire protocol
-/// itself only exposes a flat field-index space.
+/// only exposes a flat per-channel field-index space.
 pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<FieldInfo> {
     let n = disc.group_count(addr, 0x01);
     if n == 0 {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(n as usize);
-    // Btm1 wire indices are u8 (0..=255). The selector returns a count that
-    // may exceed u8 in pathological cases, but on every device we've seen N is
-    // well under 256. Probe each wire index on the Btm1 channel.
-    for wire in 0..(n.min(256) as u8) {
-        if let Some(f) = enumerate_field(disc, addr, field_id::btm1(wire)) {
-            out.push(f);
-        }
-    }
+    let upper = n.min(256) as u8;
+    let mut out = Vec::with_capacity(upper as usize * 2);
+    probe_channel(disc, addr, upper, Channel::Btm1, &mut out);
+    probe_channel(disc, addr, upper, Channel::Btm3, &mut out);
     out
 }
 
+/// Per-channel flat probe with miss-streak termination.
+///
+/// We iterate wire indices `0..upper` on the channel, calling
+/// [`enumerate_field`] on each. After [`PROBE_MISS_STREAK`] consecutive
+/// indices with no response we conclude the channel is exhausted (or absent
+/// — a Btm1-only device gives us a clean fast-fail on Btm3, and vice
+/// versa). Successful indices accumulate into `out` with the channel bit
+/// set appropriately.
+fn probe_channel(
+    disc: &mut Disc,
+    addr: DeviceId,
+    upper: u8,
+    channel: Channel,
+    out: &mut Vec<FieldInfo>,
+) {
+    let mut misses: u8 = 0;
+    for wire in 0..upper {
+        let fid = match channel {
+            Channel::Btm1 => field_id::btm1(wire),
+            Channel::Btm3 => field_id::btm3(wire),
+        };
+        match enumerate_field(disc, addr, fid) {
+            Some(f) => {
+                out.push(f);
+                misses = 0;
+            }
+            None => {
+                misses = misses.saturating_add(1);
+                if misses >= PROBE_MISS_STREAK {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// How many consecutive index-misses end the per-channel flat probe. Tuned
+/// for the observed CombiMaster / Nav Chg gap patterns (no observed gap
+/// longer than 1 within a channel's used range), with margin.
+const PROBE_MISS_STREAK: u8 = 8;
+
 fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<FieldInfo> {
     use crate::protocol::meta_op as op;
-    let f = field_id::wire_index(fid);
 
     // Per-field metadata in one pipelined round-trip. Numeric editing bounds
     // (MIN/STEP) are deferred — they aren't needed to enumerate or read a field,
     // so we skip them here (op::MAX is still fetched: it doubles as the option
-    // count for lists).
-    let meta = disc.btm1_meta_batch(addr, f, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
-    // If nothing came back, this field index is unallocated — used by the
-    // `enumerate_all_fields` flat probe to skip holes in the index space.
+    // count for lists). The channel is encoded in `fid`; `meta_batch` dispatches
+    // to the right encoder + waiter-key family.
+    let meta = disc.meta_batch(addr, fid, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
+    // If nothing came back, this field index is unallocated on this channel —
+    // used by the `enumerate_all_fields` flat probe to skip holes in the index
+    // space and to give up on a channel the device doesn't speak.
     if meta.is_empty() {
         return None;
     }
@@ -355,13 +425,7 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     {
         let mut opts = Vec::new();
         for opt in 0..n_opts {
-            let key = format!("btm1_meta:{:06X}:26:{}:{}", addr, f, opt as u8);
-            // Btm1 channel only — Btm3 option strings will be added in a
-            // separate, channel-aware code path.
-            let osid = disc
-                .req(&key, btm1_meta_option_req_raw(addr, f, opt as u8), OPTIONAL_RETRIES)
-                .filter(|r| r.len() >= 6)
-                .map(|r| u16::from_le_bytes([r[4], r[5]]));
+            let osid = disc.meta_option_req(addr, fid, opt as u8);
             opts.push(osid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default());
         }
         opts
