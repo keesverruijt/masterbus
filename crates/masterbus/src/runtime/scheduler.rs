@@ -16,9 +16,11 @@ use super::state::State;
 use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
+use crate::model::AccessLevel;
 use crate::protocol::{
-    decode_value, encode_commit, encode_set_boolean, encode_set_float, encode_set_list,
-    heartbeat_raw, monitoring_req_raw, TAB_DEFAULT, VisualizationType,
+    decode_value, encode_commit, encode_login_read, encode_login_write, encode_logout,
+    encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw, monitoring_req_raw,
+    TAB_DEFAULT, VisualizationType,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
@@ -84,6 +86,14 @@ impl Sched {
                 }
                 Ok(Command::Write { addr, field, value, reply }) => {
                     let r = self.do_write(addr, field, value);
+                    let _ = reply.send(r);
+                }
+                Ok(Command::AccessLevelRead { addr, reply }) => {
+                    let r = self.do_access_level_read(addr);
+                    let _ = reply.send(r);
+                }
+                Ok(Command::AccessLevelSet { addr, level, reply }) => {
+                    let r = self.do_access_level_set(addr, level);
                     let _ = reply.send(r);
                 }
                 Ok(Command::Subscribe(spec)) => self.add_sub(&mut subs, spec),
@@ -220,6 +230,49 @@ impl Sched {
         }
         let viz = self.viz_of(addr, field)?;
         self.poll_value(addr, field, viz)
+    }
+
+    // ── access-level login (opcode 0x08 0x19 on class 0x07) ────────────────
+    //
+    // Read, login, and logout all share the same waiter key `p:<addr>:08:19`
+    // because the response is a class-0x06 frame `[0x08, 0x19, level, 0x00]`
+    // in all three cases. The level byte at data[2] is what we return.
+
+    fn await_access_level(&mut self, addr: u32) -> Result<AccessLevel> {
+        let key = format!("p:{:06X}:08:19", addr);
+        match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
+            Some(data) if data.len() >= 3 => {
+                AccessLevel::from_byte(data[2]).ok_or_else(|| {
+                    Error::Protocol(format!("unknown access level byte 0x{:02X}", data[2]))
+                })
+            }
+            Some(_) => Err(Error::Protocol("short access-level response".into())),
+            None => Err(Error::Timeout),
+        }
+    }
+
+    fn do_access_level_read(&mut self, addr: u32) -> Result<AccessLevel> {
+        let key = format!("p:{:06X}:08:19", addr);
+        self.waiter.register(&key);
+        self.send(encode_login_read(addr));
+        self.await_access_level(addr)
+    }
+
+    fn do_access_level_set(&mut self, addr: u32, level: AccessLevel) -> Result<AccessLevel> {
+        let key = format!("p:{:06X}:08:19", addr);
+        self.waiter.register(&key);
+        let frame = match level.code() {
+            Some(code) => encode_login_write(addr, level.level_byte(), code),
+            None => encode_logout(addr),
+        };
+        self.send(frame);
+        let reported = self.await_access_level(addr)?;
+        // A level change flips per-field WRITEABLE (shadow op 0x0B) on many
+        // fields; the schema we cached at the prior level is now stale. Drop
+        // it so the next field access re-runs discovery with fresh shadow
+        // attributes. (PROTOCOL.md §4.5.)
+        self.state.forget_schema(addr);
+        Ok(reported)
     }
 
     fn do_write(&mut self, addr: u32, field: i32, value: WriteValue) -> Result<Value> {

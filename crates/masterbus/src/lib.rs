@@ -105,7 +105,7 @@ pub mod value;
 
 pub use api::{Device, Field, Group, MasterBus, Subscription};
 pub use error::{Error, Result};
-pub use model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
+pub use model::{AccessLevel, DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
 pub use protocol::VisualizationType;
 pub use runtime::{Config, DeviceEvent, ValueUpdate};
 pub use value::{Date, Time, Value, WriteValue};

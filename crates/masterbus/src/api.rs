@@ -7,7 +7,7 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 
 use crate::error::{Error, Result};
-use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
+use crate::model::{AccessLevel, DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
 use crate::runtime::{Config, DeviceEvent, Engine, ValueUpdate};
 use crate::protocol::VisualizationType;
 use crate::transport::Transport;
@@ -166,6 +166,30 @@ impl Device {
     /// A handle to a field by its global index.
     pub fn field(&self, index: i32) -> Field {
         Field { engine: self.engine.clone(), device: self.id, index }
+    }
+
+    /// Read the device's current access level (PROTOCOL.md §4.5).
+    ///
+    /// Note: a level change does not always change the index space, but it
+    /// does change which fields are writable. After a successful
+    /// [`Self::login`] or [`Self::logout`], any cached `is_writable` results
+    /// for this device's fields should be re-queried.
+    pub fn access_level(&self) -> Result<AccessLevel> {
+        self.engine.access_level(self.id)
+    }
+
+    /// Log this device in at `level`. Returns the level the device reports
+    /// after the request (which on success equals `level`).
+    ///
+    /// `login(AccessLevel::EndUser)` is equivalent to [`Self::logout`].
+    pub fn login(&self, level: AccessLevel) -> Result<AccessLevel> {
+        self.engine.set_access_level(self.id, level)
+    }
+
+    /// Log out of the device (return to `AccessLevel::EndUser`). Wire form is
+    /// a 4-byte request with no code payload (PROTOCOL.md §4.5).
+    pub fn logout(&self) -> Result<AccessLevel> {
+        self.engine.set_access_level(self.id, AccessLevel::EndUser)
     }
 }
 

@@ -103,6 +103,8 @@ pub(crate) enum Command {
     Discover { addr: u32, reply: Sender<Result<()>> },
     Read { addr: u32, field: i32, max_age: Duration, reply: Sender<Result<Value>> },
     Write { addr: u32, field: i32, value: WriteValue, reply: Sender<Result<Value>> },
+    AccessLevelRead { addr: u32, reply: Sender<Result<crate::model::AccessLevel>> },
+    AccessLevelSet { addr: u32, level: crate::model::AccessLevel, reply: Sender<Result<crate::model::AccessLevel>> },
     Subscribe(SubSpec),
     Unsubscribe(u64),
     Shutdown,
@@ -215,6 +217,21 @@ impl Engine {
     /// Write a field value; returns the resulting value observed afterwards.
     pub fn write(&self, addr: u32, field: i32, value: WriteValue) -> Result<Value> {
         self.call(|reply| Command::Write { addr, field, value, reply })?
+    }
+
+    /// Read the device's current access level (PROTOCOL.md §4.5).
+    pub fn access_level(&self, addr: u32) -> Result<crate::model::AccessLevel> {
+        self.call(|reply| Command::AccessLevelRead { addr, reply })?
+    }
+
+    /// Log in (or log out, with [`AccessLevel::EndUser`]); returns the level the
+    /// device reports after the request.
+    pub fn set_access_level(
+        &self,
+        addr: u32,
+        level: crate::model::AccessLevel,
+    ) -> Result<crate::model::AccessLevel> {
+        self.call(|reply| Command::AccessLevelSet { addr, level, reply })?
     }
 
     /// Subscribe to live updates of `fields` at `interval`. Returns the

@@ -26,6 +26,50 @@ pub enum DeviceStatus {
     Unknown,
 }
 
+/// Per-device access level (the login state of opcode `0x08 0x19`).
+/// Higher levels unlock additional writable fields. See PROTOCOL.md §4.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum AccessLevel {
+    /// Default / logged-out state. No code required (logout target).
+    EndUser = 0,
+    /// `code = <redacted>`.
+    Installer = 1,
+    /// `code = <redacted>`.
+    Distributor = 2,
+    /// `code = <redacted>`.
+    MvService = 3,
+}
+
+impl AccessLevel {
+    /// The level byte transmitted in (and received on) the wire.
+    pub fn level_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// The IEEE-754 f32 access code that authenticates this level.
+    /// [`Self::EndUser`] has no code (it is reached via logout, not login).
+    pub fn code(self) -> Option<f32> {
+        match self {
+            AccessLevel::EndUser => None,
+            AccessLevel::Installer => Some(<redacted>),
+            AccessLevel::Distributor => Some(<redacted>),
+            AccessLevel::MvService => Some(<redacted>),
+        }
+    }
+
+    /// Map a level byte (from a response or a poll reply) to an [`AccessLevel`].
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(AccessLevel::EndUser),
+            1 => Some(AccessLevel::Installer),
+            2 => Some(AccessLevel::Distributor),
+            3 => Some(AccessLevel::MvService),
+            _ => None,
+        }
+    }
+}
+
 /// A menu / access level (the `[0x08, selector]` partition of the global group
 /// list — e.g. monitoring, configuration/installer, service).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -140,6 +140,60 @@ last chunk).
 Termination: stop when a chunk contains a `NUL` (0x00) byte **or** is shorter
 than 8 bytes (fewer than 4 chars). Otherwise request `seq + 1`.
 
+### 4.5 Access-level login — opcode `0x08 0x19`
+
+Property opcode `0x08 0x19` is the **access level** register. It has three
+forms — read, write (login), and logout-write — all on class `0x07` to a
+single `device_addr` (per-device, not broadcast):
+
+| Form    | Dlc | Payload                                    | Meaning |
+|---------|-----|--------------------------------------------|---------|
+| read    | 2   | `08 19`                                    | request: "what level am I at?" |
+| login   | 8   | `08 19 <level> 00 <f32 code, LE>`          | request: "set level (validated by code)" |
+| logout  | 4   | `08 19 00 00`                              | request: "back to End User" |
+
+The response is class `0x06`, payload `08 19 <level> 00` (4 bytes) in all
+three cases: it echoes the **current** level after the request was applied.
+Latency ~3–6 ms. A wrong code presumably gets a `level == 0` echo or no
+response; not observed (the MasterAdjust GUI rejects bad codes client-side).
+
+**Access levels and codes** (recovered live + by decompiling MasterAdjust;
+see FINDINGS §3c/3d):
+
+| Level byte | Name (MasterAdjust label) | f32 code     | Code bytes (LE) |
+|------------|---------------------------|--------------|-----------------|
+| `0x00`     | **End User**              | (no code; logout) | —          |
+| `0x01`     | **Installer**             | `<redacted>`      | `<redacted>`  |
+| `0x02`     | **Distributor**           | `<redacted>`    | `<redacted>`  |
+| `0x03`     | **MV Service**            | `<redacted>`  | `<redacted>`  |
+
+The codes are hard-coded in MasterAdjust and universal across devices — the
+GUI sends the same code regardless of device type. The level byte in the
+request must match the code (a level-2 frame must carry the f32 `<redacted>`).
+
+The code is the integer's IEEE-754 float representation, not ASCII and not
+a packed integer (e.g. `498 → f32(<redacted>) = <redacted>`). This is the same
+"every value is a 4-byte float" rule as §7.3.
+
+**Effect of a successful login:**
+
+- Subsequent reads of `08 19` return the new level byte.
+- Field WRITEABLE responses (shadow opcode `0x0B`, §6) change for many
+  fields — the multi-byte value differs per level. The bitmask layout is
+  not yet fully decoded; the practical rule is **re-query `0x0B` for every
+  field after any level change** rather than caching pre-login attributes.
+- The next DEVICE_BROADCAST (class `0x04`) carries an updated `data[4]`,
+  but that byte is a per-device **event counter** (increments by 1–4 on
+  state changes, also ticks for non-login events) — **not** a level
+  indicator. To know the current level, query `08 19`.
+- **Schema does not grow.** Same field/group indices remain reachable.
+  Login changes attribute responses, not the index space.
+
+**Scope and persistence.** Login is per-device. Persistence across device
+power cycles has not been characterised. MasterAdjust polls `08 19` on
+every enrolled device periodically (~once per minute in the reference
+capture) so it can resync its UI to actual device state.
+
 ---
 
 ## 5. Schema queries (class 0x19 request → 0x09 response)

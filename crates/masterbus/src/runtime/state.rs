@@ -177,6 +177,18 @@ impl State {
         self.devices.lock().unwrap().get(&addr).and_then(|e| e.schema.clone())
     }
 
+    /// Drop the cached schema (groups + discovered-menu set) for a device.
+    /// The identity is preserved; the next `tab_info` / `schema` / `field`
+    /// access will re-run discovery and fetch fresh shadow attributes
+    /// (writability in particular changes after an access-level login).
+    pub fn forget_schema(&self, addr: u32) {
+        let mut map = self.devices.lock().unwrap();
+        if let Some(e) = map.get_mut(&addr) {
+            e.schema = None;
+            e.menus.clear();
+        }
+    }
+
 
     /// Device ids currently considered alive (seen within `liveness`).
     pub fn alive_ids(&self, liveness: std::time::Duration) -> Vec<u32> {

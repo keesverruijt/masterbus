@@ -108,6 +108,30 @@ pub fn encode_set_float(device_addr: u32, field_index: u8, value: f32) -> (u32, 
     (id(can_class::MONITORING_REQ, device_addr), data)
 }
 
+/// The access-level register opcode (`0x08 0x19`) carried on class `0x07`
+/// requests and `0x06` responses. See PROTOCOL.md §4.5.
+pub const LOGIN_OPCODE: [u8; 2] = [0x08, 0x19];
+
+/// Read the current access level: class `0x07`, `[0x08, 0x19]` (2 bytes).
+/// The device replies with class `0x06`, `[0x08, 0x19, level, 0x00]`.
+pub fn encode_login_read(device_addr: u32) -> (u32, Vec<u8>) {
+    (id(can_class::PROPERTY_REQ, device_addr), LOGIN_OPCODE.to_vec())
+}
+
+/// Login: class `0x07`, `[0x08, 0x19, level, 0x00, f32 LE code]` (8 bytes).
+/// The `level` byte must match the code (a level-2 frame carries `<redacted>`).
+pub fn encode_login_write(device_addr: u32, level: u8, code: f32) -> (u32, Vec<u8>) {
+    let mut data = vec![LOGIN_OPCODE[0], LOGIN_OPCODE[1], level, 0x00];
+    data.extend_from_slice(&code.to_le_bytes());
+    (id(can_class::PROPERTY_REQ, device_addr), data)
+}
+
+/// Logout (return to End User): class `0x07`, `[0x08, 0x19, 0x00, 0x00]`
+/// (4 bytes — header only, no code value).
+pub fn encode_logout(device_addr: u32) -> (u32, Vec<u8>) {
+    (id(can_class::PROPERTY_REQ, device_addr), vec![LOGIN_OPCODE[0], LOGIN_OPCODE[1], 0x00, 0x00])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +168,29 @@ mod tests {
         // is class 0x18 to that exact address.
         assert_eq!(monitoring_req_raw(0x188EA2, 0x17, 0).0, 0x18188EA2);
         assert_eq!(monitoring_req_raw(0x6E96CF, 0, 0).0, 0x186E96CF);
+    }
+
+    #[test]
+    fn login_frames_match_captured_wire_bytes() {
+        // From the §3c / §3e captures (PROTOCOL.md §4.5).
+        // Installer login on 0x188EA2 (<redacted>).
+        assert_eq!(
+            encode_login_write(0x188EA2, 0x01, <redacted>),
+            (0x07_188EA2, vec![0x08, 0x19, 0x01, 0x00, <redacted>]),
+        );
+        // Distributor login on 0x53A493 (<redacted>).
+        assert_eq!(
+            encode_login_write(0x53A493, 0x02, <redacted>),
+            (0x07_53A493, vec![0x08, 0x19, 0x02, 0x00, <redacted>]),
+        );
+        // MV Service login on 0x43DF24 (<redacted>).
+        assert_eq!(
+            encode_login_write(0x43DF24, 0x03, <redacted>),
+            (0x07_43DF24, vec![0x08, 0x19, 0x03, 0x00, <redacted>]),
+        );
+        // Logout: 4 bytes, no code value.
+        assert_eq!(encode_logout(0x43DF24), (0x07_43DF24, vec![0x08, 0x19, 0x00, 0x00]));
+        // Read: 2 bytes.
+        assert_eq!(encode_login_read(0x43DF24), (0x07_43DF24, vec![0x08, 0x19]));
     }
 }
