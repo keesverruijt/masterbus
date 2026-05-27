@@ -157,7 +157,7 @@ impl Sched {
         if self.state.has_identity(addr) {
             return;
         }
-        let id = self.with_disc(|disc| fetch_identity(disc, addr));
+        let id = self.with_disc(addr, |disc| fetch_identity(disc, addr));
         self.state.put_identity(addr, id);
     }
 
@@ -166,7 +166,7 @@ impl Sched {
         if let Some(id) = self.state.identity(addr) {
             return id;
         }
-        let id = self.with_disc(|disc| fetch_identity(disc, addr));
+        let id = self.with_disc(addr, |disc| fetch_identity(disc, addr));
         self.state.put_identity(addr, id.clone());
         id
     }
@@ -180,7 +180,7 @@ impl Sched {
         // Discover this device's own menu (per-device disk cache inside). We do
         // not reuse another same-article device's schema: devices that share an
         // article can differ (e.g. the cluster master battery has an extra group).
-        let groups = self.with_disc(|disc| discover_menu(disc, addr, &id, menu));
+        let groups = self.with_disc(addr, |disc| discover_menu(disc, addr, &id, menu));
         self.last_send = Instant::now();
         self.state.put_menu(addr, menu, groups);
     }
@@ -198,16 +198,29 @@ impl Sched {
             return;
         }
         let _ = self.ensure_identity(addr);
-        let fields = self.with_disc(|disc| enumerate_all_fields(disc, addr));
+        let fields = self.with_disc(addr, |disc| enumerate_all_fields(disc, addr));
         self.last_send = Instant::now();
         self.state.put_all_fields(addr, fields);
     }
 
-    /// Run a closure with a `Disc` bound to this scheduler's transport.
-    fn with_disc<T>(&mut self, f: impl FnOnce(&mut Disc) -> T) -> T {
+    /// Run a closure with a [`Disc`] bound to this scheduler's transport.
+    /// The `addr` argument lets us pre-populate the device's current access
+    /// level — discovery uses it as part of the disk-cache key so each
+    /// level gets its own cached schema. On first contact we ask the
+    /// device (`0x08 0x19` read); if that times out we settle on
+    /// `EndUser` (the device's boot state) and don't re-ask.
+    fn with_disc<T>(&mut self, addr: DeviceId, f: impl FnOnce(&mut Disc) -> T) -> T {
+        let level = match self.state.access_level(addr) {
+            Some(l) => l,
+            None => {
+                let l = self.do_access_level_read(addr).unwrap_or(AccessLevel::EndUser);
+                self.state.put_access_level(addr, l);
+                l
+            }
+        };
         let waiter = self.waiter.clone();
         let cfg = self.config.clone();
-        let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg };
+        let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg, level };
         f(&mut disc)
     }
 
@@ -287,7 +300,9 @@ impl Sched {
         let key = format!("p:{:06X}:08:19", addr);
         self.waiter.register(&key);
         self.send(encode_login_read(addr));
-        self.await_access_level(addr)
+        let level = self.await_access_level(addr)?;
+        self.state.put_access_level(addr, level);
+        Ok(level)
     }
 
     fn do_access_level_set(&mut self, addr: DeviceId, level: AccessLevel) -> Result<AccessLevel> {
@@ -300,9 +315,11 @@ impl Sched {
         self.send(frame);
         let reported = self.await_access_level(addr)?;
         // A level change flips per-field WRITEABLE (meta op 0x0B) on many
-        // fields; the schema we cached at the prior level is now stale. Drop
-        // it so the next field access re-runs discovery with fresh metadata
-        // attributes. (PROTOCOL.md §4.5.)
+        // fields; the in-memory schema cached at the prior level is now
+        // stale. Drop it so the next field access reloads from the disk
+        // cache (now keyed by access level) or re-runs discovery.
+        // PROTOCOL.md §4.5.
+        self.state.put_access_level(addr, reported);
         self.state.forget_schema(addr);
         Ok(reported)
     }

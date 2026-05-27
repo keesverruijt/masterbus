@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo, GroupInfo, Menu};
+use crate::model::{
+    AccessLevel, DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo, GroupInfo, Menu,
+};
 use crate::value::Value;
 
 /// A cached field value with its observation time and a dirty flag.
@@ -30,6 +32,11 @@ pub struct DeviceEntry {
     pub fw_hint: u16,
     /// Identity (cheap discovery), once available.
     pub identity: Option<DeviceIdentity>,
+    /// The device's last-known access level (from a `0x08 0x19` read or a
+    /// successful login/logout). Used to key the schema cache: writability
+    /// flips per level, so a schema discovered at one level can't be served
+    /// at another. `None` until we've queried the level once.
+    pub access_level: Option<AccessLevel>,
     /// Schema discovered so far; `groups` accumulates menu-by-menu as menus are
     /// lazily discovered. `None` until at least the identity is known.
     pub schema: Option<DeviceSchema>,
@@ -51,6 +58,7 @@ impl DeviceEntry {
             type_code: 0,
             fw_hint: 0,
             identity: None,
+            access_level: None,
             schema: None,
             menus: HashSet::new(),
             all_fields: None,
@@ -133,6 +141,21 @@ impl State {
         let map = self.devices.lock().unwrap();
         let e = map.get(&addr)?;
         e.schema.as_ref().map(|s| s.identity()).or_else(|| e.identity.clone())
+    }
+
+    /// Get the device's last-known access level. `None` until we've heard
+    /// one (either via an explicit read or after a successful login/logout).
+    pub fn access_level(&self, addr: u32) -> Option<AccessLevel> {
+        self.devices.lock().unwrap().get(&addr).and_then(|e| e.access_level)
+    }
+
+    /// Record the device's access level (after a successful read or
+    /// login/logout response).
+    pub fn put_access_level(&self, addr: u32, level: AccessLevel) {
+        let now = Instant::now();
+        let mut map = self.devices.lock().unwrap();
+        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        e.access_level = Some(level);
     }
 
     /// Add a discovered menu's groups to a device's schema (identity must already

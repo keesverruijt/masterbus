@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use super::waiter::Waiter;
 use super::Config;
-use crate::model::{field_id, Channel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu};
+use crate::model::{
+    field_id, AccessLevel, Channel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu,
+};
 use crate::protocol::{
     btm1_meta_option_req_raw, btm1_meta_req_raw, btm3_meta_option_req_raw, btm3_meta_req_raw,
     can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
@@ -31,6 +33,11 @@ pub(super) struct Disc<'a> {
     pub tx: &'a mut dyn TransportTx,
     pub waiter: &'a Waiter,
     pub cfg: &'a Config,
+    /// Access level the disk cache files will be keyed by. Writability
+    /// (and a few other attributes) flip per level, so each level's
+    /// discovered schema gets its own cache file. Unknown defaults to
+    /// `EndUser` (the device's boot state).
+    pub level: AccessLevel,
 }
 
 impl Disc<'_> {
@@ -229,23 +236,25 @@ fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> (u32, u32) {
 
 /// Discover just one menu's groups: per-device disk cache, else enumerate live.
 ///
-/// The cache is keyed by **serial** (per device), not article+firmware: devices
-/// that share an article/firmware can still have different schemas — e.g. one
-/// battery in a cluster exposes an extra "Cluster" group the others don't — so
-/// sharing a schema across them would hide those differences.
+/// The cache is keyed by **serial + firmware + access level + menu**:
+/// - Per-device (serial), not per-article/firmware — same-model devices
+///   can differ (e.g. one battery in a cluster exposes an extra group).
+/// - Per access level — writability flips per level, so a schema
+///   discovered as End User can't be served as MV Service. Each level
+///   gets its own cache file.
 pub(super) fn discover_menu(
     disc: &mut Disc,
     addr: DeviceId,
     id: &DeviceIdentity,
     menu: Menu,
 ) -> Vec<GroupInfo> {
-    load_cached_menu(disc.cfg.cache_path.as_deref(), &id.serial, &id.firmware, menu).unwrap_or_else(
-        || {
-            let g = enumerate_menu(disc, addr, menu);
-            store_cached_menu(disc.cfg.cache_path.as_deref(), &id.serial, &id.firmware, menu, &g);
-            g
-        },
-    )
+    let dir = disc.cfg.cache_path.as_deref();
+    let level = disc.level;
+    load_cached_menu(dir, &id.serial, &id.firmware, level, menu).unwrap_or_else(|| {
+        let g = enumerate_menu(disc, addr, menu);
+        store_cached_menu(dir, &id.serial, &id.firmware, level, menu, &g);
+        g
+    })
 }
 
 fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Vec<GroupInfo> {
@@ -450,15 +459,29 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     })
 }
 
-// ── disk cache (groups keyed by serial+firmware+menu, i.e. per device) ────────
+// ── disk cache (groups keyed by serial + firmware + level + menu) ────────
 
 /// Bumped whenever the cached `Vec<GroupInfo>` JSON representation changes
-/// in a way that older versions can't read. Current schema: `FieldInfo.index`
-/// is `u16` (`FieldId` with channel bit). v1 was `i32`.
+/// in a way that older versions can't read.
+/// - v1: original (`FieldInfo.index` was `i32`).
+/// - v2: `FieldInfo.index` became `u16` (`FieldId` with channel bit).
 const CACHE_SCHEMA: u8 = 2;
 
-fn cache_file(dir: &Path, serial: &str, firmware: &str, menu: Menu) -> std::path::PathBuf {
-    let key = format!("{}-{}-{:02x}-v{}", serial, firmware, menu.selector(), CACHE_SCHEMA);
+fn cache_file(
+    dir: &Path,
+    serial: &str,
+    firmware: &str,
+    level: AccessLevel,
+    menu: Menu,
+) -> std::path::PathBuf {
+    let key = format!(
+        "{}-{}-l{:02x}-{:02x}-v{}",
+        serial,
+        firmware,
+        level.level_byte(),
+        menu.selector(),
+        CACHE_SCHEMA,
+    );
     let safe: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
@@ -470,23 +493,31 @@ fn load_cached_menu(
     dir: Option<&Path>,
     serial: &str,
     firmware: &str,
+    level: AccessLevel,
     menu: Menu,
 ) -> Option<Vec<GroupInfo>> {
     let dir = dir?;
     if serial.is_empty() {
         return None;
     }
-    let data = std::fs::read(cache_file(dir, serial, firmware, menu)).ok()?;
+    let data = std::fs::read(cache_file(dir, serial, firmware, level, menu)).ok()?;
     serde_json::from_slice(&data).ok()
 }
 
-fn store_cached_menu(dir: Option<&Path>, serial: &str, firmware: &str, menu: Menu, groups: &[GroupInfo]) {
+fn store_cached_menu(
+    dir: Option<&Path>,
+    serial: &str,
+    firmware: &str,
+    level: AccessLevel,
+    menu: Menu,
+    groups: &[GroupInfo],
+) {
     let Some(dir) = dir else { return };
     if serial.is_empty() {
         return;
     }
     let _ = std::fs::create_dir_all(dir);
     if let Ok(json) = serde_json::to_vec_pretty(groups) {
-        let _ = std::fs::write(cache_file(dir, serial, firmware, menu), json);
+        let _ = std::fs::write(cache_file(dir, serial, firmware, level, menu), json);
     }
 }
