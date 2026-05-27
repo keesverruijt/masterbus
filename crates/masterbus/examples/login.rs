@@ -87,7 +87,7 @@ fn main() {
             }
         }
 
-        // Give the device a moment to update its shadow attributes before we
+        // Give the device a moment to update its metadata attributes before we
         // re-query writability (the post-login bursts in the reference capture
         // showed responses arriving in tens of milliseconds).
         std::thread::sleep(Duration::from_millis(100));

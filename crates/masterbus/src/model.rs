@@ -141,7 +141,7 @@ impl Menu {
 /// One field within a group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldInfo {
-    /// Global field index (used in monitoring/shadow requests).
+    /// Global field index (used in monitoring/metadata requests).
     pub index: i32,
     /// Field name.
     pub name: String,
@@ -149,7 +149,7 @@ pub struct FieldInfo {
     pub unit: String,
     /// Presentation / edit widget.
     pub viz_type: VisualizationType,
-    /// Whether the field is currently writable (shadow op `0x0B`); gated fields
+    /// Whether the field is currently writable (meta op `0x0B`); gated fields
     /// read `false` until an access-level login is performed.
     pub writeable: bool,
     /// Minimum value (numeric fields).
@@ -182,7 +182,7 @@ impl GroupInfo {
     }
 }
 
-/// A device's identity — the cheap half of discovery (no group/field/shadow
+/// A device's identity — the cheap half of discovery (no group/field/metadata
 /// enumeration). Enough to label a device and key its schema cache.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceIdentity {

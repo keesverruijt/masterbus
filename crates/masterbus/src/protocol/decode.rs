@@ -1,6 +1,6 @@
 //! Decode raw frames into messages and field values.
 
-use super::{can_class, shadow_op, MbFrame, MbMessage, VisualizationType, SHADOW_BIT};
+use super::{can_class, meta_op, MbFrame, MbMessage, VisualizationType, BTM1_META_ADDR_FLAG};
 use crate::value::{Date, Time, Value};
 
 /// Decode a raw `(raw_can_id, data)` pair into an [`MbFrame`].
@@ -123,9 +123,9 @@ pub fn decode_value(raw: &[u8], viz: VisualizationType) -> Value {
     }
 }
 
-/// Compute the request/response matching key for an incoming frame that belongs
-/// to the discovery protocol (property / schema / shadow). Returns `None` for
-/// regular monitoring data (handled by the value layer).
+/// Compute the request/response matching key for an incoming frame that
+/// belongs to the discovery protocol (property / schema / metadata).
+/// Returns `None` for regular monitoring data (handled by the value layer).
 pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -> Option<String> {
     match can_class_byte {
         can_class::PROPERTY_INFO => {
@@ -141,55 +141,55 @@ pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -
         }
         can_class::SCHEMA_DATA => schema_key("schema", device_addr, data),
         can_class::SCHEMA_DATA_ALARM => schema_key("schema_alarm", device_addr, data),
-        // The history schema-response class is also used on the shadow address
-        // for headerless Magic-class monitoring pushes — route only the real-addr
-        // form here; the value-push form is handled by the reader.
-        can_class::SCHEMA_DATA_HISTORY if device_addr & SHADOW_BIT == 0 => {
+        // The history schema-response class is also used on the Btm1 metadata
+        // address (`addr | 0x800000`) for headerless Btm3 monitoring pushes —
+        // route only the real-addr form here; the value-push form is handled
+        // by the reader.
+        can_class::SCHEMA_DATA_HISTORY if device_addr & BTM1_META_ADDR_FLAG == 0 => {
             schema_key("schema_history", device_addr, data)
         }
-        can_class::SHADOW_DATA_MAGIC => {
-            // Magic-class shadow response on the real address. Payload layout
-            // matches the standard shadow response, so route to the same key
-            // family — the request side fires standard + Magic together and
-            // accepts whichever returns first.
+        can_class::BTM3_META_DATA => {
+            // Btm3 metadata response on the device's real address.
             if data.len() < 2 {
                 return None;
             }
-            if data[0] == shadow_op::OPTION && data.len() >= 4 {
-                Some(format!("shadow:{:06X}:26:{}:{}", device_addr, data[1], data[3]))
+            if data[0] == meta_op::OPTION && data.len() >= 4 {
+                Some(format!("btm3_meta:{:06X}:26:{}:{}", device_addr, data[1], data[3]))
             } else {
-                Some(format!("shadow:{:06X}:{:02X}:{}", device_addr, data[0], data[1]))
+                Some(format!("btm3_meta:{:06X}:{:02X}:{}", device_addr, data[0], data[1]))
             }
         }
         can_class::MONITORING_DATA => {
-            // Shadow response (high address bit set), or regular monitoring data.
-            if device_addr & SHADOW_BIT != 0 {
-                let real = device_addr & !SHADOW_BIT;
+            // Btm1 metadata response (Btm1-meta address bit set), or regular
+            // monitoring data (handled by the value layer).
+            if device_addr & BTM1_META_ADDR_FLAG != 0 {
+                let real = device_addr & !BTM1_META_ADDR_FLAG;
                 if data.len() < 2 {
                     return None;
                 }
-                if data[0] == shadow_op::OPTION && data.len() >= 4 {
-                    Some(format!("shadow:{:06X}:26:{}:{}", real, data[1], data[3]))
+                if data[0] == meta_op::OPTION && data.len() >= 4 {
+                    Some(format!("btm1_meta:{:06X}:26:{}:{}", real, data[1], data[3]))
                 } else {
-                    Some(format!("shadow:{:06X}:{:02X}:{}", real, data[0], data[1]))
+                    Some(format!("btm1_meta:{:06X}:{:02X}:{}", real, data[0], data[1]))
                 }
             } else {
                 None
             }
         }
-        // A shadow "no value" reply (absent metadata / option). Routing it to the
-        // same key as the request lets discovery resolve it instantly instead of
-        // waiting out the timeout. Only shadow-addressed acks are routed; a
-        // non-shadow `0x10` (e.g. a write ack) must NOT masquerade as a value.
-        can_class::WRITE_ACK if device_addr & SHADOW_BIT != 0 => {
-            let real = device_addr & !SHADOW_BIT;
+        // A Btm1 metadata "no value" reply (absent metadata / option). Routing
+        // it to the same key as the request lets discovery resolve it instantly
+        // instead of waiting out the timeout. Only the metadata-address form
+        // is routed; a real-address `0x10` (e.g. a write ack) must NOT
+        // masquerade as a value.
+        can_class::WRITE_ACK if device_addr & BTM1_META_ADDR_FLAG != 0 => {
+            let real = device_addr & !BTM1_META_ADDR_FLAG;
             if data.len() < 2 {
                 return None;
             }
-            if data[0] == shadow_op::OPTION && data.len() >= 4 {
-                Some(format!("shadow:{:06X}:26:{}:{}", real, data[1], data[3]))
+            if data[0] == meta_op::OPTION && data.len() >= 4 {
+                Some(format!("btm1_meta:{:06X}:26:{}:{}", real, data[1], data[3]))
             } else {
-                Some(format!("shadow:{:06X}:{:02X}:{}", real, data[0], data[1]))
+                Some(format!("btm1_meta:{:06X}:{:02X}:{}", real, data[0], data[1]))
             }
         }
         _ => None,

@@ -282,9 +282,9 @@ impl Sched {
         };
         self.send(frame);
         let reported = self.await_access_level(addr)?;
-        // A level change flips per-field WRITEABLE (shadow op 0x0B) on many
+        // A level change flips per-field WRITEABLE (meta op 0x0B) on many
         // fields; the schema we cached at the prior level is now stale. Drop
-        // it so the next field access re-runs discovery with fresh shadow
+        // it so the next field access re-runs discovery with fresh metadata
         // attributes. (PROTOCOL.md §4.5.)
         self.state.forget_schema(addr);
         Ok(reported)

@@ -35,7 +35,7 @@ pub struct DeviceEntry {
     pub schema: Option<DeviceSchema>,
     /// Which menus have been discovered into `schema.groups`.
     pub menus: HashSet<Menu>,
-    /// Flat enumeration of every reachable field (probed via shadow metadata
+    /// Flat enumeration of every reachable field (probed via Btm1 metadata
     /// across the full index space `0..0x08 0x01`). Populated lazily, cached
     /// in memory until a login/logout invalidates it. `None` until probed.
     pub all_fields: Option<Vec<FieldInfo>>,
@@ -184,7 +184,7 @@ impl State {
 
     /// Drop the cached schema (groups + discovered-menu set) for a device.
     /// The identity is preserved; the next `tab_info` / `schema` / `field`
-    /// access will re-run discovery and fetch fresh shadow attributes
+    /// access will re-run discovery and fetch fresh metadata attributes
     /// (writability in particular changes after an access-level login).
     pub fn forget_schema(&self, addr: u32) {
         let mut map = self.devices.lock().unwrap();

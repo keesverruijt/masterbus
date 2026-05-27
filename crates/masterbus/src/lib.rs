@@ -89,8 +89,8 @@
 //!
 //! # Protocol reference
 //!
-//! The wire protocol — frame classes, the date/time encodings, the shadow
-//! metadata opcodes, writability, and more — is documented in
+//! The wire protocol — frame classes, the date/time encodings, the
+//! per-field metadata opcodes, writability, and more — is documented in
 //! [`docs/PROTOCOL.md`](https://github.com/keesverruijt/masterbus/blob/main/docs/PROTOCOL.md).
 #![warn(missing_docs)]
 #![allow(dead_code)]

@@ -52,15 +52,15 @@ Class is bits 28:24 of the CAN ID. Observed classes:
 | 0x05  | BUS_POLL          | ←   | Bus-master heartbeat (0-byte frame from node `0x500001`)  |
 | 0x06  | PROPERTY_INFO     | ←   | Property / group-count response from a device             |
 | 0x07  | PROPERTY_REQ      | →   | Property / group-count request to a device                |
-| 0x08  | MONITORING_DATA   | ←   | Monitoring value pushed from a device (also shadow resp.) |
+| 0x08  | MONITORING_DATA   | ←   | Monitoring value pushed from a device (also Btm1 metadata response) |
 | 0x09  | SCHEMA_DATA       | ←   | Schema response from a device (full 8-byte form)          |
-| 0x10  | WRITE_ACK / NA    | ←   | Write acknowledgement; shadow "no value" response         |
+| 0x10  | WRITE_ACK / NA    | ←   | Write acknowledgement; Btm1 metadata "no value" response  |
 | 0x11  | SCHEMA_DATA_NA    | ←   | Compact / NA schema response (4-byte form, see §5)        |
-| 0x18  | MONITORING_REQ    | →   | Monitoring request to a device (also shadow request)      |
+| 0x18  | MONITORING_REQ    | →   | Monitoring request to a device (also Btm1 metadata request) |
 | 0x19  | SCHEMA_REQ        | →   | Schema request to a device                                |
 | 0x1A  | SCHEMA_REQ_ALT_A  | →   | Alternate schema request (variant — semantics unconfirmed)|
 | 0x1B  | SCHEMA_REQ_ALT_B  | →   | Alternate schema request (variant — semantics unconfirmed)|
-| 0x1C  | SCHEMA_REQ_GROUP  | →   | Group-as-field shadow request (per-group attributes, see §5)|
+| 0x1C  | BTM3_META_REQ     | →   | Btm3 per-field metadata request (see §6)                  |
 
 `→` = controller→device (request), `←` = device→controller (response/push).
 
@@ -225,7 +225,7 @@ a packed integer (e.g. `498 → f32(<redacted>) = <redacted>`). This is the same
 **Effect of a successful login:**
 
 - Subsequent reads of `08 19` return the new level byte.
-- Field WRITEABLE responses (shadow opcode `0x0B`, §6) change for many
+- Field WRITEABLE responses (meta opcode `0x0B`, §6) change for many
   fields — the multi-byte value differs per level. The bitmask layout is
   not yet fully decoded; the practical rule is **re-query `0x0B` for every
   field after any level change** rather than caching pre-login attributes.
@@ -245,14 +245,14 @@ capture) so it can resync its UI to actual device state.
 
 Because `[0x08, 0x03]` lies on some devices (§4.3), the only universally
 reliable way to enumerate a device's settings is to probe the **full
-field-index space** directly via shadow metadata (§6), bypassing groups
+field-index space** directly via Btm1 metadata (§6), bypassing groups
 entirely.
 
 Algorithm:
 
 1. Read `[0x08, 0x01]` to get `N` — the device's total field-index count.
-2. For each `field_idx ∈ 0..N`, send the pipelined shadow batch
-   (`NAME / VIZ / MAX / UNIT / WRITEABLE`) to the shadow address (§6).
+2. For each `field_idx ∈ 0..N`, send the pipelined metadata batch
+   (`NAME / VIZ / MAX / UNIT / WRITEABLE`) to the Btm1 metadata address (§6).
 3. Drop indices that produce no response in any opcode of the batch —
    those are holes in the index space and not addressable fields.
 4. What remains is every reachable field, **without group structure**.
@@ -270,7 +270,7 @@ the group-based discovery in §5:
   inside `MasterAdjust.exe` (one Delphi class per device family); the
   bus itself never exposes them. Recovering those headings means RE'ing
   the Delphi classes and porting them into the client.
-- **Con:** Linear cost in `N` shadow batches (~150 ms each at our
+- **Con:** Linear cost in `N` metadata batches (~150 ms each at our
   per-attempt timeout). The Nav Chg's `N = 64` takes a few seconds on a
   cold cache; subsequent visits are free.
 
@@ -307,7 +307,7 @@ byte at `[3]` as TBD until further captures clarify whether it carries
 useful data.
 
 **Group-as-field requests (class `0x1C`).** MasterAdjust separately
-queries shadow-style opcodes (`0x02 VIZ`, `0x07 MAX`, `0x09 FACTORY`,
+queries metadata-style opcodes (`0x02 VIZ`, `0x07 MAX`, `0x09 FACTORY`,
 `0x0B WRITEABLE`, `0x0C GRAY`, `0x28 NAME`) on **group ids** via class
 `0x1C` with payload `[opcode, gid, 0x00]`. Responses come back on class
 `0x11` with the 4-byte compact form. This appears to be how MasterAdjust
@@ -317,17 +317,37 @@ the crate.
 
 ---
 
-## 6. Shadow (field) metadata
+## 6. Per-field metadata
 
-Per-field metadata is requested at the device's **shadow address**:
+There are **two parallel metadata channels** named after the vendor's Delphi
+units that handle them (`Btm1.pas` and `Btm3.pas` in MasterAdjust). Same
+per-field opcode set on both; only the CAN class and the addressing differ.
+Both expose the same conceptual data — name / viz / min / max / step /
+factory default / writeable / unit / option strings — but on **separate
+field-index namespaces**: index `0x17` on Btm1 is a different field than
+index `0x17` on Btm3, with different name and value (see FINDINGS §3f).
+
+**Btm1 metadata** (the legacy / standard channel):
 
 ```
-shadow_addr = (device_addr | 0x800000) & 0x00FF_FFFF
+btm1_meta_addr = (device_addr | 0x800000) & 0x00FF_FFFF
 ```
 
-Request: class `0x18` to `shadow_addr`, payload `[opcode, field_lo, field_hi]`.
-Response: class `0x08` from `shadow_addr` (the high bit `0x800000` distinguishes
-a shadow response from a real monitoring push).
+Request: class `0x18` to `btm1_meta_addr`, payload `[opcode, field_lo, field_hi]`.
+Response: class `0x08` from `btm1_meta_addr` (the high bit `0x800000` is
+what distinguishes a Btm1 metadata response from a real monitoring push).
+
+**Btm3 metadata** (newer revision; required by Magic-class devices like the
+INT Nav Chg, also supported by HFcombi devices in addition to Btm1):
+
+Request: class `0x1C` to the device's **real** address, payload
+`[opcode, field_lo, field_hi]`. Response: class `0x0C` from the real
+address (the channel uses no address-flag bit; class disambiguates).
+
+Btm3 values arrive on a separate path: passive class `0x0B` pushes
+addressed to `addr | 0x800000` with a headerless `[fid_lo, fid_hi, b0..b3]`
+payload; writes go out on class `0x1B` to the same address with the same
+payload format.
 
 Each field attribute has its own opcode. The full attribute set (the vendor's
 `pit*` "property-item-type" enum, recovered by decompiling MasterAdjust.exe —
@@ -353,16 +373,17 @@ Each field attribute has its own opcode. The full attribute set (the vendor's
 - **Writability is explicit**: query `0x0B` per field; do not infer it from viz
   type (e.g. a settable "AC IN limit" and a read-only "Input voltage" are both
   numeric). Confirm the flag's byte width on a live bus.
-- **A shadow string id of `0` means "no string"** — the opposite of property
-  string ids (§4.2). Unitless fields often return no `0x2C` response at all.
+- **A metadata string id of `0` means "no string"** — the opposite of
+  property string ids (§4.2). Unitless fields often return no `0x2C`
+  response at all.
 - Option strings (`0x26`) are only present for list-type fields and only up to
   `option count` (`0x07`).
 - Opcodes `0x02/0x07/0x26/0x28/0x2C` are confirmed on the wire from live capture;
   the others (`0x03/0x06/0x08/0x09/0x0B/0x0C/0x0D/0x29/0x2A`) are from the
   MasterAdjust decompile and should be confirmed live when used.
 
-String ids returned by shadow queries are fetched with the same chunk mechanism
-as §4.4 (to the real `device_addr`, not the shadow address).
+String ids returned by metadata queries are fetched with the same chunk
+mechanism as §4.4 (to the real `device_addr`, not the Btm1 metadata address).
 
 ---
 
@@ -431,11 +452,12 @@ against incoming frames:
 | Property (0x06)         | `p:{addr}:{data[0]}:{data[1]}`                 |
 | String chunk (0x06,0x30)| `str:{addr}:{str_id}:{seq}` (seq from data[3]) |
 | Schema (0x09)           | `schema:{addr}:{op}:{group}` (+`:{idx}` for 0x03 field-id, idx in data[3]) |
-| Shadow (0x08, hi bit)   | `shadow:{real_addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
+| Btm1 metadata (0x08, hi bit) | `btm1_meta:{real_addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
+| Btm3 metadata (0x0C)    | `btm3_meta:{addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
 
 Regular monitoring pushes (class 0x08, no `0x800000` bit) are routed to the
-value table; shadow responses (class 0x08 with the `0x800000` address bit) are
-routed to the metadata waiter.
+value table; Btm1 metadata responses (class 0x08 with the `0x800000` address
+bit) are routed to the metadata waiter.
 
 ---
 
@@ -516,7 +538,7 @@ UTF-8 bytes of the payload (lossy decode).
    derive revision from serial[4] if n=4 is unanswered.
 4. Monitoring group count: `[0x08,0x02]` (§4.3).
 5. For each group: name id, field count, field ids (§5); fetch the group name.
-6. For each field: shadow name/viz/max/unit (§6); fetch name & unit strings;
+6. For each field: metadata name/viz/max/unit (§6); fetch name & unit strings;
    fetch option strings for list types.
 7. (Optional) pre-poll each field's value (§7.1).
 
@@ -525,7 +547,7 @@ despite the device clearly being configurable), skip steps 4–6 above for
 that menu and fall back to the **flat field-index probe** (§4.6):
 
 4'. Total field count: `[0x08, 0x01]` → `N`.
-5'. For each `field_idx ∈ 0..N`: pipelined shadow batch (§6); drop
+5'. For each `field_idx ∈ 0..N`: pipelined metadata batch (§6); drop
     indices with no response in any opcode.
 6'. Render the survivors as a flat list — no group structure is available
     from the bus for these devices.

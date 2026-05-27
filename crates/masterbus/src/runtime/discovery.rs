@@ -1,7 +1,7 @@
 //! Lazy, single-threaded device discovery (runs on the scheduler thread).
 //!
 //! Identity (firmware + strings) is always fetched (cheap). The expensive group/
-//! field/shadow enumeration is cached **per device** (keyed by serial) and may be
+//! field/metadata enumeration is cached **per device** (keyed by serial) and may be
 //! loaded from / persisted to the optional on-disk cache.
 
 use std::collections::HashMap;
@@ -12,10 +12,9 @@ use super::waiter::Waiter;
 use super::Config;
 use crate::model::{DeviceIdentity, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
-    can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
-    schema_field_count_req_class_raw, schema_field_id_req_class_raw,
-    schema_group_name_req_class_raw, shadow_meta_req_raw, shadow_option_req_raw,
-    string_chunk_req_raw, viz_from_wire, VisualizationType,
+    btm1_meta_option_req_raw, btm1_meta_req_raw, can_class, fw_req_raw, group_count_req_raw,
+    prop_str_id_req_raw, schema_field_count_req_class_raw, schema_field_id_req_class_raw,
+    schema_group_name_req_class_raw, string_chunk_req_raw, viz_from_wire, VisualizationType,
 };
 use crate::transport::TransportTx;
 
@@ -78,25 +77,23 @@ impl Disc<'_> {
             .map(|r| u16::from_le_bytes([r[2], r[3]]))
     }
 
-    /// Fetch several shadow metadata ops for one field in a single round-trip:
-    /// register all keys, fire all requests back-to-back, then collect within one
-    /// shared timeout window. Absent metadata (silent or a `0x10` "no value")
-    /// resolves within that one window instead of timing out per op — this is the
-    /// main discovery speed-up. Returns op → raw response payload.
+    /// Fetch several Btm1 per-field metadata ops in a single round-trip:
+    /// register all keys, fire all requests back-to-back, then collect within
+    /// one shared timeout window. Absent metadata (silent or a `0x10` "no
+    /// value") resolves within that one window instead of timing out per op —
+    /// this is the main discovery speed-up. Returns op → raw response payload.
     ///
-    /// **Only the standard shadow channel** (`0x18` → `0x08` to the shadow
-    /// address) is queried. The alternative channel on class `0x1C` exposes a
-    /// **separate field namespace** with different names/values per index; mixing
-    /// the two into one cache produced incorrect metadata. The alt channel will
-    /// be re-introduced as an explicit per-channel field collection — see
-    /// FINDINGS §3f and the open redesign discussion.
-    fn shadow_batch(&mut self, addr: u32, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
-        let key = |op: u8| format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
+    /// **Only the Btm1 metadata channel** (`0x18` → `0x08` to `addr | 0x800000`)
+    /// is queried. The Btm3 channel (class `0x1C`) exposes a **separate field
+    /// namespace** with different names/values per index; the in-flight
+    /// redesign moves Btm3 onto its own field-id space so the two can coexist.
+    fn btm1_meta_batch(&mut self, addr: u32, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
+        let key = |op: u8| format!("btm1_meta:{:06X}:{:02X}:{}", addr, op, field);
         for &op in ops {
             self.waiter.register(&key(op));
         }
         for &op in ops {
-            let frame = shadow_meta_req_raw(addr, op, field as u16);
+            let frame = btm1_meta_req_raw(addr, op, field as u16);
             let _ = self.tx.send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
@@ -120,7 +117,7 @@ impl Disc<'_> {
 }
 
 /// Fetch a device's identity (firmware + property strings). This is the cheap
-/// half of discovery — no group/field/shadow enumeration.
+/// half of discovery — no group/field/metadata enumeration.
 pub(super) fn fetch_identity(disc: &mut Disc, addr: u32) -> DeviceIdentity {
     let firmware = {
         let k0 = format!("p:{:06X}:82:00", addr);
@@ -295,7 +292,7 @@ fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<Grou
 
 /// Probe every field index in the device's full index space (selector `0x01`,
 /// see PROTOCOL.md §4.3 + the Nav Chg / TDevice_MacMagic discussion in
-/// FINDINGS), dropping indices that don't respond to any shadow query.
+/// FINDINGS), dropping indices that don't respond to any metadata query.
 ///
 /// This is the only way to enumerate Configuration items on devices whose
 /// `0x08 0x03` group count lies (e.g. the Magic-class Nav Chg, which reports
@@ -318,14 +315,14 @@ pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: u32) -> Vec<FieldInfo>
 }
 
 fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
-    use crate::protocol::shadow_op as op;
+    use crate::protocol::meta_op as op;
     let f = fid as u8;
 
     // Per-field metadata in one pipelined round-trip. Numeric editing bounds
     // (MIN/STEP) are deferred — they aren't needed to enumerate or read a field,
     // so we skip them here (op::MAX is still fetched: it doubles as the option
     // count for lists).
-    let meta = disc.shadow_batch(addr, f, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
+    let meta = disc.btm1_meta_batch(addr, f, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
     // If nothing came back, this field index is unallocated — used by the
     // `enumerate_all_fields` flat probe to skip holes in the index space.
     if meta.is_empty() {
@@ -341,7 +338,7 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
     let viz_code = byte4(op::VIZ).unwrap_or(0x01);
     let n_or_max = f32_at4(op::MAX).unwrap_or(0.0);
     let unit_sid = u16_at4(op::UNIT);
-    // Writability: shadow op 0x0B, flag at byte[4].
+    // Writability: meta op 0x0B, flag at byte[4].
     let writeable = byte4(op::WRITEABLE).map(|b| b != 0).unwrap_or(false);
 
     let viz = viz_from_wire(viz_code);
@@ -353,11 +350,11 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
     {
         let mut opts = Vec::new();
         for opt in 0..n_opts {
-            let key = format!("shadow:{:06X}:26:{}:{}", addr, f, opt as u8);
-            // Standard channel only — see `shadow_batch` for why mixing
-            // channels was wrong.
+            let key = format!("btm1_meta:{:06X}:26:{}:{}", addr, f, opt as u8);
+            // Btm1 channel only — Btm3 option strings will be added in a
+            // separate, channel-aware code path.
             let osid = disc
-                .req(&key, shadow_option_req_raw(addr, f, opt as u8), OPTIONAL_RETRIES)
+                .req(&key, btm1_meta_option_req_raw(addr, f, opt as u8), OPTIONAL_RETRIES)
                 .filter(|r| r.len() >= 6)
                 .map(|r| u16::from_le_bytes([r[4], r[5]]));
             opts.push(osid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default());

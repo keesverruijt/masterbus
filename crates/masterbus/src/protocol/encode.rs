@@ -1,13 +1,16 @@
 //! Encode requests/writes into raw `(can_id, data)` pairs for transmission.
 
-use super::{can_class, menu, shadow_op, SHADOW_BIT, TAB_DEFAULT};
+use super::{can_class, menu, meta_op, BTM1_META_ADDR_FLAG, TAB_DEFAULT};
 
 fn id(class: u8, device_addr: u32) -> u32 {
     ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF)
 }
 
-fn shadow_addr(device_addr: u32) -> u32 {
-    (device_addr | SHADOW_BIT) & 0x00_FF_FF_FF
+/// Wire-level address transformation for Btm1 metadata requests. The Btm1
+/// metadata channel addresses the device at `addr | 0x800000`; everything
+/// else (Btm1 values, Btm3 metadata) uses the real address.
+fn btm1_meta_addr(device_addr: u32) -> u32 {
+    (device_addr | BTM1_META_ADDR_FLAG) & 0x00_FF_FF_FF
 }
 
 /// Bus-master heartbeat: class `0x05` from the master's own address, no data.
@@ -60,37 +63,39 @@ pub fn schema_field_id_req_raw(device_addr: u32, group_id: u8, idx: u8) -> (u32,
     (id(can_class::SCHEMA_REQ, device_addr), vec![0x03, group_id, 0x00, idx])
 }
 
-/// Shadow metadata query: class `0x18` to the shadow address, `[opcode, field_lo, field_hi]`.
-pub fn shadow_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
+/// Btm1 per-field metadata query: class `0x18` to the Btm1 metadata address
+/// (`real | 0x800000`), payload `[opcode, field_lo, field_hi]`. The device
+/// replies on class `0x08` at the same address.
+pub fn btm1_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
     let [lo, hi] = field_id.to_le_bytes();
-    (id(can_class::MONITORING_REQ, shadow_addr(device_addr)), vec![opcode, lo, hi])
+    (id(can_class::MONITORING_REQ, btm1_meta_addr(device_addr)), vec![opcode, lo, hi])
 }
 
-/// Shadow option-string query: class `0x18` to the shadow address,
-/// `[0x26, field_id, 0x00, opt_idx]`.
-pub fn shadow_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
+/// Btm1 option-string query: class `0x18` to the Btm1 metadata address,
+/// payload `[0x26, field_id, 0x00, opt_idx]`.
+pub fn btm1_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
     (
-        id(can_class::MONITORING_REQ, shadow_addr(device_addr)),
-        vec![shadow_op::OPTION, field_id, 0x00, opt_idx],
+        id(can_class::MONITORING_REQ, btm1_meta_addr(device_addr)),
+        vec![meta_op::OPTION, field_id, 0x00, opt_idx],
     )
 }
 
-/// Magic-class shadow metadata query: class `0x1C` to the **real** address
-/// (not the shadow address), `[opcode, field_lo, field_hi]`. Same opcode set
-/// as [`shadow_meta_req_raw`]; the device replies on class `0x0C`. Used by
-/// Magic / HFcombi families for the bulk of their per-field metadata,
-/// alongside or in place of the standard shadow channel. See PROTOCOL.md §6.
-pub fn shadow_meta_req_magic_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
+/// Btm3 per-field metadata query: class `0x1C` to the device's **real**
+/// address, payload `[opcode, field_lo, field_hi]`. Same opcode set as
+/// [`btm1_meta_req_raw`]; the device replies on class `0x0C`. Used by
+/// devices that speak the MasterBus v3 revision (e.g. the MacMagic
+/// family) — see PROTOCOL.md §6.
+pub fn btm3_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
     let [lo, hi] = field_id.to_le_bytes();
-    (id(can_class::SHADOW_REQ_MAGIC, device_addr), vec![opcode, lo, hi])
+    (id(can_class::BTM3_META_REQ, device_addr), vec![opcode, lo, hi])
 }
 
-/// Magic-class shadow option-string query: class `0x1C` to the real address,
+/// Btm3 option-string query: class `0x1C` to the real address, payload
 /// `[0x26, field_id, 0x00, opt_idx]`.
-pub fn shadow_option_req_magic_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
+pub fn btm3_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
     (
-        id(can_class::SHADOW_REQ_MAGIC, device_addr),
-        vec![shadow_op::OPTION, field_id, 0x00, opt_idx],
+        id(can_class::BTM3_META_REQ, device_addr),
+        vec![meta_op::OPTION, field_id, 0x00, opt_idx],
     )
 }
 

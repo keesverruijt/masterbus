@@ -12,7 +12,10 @@ use crossbeam_channel::Sender;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
-use crate::protocol::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage, SHADOW_BIT};
+use crate::protocol::{
+    decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage,
+    BTM1_META_ADDR_FLAG,
+};
 use crate::transport::TransportRx;
 
 /// Build the value-waiter key for an on-demand read/poll response.
@@ -68,7 +71,7 @@ fn reader_loop(
 fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
     let frame = frame_from_raw(raw_id, data);
 
-    // Discovery responses (property / schema / shadow) → matching waiter.
+    // Discovery responses (property / schema / per-field metadata) → matching waiter.
     if let Some(key) = waiter_key_for_frame(frame.can_class, frame.device_addr, data) {
         waiter.deliver(&key, data.to_vec());
     }
@@ -78,7 +81,7 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             state.mark_alive(device_addr, type_code, firmware_version);
         }
         MbMessage::MonitoringData { device_addr, field_index, raw, .. }
-            if device_addr & SHADOW_BIT == 0 =>
+            if device_addr & BTM1_META_ADDR_FLAG == 0 =>
         {
             state.touch(device_addr);
             // Wake any pending on-demand read/poll for this field.
@@ -94,12 +97,11 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             }
         }
         _ => {
-            // Class `0x0B` on the shadow address is a headerless live-value
-            // push from the **alternative** field namespace (different names
-            // and values per field index than the standard `0x18 → 0x08`
-            // channel). Caching it under the standard-namespace `field_index`
-            // produced incorrect values. The reader now ignores it until the
-            // crate grows a channel-aware field model — see FINDINGS §3f.
+            // Class `0x0B` on the Btm1 metadata address is a headerless
+            // **Btm3** live-value push (different field namespace than Btm1).
+            // Caching it under the Btm1 `field_index` produced incorrect
+            // values. The reader ignores it until Btm3 has its own
+            // channel-tagged field collection — see FINDINGS §3f.
             let _ = (data,); // silence unused while the alt-channel handler is gone
         }
     }
