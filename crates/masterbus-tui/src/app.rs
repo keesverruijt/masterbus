@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use masterbus::{
-    AccessLevel, DeviceIdentity, DeviceStatus, FieldInfo, GroupInfo, MasterBus, Menu, Subscription,
-    Value, VisualizationType,
+    AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus, Menu,
+    Subscription, Value, VisualizationType,
 };
 
 /// Live-poll rate for the selected device's monitoring fields.
@@ -55,7 +55,7 @@ pub enum Focus {
 
 /// An in-progress edit of the selected field.
 pub struct Editor {
-    pub field: i32,
+    pub field: FieldId,
     pub name: String,
     pub kind: EditKind,
 }
@@ -116,7 +116,7 @@ pub struct App {
     pub all_fields_loaded: bool,
     pub rows: Vec<Row>,
     pub row_sel: usize,
-    pub values: HashMap<i32, Value>,
+    pub values: HashMap<FieldId, Value>,
     pub sub: Option<Subscription>,
     pub editor: Option<Editor>,
     pub login: Option<LoginPrompt>,
@@ -351,7 +351,7 @@ impl App {
         self.values.clear();
         // Monitoring fields get live updates; other tabs are read lazily on
         // selection (they're mostly static settings).
-        let fields: Vec<i32> = groups.iter().flat_map(|g| g.fields.iter().map(|f| f.index)).collect();
+        let fields: Vec<FieldId> = groups.iter().flat_map(|g| g.fields.iter().map(|f| f.index)).collect();
         self.sub = if menu == Menu::Monitoring && !fields.is_empty() {
             Some(self.bus.subscribe(id, fields, POLL_INTERVAL, false))
         } else {
@@ -444,7 +444,7 @@ impl App {
         self.ensure_value(idx);
     }
 
-    fn ensure_value(&mut self, index: i32) {
+    fn ensure_value(&mut self, index: FieldId) {
         if self.values.contains_key(&index) {
             return;
         }
@@ -500,7 +500,7 @@ impl App {
                 let options = info.options.clone();
                 let sel = match self.values.get(&info.index) {
                     Some(Value::List { index, .. }) => *index as usize,
-                    _ => 0,
+                    _ => 0_usize,
                 };
                 let sel = sel.min(options.len().saturating_sub(1));
                 self.editor = Some(Editor {
@@ -555,7 +555,7 @@ impl App {
         }
     }
 
-    fn write(&mut self, index: i32, value: Value) {
+    fn write(&mut self, index: FieldId, value: Value) {
         let Some(id) = self.cur_device else { return };
         match self.bus.device(id).field(index).set(value) {
             Ok(v) => {

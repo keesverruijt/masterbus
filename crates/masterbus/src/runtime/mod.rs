@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
 use crate::error::{Error, Result};
+use crate::model::{DeviceId, FieldId};
 use crate::transport::Transport;
 use crate::value::{Value, WriteValue};
 
@@ -45,7 +46,7 @@ pub struct Config {
     /// response, which is what lets us enumerate the bus when no hardware master
     /// is present. Leave `None` to stay passive (a hardware master must drive the
     /// bus, e.g. an EasyView panel).
-    pub heartbeat_master: Option<u32>,
+    pub heartbeat_master: Option<DeviceId>,
     /// Interval between heartbeats when `heartbeat_master` is set.
     pub heartbeat_interval: Duration,
 }
@@ -70,9 +71,9 @@ impl Default for Config {
 #[derive(Debug, Clone)]
 pub struct ValueUpdate {
     /// Device id.
-    pub device: u32,
-    /// Field index.
-    pub field: i32,
+    pub device: DeviceId,
+    /// Channel-aware field id.
+    pub field: FieldId,
     /// The new value.
     pub value: Value,
 }
@@ -81,16 +82,16 @@ pub struct ValueUpdate {
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceEvent {
     /// A device became (or is) alive.
-    Alive(u32),
+    Alive(DeviceId),
     /// A device went offline (stopped broadcasting).
-    Offline(u32),
+    Offline(DeviceId),
 }
 
 /// Internal subscription spec.
 pub(crate) struct SubSpec {
     pub id: u64,
-    pub device: u32,
-    pub fields: Vec<i32>,
+    pub device: DeviceId,
+    pub fields: Vec<FieldId>,
     pub interval: Duration,
     pub change_only: bool,
     pub sender: Sender<ValueUpdate>,
@@ -98,14 +99,14 @@ pub(crate) struct SubSpec {
 
 /// Commands sent from the API to the scheduler thread.
 pub(crate) enum Command {
-    Identify { addr: u32, reply: Sender<Result<()>> },
-    DiscoverMenu { addr: u32, menu: crate::model::Menu, reply: Sender<Result<()>> },
-    Discover { addr: u32, reply: Sender<Result<()>> },
-    DiscoverAllFields { addr: u32, reply: Sender<Result<()>> },
-    Read { addr: u32, field: i32, max_age: Duration, reply: Sender<Result<Value>> },
-    Write { addr: u32, field: i32, value: WriteValue, reply: Sender<Result<Value>> },
-    AccessLevelRead { addr: u32, reply: Sender<Result<crate::model::AccessLevel>> },
-    AccessLevelSet { addr: u32, level: crate::model::AccessLevel, reply: Sender<Result<crate::model::AccessLevel>> },
+    Identify { addr: DeviceId, reply: Sender<Result<()>> },
+    DiscoverMenu { addr: DeviceId, menu: crate::model::Menu, reply: Sender<Result<()>> },
+    Discover { addr: DeviceId, reply: Sender<Result<()>> },
+    DiscoverAllFields { addr: DeviceId, reply: Sender<Result<()>> },
+    Read { addr: DeviceId, field: FieldId, max_age: Duration, reply: Sender<Result<Value>> },
+    Write { addr: DeviceId, field: FieldId, value: WriteValue, reply: Sender<Result<Value>> },
+    AccessLevelRead { addr: DeviceId, reply: Sender<Result<crate::model::AccessLevel>> },
+    AccessLevelSet { addr: DeviceId, level: crate::model::AccessLevel, reply: Sender<Result<crate::model::AccessLevel>> },
     Subscribe(SubSpec),
     Unsubscribe(u64),
     Shutdown,
@@ -172,7 +173,7 @@ impl Engine {
     }
 
     /// Ensure a device's identity is known (cheap discovery; blocks until ready).
-    pub fn ensure_identity(&self, addr: u32) -> Result<()> {
+    pub fn ensure_identity(&self, addr: DeviceId) -> Result<()> {
         if self.state.has_identity(addr) {
             return Ok(());
         }
@@ -180,13 +181,13 @@ impl Engine {
     }
 
     /// Fetch (cheaply, identity-only) a device's identity.
-    pub fn identity(&self, addr: u32) -> Result<crate::model::DeviceIdentity> {
+    pub fn identity(&self, addr: DeviceId) -> Result<crate::model::DeviceIdentity> {
         self.ensure_identity(addr)?;
         self.state.identity(addr).ok_or(Error::NotReady)
     }
 
     /// Ensure a device's full schema (all menus) is discovered.
-    pub fn ensure_schema(&self, addr: u32) -> Result<()> {
+    pub fn ensure_schema(&self, addr: DeviceId) -> Result<()> {
         if self.state.has_menus(addr, &discovery::MENUS) {
             return Ok(());
         }
@@ -194,7 +195,7 @@ impl Engine {
     }
 
     /// Ensure one menu's groups are discovered (the lazy unit).
-    pub fn ensure_menu(&self, addr: u32, menu: crate::model::Menu) -> Result<()> {
+    pub fn ensure_menu(&self, addr: DeviceId, menu: crate::model::Menu) -> Result<()> {
         if self.state.has_menu(addr, menu) {
             return Ok(());
         }
@@ -203,7 +204,7 @@ impl Engine {
 
     /// Ensure a specific field is discovered (full discovery fallback if its menu
     /// isn't known yet).
-    pub fn ensure_field(&self, addr: u32, field: i32) -> Result<()> {
+    pub fn ensure_field(&self, addr: DeviceId, field: FieldId) -> Result<()> {
         if self.state.has_field(addr, field) {
             return Ok(());
         }
@@ -213,7 +214,7 @@ impl Engine {
     /// Ensure the flat field enumeration (selector `0x01` probe of every index)
     /// is populated. Used for devices like the Magic-class Nav Chg whose
     /// per-menu group counts (`0x08 0x03`) under-report their schema.
-    pub fn ensure_all_fields(&self, addr: u32) -> Result<()> {
+    pub fn ensure_all_fields(&self, addr: DeviceId) -> Result<()> {
         if self.state.has_all_fields(addr) {
             return Ok(());
         }
@@ -221,17 +222,17 @@ impl Engine {
     }
 
     /// Read a field value (cache if fresh enough, else poll).
-    pub fn read(&self, addr: u32, field: i32, max_age: Duration) -> Result<Value> {
+    pub fn read(&self, addr: DeviceId, field: FieldId, max_age: Duration) -> Result<Value> {
         self.call(|reply| Command::Read { addr, field, max_age, reply })?
     }
 
     /// Write a field value; returns the resulting value observed afterwards.
-    pub fn write(&self, addr: u32, field: i32, value: WriteValue) -> Result<Value> {
+    pub fn write(&self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
         self.call(|reply| Command::Write { addr, field, value, reply })?
     }
 
     /// Read the device's current access level (PROTOCOL.md §4.5).
-    pub fn access_level(&self, addr: u32) -> Result<crate::model::AccessLevel> {
+    pub fn access_level(&self, addr: DeviceId) -> Result<crate::model::AccessLevel> {
         self.call(|reply| Command::AccessLevelRead { addr, reply })?
     }
 
@@ -239,7 +240,7 @@ impl Engine {
     /// device reports after the request.
     pub fn set_access_level(
         &self,
-        addr: u32,
+        addr: DeviceId,
         level: crate::model::AccessLevel,
     ) -> Result<crate::model::AccessLevel> {
         self.call(|reply| Command::AccessLevelSet { addr, level, reply })?
@@ -249,8 +250,8 @@ impl Engine {
     /// subscription id and the update receiver.
     pub fn subscribe(
         &self,
-        device: u32,
-        fields: Vec<i32>,
+        device: DeviceId,
+        fields: Vec<FieldId>,
         interval: Duration,
         change_only: bool,
     ) -> (u64, Receiver<ValueUpdate>) {
@@ -268,13 +269,13 @@ impl Engine {
     }
 
     /// Currently-alive device ids.
-    pub fn device_ids(&self) -> Vec<u32> {
+    pub fn device_ids(&self) -> Vec<DeviceId> {
         self.state.alive_ids(self.config.liveness)
     }
 
     /// Wait until the broadcast-collection window has elapsed since start, then
     /// return all alive device ids (the full bus).
-    pub fn device_ids_all(&self) -> Vec<u32> {
+    pub fn device_ids_all(&self) -> Vec<DeviceId> {
         let target = self.started + DEVICE_LIST_WINDOW;
         let now = Instant::now();
         if target > now {

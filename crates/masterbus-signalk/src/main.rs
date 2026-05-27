@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use masterbus::{Config, MasterBus, Menu, Value};
+use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Value};
 use serde_json::json;
 
 /// Default TCP listen address.
@@ -91,8 +91,8 @@ fn main() {
 
 /// A discovered field and where it lives (used to build the mapping + metadata).
 struct FieldRec {
-    device: u32,
-    index: i32,
+    device: DeviceId,
+    index: FieldId,
     class: String,
     instance: String,
     group: String,
@@ -251,8 +251,8 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
 
     // Build the emit metadata + per-device subscription list for enabled fields.
     let gated = mapping_path.is_some();
-    let mut meta: HashMap<(u32, i32), FieldMeta> = HashMap::new();
-    let mut per_device: HashMap<u32, Vec<i32>> = HashMap::new();
+    let mut meta: HashMap<(DeviceId, FieldId), FieldMeta> = HashMap::new();
+    let mut per_device: HashMap<DeviceId, Vec<FieldId>> = HashMap::new();
     for f in &fields {
         let on = !gated || enabled(&mapping, &f.instance, MENU, &f.group);
         if on {

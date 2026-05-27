@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use masterbus::{AccessLevel, Config, Device, MasterBus};
+use masterbus::{AccessLevel, Config, Device, FieldId, MasterBus};
 
 fn parse_level(s: &str) -> Option<AccessLevel> {
     match s.to_ascii_lowercase().as_str() {
@@ -30,13 +30,13 @@ fn parse_level(s: &str) -> Option<AccessLevel> {
     }
 }
 
-fn dump_writable(device: &Device, field: i32) {
+fn dump_writable(device: &Device, field: FieldId) {
     match device.field(field).info() {
         Ok(info) => println!(
-            "  field 0x{:02X} ({}): writable = {}",
+            "  field 0x{:04X} ({}): writable = {}",
             field, info.name, info.writeable
         ),
-        Err(e) => println!("  field 0x{:02X}: {}", field, e),
+        Err(e) => println!("  field 0x{:04X}: {}", field, e),
     }
 }
 
@@ -67,9 +67,10 @@ fn main() {
         }
     }
 
-    let field = args.get(2).and_then(|s| {
-        i32::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-    }).unwrap_or(0x17);
+    let field: FieldId = args
+        .get(2)
+        .and_then(|s| FieldId::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x17);
 
     if let Some(level_arg) = args.get(1) {
         let level = parse_level(level_arg).unwrap_or_else(|| {

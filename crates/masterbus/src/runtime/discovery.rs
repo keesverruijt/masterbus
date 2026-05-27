@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::waiter::Waiter;
 use super::Config;
-use crate::model::{DeviceIdentity, FieldInfo, GroupInfo, Menu};
+use crate::model::{field_id, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
     btm1_meta_option_req_raw, btm1_meta_req_raw, can_class, fw_req_raw, group_count_req_raw,
     prop_str_id_req_raw, schema_field_count_req_class_raw, schema_field_id_req_class_raw,
@@ -45,7 +45,7 @@ impl Disc<'_> {
     }
 
     /// Fetch a string by id via chunked reads.
-    fn fetch_str(&mut self, addr: u32, str_id: u16) -> String {
+    fn fetch_str(&mut self, addr: DeviceId, str_id: u16) -> String {
         let mut s = String::new();
         let mut seq: u8 = 0;
         loop {
@@ -70,7 +70,7 @@ impl Disc<'_> {
     }
 
     /// Property string id (`None` if no response; `Some(0)` is a valid id).
-    fn prop_str_id(&mut self, addr: u32, n: u8) -> Option<u16> {
+    fn prop_str_id(&mut self, addr: DeviceId, n: u8) -> Option<u16> {
         let key = format!("p:{:06X}:09:{:02X}", addr, n);
         self.req_std(&key, prop_str_id_req_raw(addr, n))
             .filter(|r| r.len() >= 4)
@@ -87,7 +87,7 @@ impl Disc<'_> {
     /// is queried. The Btm3 channel (class `0x1C`) exposes a **separate field
     /// namespace** with different names/values per index; the in-flight
     /// redesign moves Btm3 onto its own field-id space so the two can coexist.
-    fn btm1_meta_batch(&mut self, addr: u32, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
+    fn btm1_meta_batch(&mut self, addr: DeviceId, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
         let key = |op: u8| format!("btm1_meta:{:06X}:{:02X}:{}", addr, op, field);
         for &op in ops {
             self.waiter.register(&key(op));
@@ -107,7 +107,7 @@ impl Disc<'_> {
         out
     }
 
-    fn group_count(&mut self, addr: u32, selector: u8) -> u32 {
+    fn group_count(&mut self, addr: DeviceId, selector: u8) -> u32 {
         let key = format!("p:{:06X}:08:{:02X}", addr, selector);
         self.req_std(&key, group_count_req_raw(addr, selector))
             .filter(|r| r.len() >= 4)
@@ -118,7 +118,7 @@ impl Disc<'_> {
 
 /// Fetch a device's identity (firmware + property strings). This is the cheap
 /// half of discovery — no group/field/metadata enumeration.
-pub(super) fn fetch_identity(disc: &mut Disc, addr: u32) -> DeviceIdentity {
+pub(super) fn fetch_identity(disc: &mut Disc, addr: DeviceId) -> DeviceIdentity {
     let firmware = {
         let k0 = format!("p:{:06X}:82:00", addr);
         let k1 = format!("p:{:06X}:82:01", addr);
@@ -174,7 +174,7 @@ fn schema_waiter_prefix(class: u8) -> &'static str {
 /// For Monitoring/Configuration/Service the gid is global (offset by the prior
 /// menus); for Alarm/History the gid starts at 0 in the menu's own namespace
 /// and the offset returned here is 0.
-fn menu_range(disc: &mut Disc, addr: u32, menu: Menu) -> (u32, u32) {
+fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> (u32, u32) {
     match menu {
         Menu::Monitoring => (0, disc.group_count(addr, 0x02)),
         Menu::Configuration => {
@@ -203,7 +203,7 @@ fn menu_range(disc: &mut Disc, addr: u32, menu: Menu) -> (u32, u32) {
 /// sharing a schema across them would hide those differences.
 pub(super) fn discover_menu(
     disc: &mut Disc,
-    addr: u32,
+    addr: DeviceId,
     id: &DeviceIdentity,
     menu: Menu,
 ) -> Vec<GroupInfo> {
@@ -216,7 +216,7 @@ pub(super) fn discover_menu(
     )
 }
 
-fn enumerate_menu(disc: &mut Disc, addr: u32, menu: Menu) -> Vec<GroupInfo> {
+fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Vec<GroupInfo> {
     let (offset, count) = menu_range(disc, addr, menu);
     let mut groups = Vec::new();
     if count > 0 {
@@ -248,7 +248,7 @@ fn enumerate_menu(disc: &mut Disc, addr: u32, menu: Menu) -> Vec<GroupInfo> {
     groups
 }
 
-fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<GroupInfo> {
+fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupInfo> {
     let class = menu.schema_request_class();
     let key_prefix = schema_waiter_prefix(class);
     let name_sid = {
@@ -270,13 +270,15 @@ fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<Grou
         return None;
     }
 
-    let mut field_ids: Vec<i32> = Vec::new();
+    // Field ids returned by the schema query are 8-bit wire indices on the
+    // Btm1 channel; widen to channel-tagged `FieldId` with the Btm1 bit clear.
+    let mut field_ids: Vec<FieldId> = Vec::new();
     for idx in 0..field_count {
         let key = format!("{}:{:06X}:03:{}:{}", key_prefix, addr, g, idx as u8);
         if let Some(r) = disc.req_std(&key, schema_field_id_req_class_raw(class, addr, g, idx as u8))
             && r.len() >= 6
         {
-            field_ids.push(u16::from_le_bytes([r[4], r[5]]) as i32);
+            field_ids.push(field_id::btm1(r[4]));
         }
     }
 
@@ -300,23 +302,26 @@ fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<Grou
 /// MasterAdjust shows comes from a hard-coded per-device-family layout
 /// (`TDevice_MacMagic` etc. inside `MasterAdjust.exe`); the wire protocol
 /// itself only exposes a flat field-index space.
-pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: u32) -> Vec<FieldInfo> {
-    let n = disc.group_count(addr, 0x01) as i32;
+pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<FieldInfo> {
+    let n = disc.group_count(addr, 0x01);
     if n == 0 {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(n as usize);
-    for fid in 0..n {
-        if let Some(f) = enumerate_field(disc, addr, fid) {
+    // Btm1 wire indices are u8 (0..=255). The selector returns a count that
+    // may exceed u8 in pathological cases, but on every device we've seen N is
+    // well under 256. Probe each wire index on the Btm1 channel.
+    for wire in 0..(n.min(256) as u8) {
+        if let Some(f) = enumerate_field(disc, addr, field_id::btm1(wire)) {
             out.push(f);
         }
     }
     out
 }
 
-fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
+fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<FieldInfo> {
     use crate::protocol::meta_op as op;
-    let f = fid as u8;
+    let f = field_id::wire_index(fid);
 
     // Per-field metadata in one pipelined round-trip. Numeric editing bounds
     // (MIN/STEP) are deferred — they aren't needed to enumerate or read a field,
@@ -383,8 +388,13 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
 
 // ── disk cache (groups keyed by serial+firmware+menu, i.e. per device) ────────
 
+/// Bumped whenever the cached `Vec<GroupInfo>` JSON representation changes
+/// in a way that older versions can't read. Current schema: `FieldInfo.index`
+/// is `u16` (`FieldId` with channel bit). v1 was `i32`.
+const CACHE_SCHEMA: u8 = 2;
+
 fn cache_file(dir: &Path, serial: &str, firmware: &str, menu: Menu) -> std::path::PathBuf {
-    let key = format!("{}-{}-{:02x}", serial, firmware, menu.selector());
+    let key = format!("{}-{}-{:02x}-v{}", serial, firmware, menu.selector(), CACHE_SCHEMA);
     let safe: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })

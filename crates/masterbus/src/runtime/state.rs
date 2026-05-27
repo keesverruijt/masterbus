@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
+use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo, GroupInfo, Menu};
 use crate::value::Value;
 
 /// A cached field value with its observation time and a dirty flag.
@@ -39,8 +39,8 @@ pub struct DeviceEntry {
     /// across the full index space `0..0x08 0x01`). Populated lazily, cached
     /// in memory until a login/logout invalidates it. `None` until probed.
     pub all_fields: Option<Vec<FieldInfo>>,
-    /// Latest value per field index.
-    pub values: HashMap<i32, CachedValue>,
+    /// Latest value per channel-aware field id.
+    pub values: HashMap<FieldId, CachedValue>,
 }
 
 impl DeviceEntry {
@@ -89,7 +89,7 @@ impl State {
     }
 
     /// Record a freshly-observed value.
-    pub fn put_value(&self, addr: u32, field: i32, value: Value) {
+    pub fn put_value(&self, addr: u32, field: FieldId, value: Value) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
         let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
@@ -97,7 +97,7 @@ impl State {
     }
 
     /// Mark a field's cached value outdated (e.g. after a write).
-    pub fn mark_outdated(&self, addr: u32, field: i32) {
+    pub fn mark_outdated(&self, addr: u32, field: FieldId) {
         if let Some(e) = self.devices.lock().unwrap().get_mut(&addr)
             && let Some(v) = e.values.get_mut(&field)
         {
@@ -106,7 +106,7 @@ impl State {
     }
 
     /// Get a cached value (clone) if present.
-    pub fn get_value(&self, addr: u32, field: i32) -> Option<CachedValue> {
+    pub fn get_value(&self, addr: u32, field: FieldId) -> Option<CachedValue> {
         self.devices.lock().unwrap().get(&addr).and_then(|e| e.values.get(&field).cloned())
     }
 
@@ -169,7 +169,7 @@ impl State {
     }
 
     /// Whether a particular field has been discovered for a device.
-    pub fn has_field(&self, addr: u32, field: i32) -> bool {
+    pub fn has_field(&self, addr: u32, field: FieldId) -> bool {
         let map = self.devices.lock().unwrap();
         map.get(&addr)
             .and_then(|e| e.schema.as_ref())

@@ -16,7 +16,7 @@ use super::state::State;
 use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
-use crate::model::AccessLevel;
+use crate::model::{field_id, AccessLevel, DeviceId, FieldId};
 use crate::protocol::{
     decode_value, encode_commit, encode_login_read, encode_login_write, encode_logout,
     encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw, monitoring_req_raw,
@@ -29,8 +29,8 @@ const VALUE_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 struct SubState {
     spec: SubSpec,
-    next_due: HashMap<i32, Instant>,
-    last_value: HashMap<i32, Value>,
+    next_due: HashMap<FieldId, Instant>,
+    last_value: HashMap<FieldId, Value>,
 }
 
 pub(super) fn spawn(
@@ -147,7 +147,7 @@ impl Sched {
     }
 
     /// Fetch (and cache) just a device's identity — the cheap half of discovery.
-    fn do_identify(&mut self, addr: u32) {
+    fn do_identify(&mut self, addr: DeviceId) {
         if self.state.has_identity(addr) {
             return;
         }
@@ -156,7 +156,7 @@ impl Sched {
     }
 
     /// Ensure the identity is known (reusing the cache), returning it.
-    fn ensure_identity(&mut self, addr: u32) -> DeviceIdentity {
+    fn ensure_identity(&mut self, addr: DeviceId) -> DeviceIdentity {
         if let Some(id) = self.state.identity(addr) {
             return id;
         }
@@ -166,7 +166,7 @@ impl Sched {
     }
 
     /// Discover one menu's groups for a device (the lazy unit of discovery).
-    fn do_discover_menu(&mut self, addr: u32, menu: Menu) {
+    fn do_discover_menu(&mut self, addr: DeviceId, menu: Menu) {
         if self.state.has_menu(addr, menu) {
             return;
         }
@@ -180,14 +180,14 @@ impl Sched {
     }
 
     /// Discover every menu (a full schema).
-    fn do_discover_all(&mut self, addr: u32) {
+    fn do_discover_all(&mut self, addr: DeviceId) {
         for menu in MENUS {
             self.do_discover_menu(addr, menu);
         }
     }
 
     /// Discover every field via the flat index-space probe (selector `0x01`).
-    fn do_discover_all_fields(&mut self, addr: u32) {
+    fn do_discover_all_fields(&mut self, addr: DeviceId) {
         if self.state.has_all_fields(addr) {
             return;
         }
@@ -205,7 +205,7 @@ impl Sched {
         f(&mut disc)
     }
 
-    fn viz_of(&mut self, addr: u32, field: i32) -> Result<VisualizationType> {
+    fn viz_of(&mut self, addr: DeviceId, field: FieldId) -> Result<VisualizationType> {
         // If the field isn't known yet, fall back to a full discovery (we don't
         // know which menu it belongs to).
         if !self.state.has_field(addr, field) {
@@ -214,13 +214,13 @@ impl Sched {
         self.state
             .schema(addr)
             .and_then(|s| s.field(field).map(|f| f.viz_type))
-            .ok_or(Error::FieldNotAvailable(field))
+            .ok_or(Error::FieldNotAvailable(field as i32))
     }
 
-    fn poll_value(&mut self, addr: u32, field: i32, viz: VisualizationType) -> Result<Value> {
+    fn poll_value(&mut self, addr: DeviceId, field: FieldId, viz: VisualizationType) -> Result<Value> {
         let key = value_key(addr, field);
         self.waiter.register(&key);
-        self.send(monitoring_req_raw(addr, field as u8, TAB_DEFAULT));
+        self.send(monitoring_req_raw(addr, field_id::wire_index(field), TAB_DEFAULT));
         match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
             Some(raw) => {
                 let opts = self
@@ -236,7 +236,7 @@ impl Sched {
         }
     }
 
-    fn do_read(&mut self, addr: u32, field: i32, max_age: Duration) -> Result<Value> {
+    fn do_read(&mut self, addr: DeviceId, field: FieldId, max_age: Duration) -> Result<Value> {
         if let Some(cv) = self.state.get_value(addr, field)
             && !cv.outdated
             && cv.at.elapsed() <= max_age
@@ -253,7 +253,7 @@ impl Sched {
     // because the response is a class-0x06 frame `[0x08, 0x19, level, 0x00]`
     // in all three cases. The level byte at data[2] is what we return.
 
-    fn await_access_level(&mut self, addr: u32) -> Result<AccessLevel> {
+    fn await_access_level(&mut self, addr: DeviceId) -> Result<AccessLevel> {
         let key = format!("p:{:06X}:08:19", addr);
         match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
             Some(data) if data.len() >= 3 => {
@@ -266,14 +266,14 @@ impl Sched {
         }
     }
 
-    fn do_access_level_read(&mut self, addr: u32) -> Result<AccessLevel> {
+    fn do_access_level_read(&mut self, addr: DeviceId) -> Result<AccessLevel> {
         let key = format!("p:{:06X}:08:19", addr);
         self.waiter.register(&key);
         self.send(encode_login_read(addr));
         self.await_access_level(addr)
     }
 
-    fn do_access_level_set(&mut self, addr: u32, level: AccessLevel) -> Result<AccessLevel> {
+    fn do_access_level_set(&mut self, addr: DeviceId, level: AccessLevel) -> Result<AccessLevel> {
         let key = format!("p:{:06X}:08:19", addr);
         self.waiter.register(&key);
         let frame = match level.code() {
@@ -290,11 +290,12 @@ impl Sched {
         Ok(reported)
     }
 
-    fn do_write(&mut self, addr: u32, field: i32, value: WriteValue) -> Result<Value> {
+    fn do_write(&mut self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
+        let wire = field_id::wire_index(field);
         let frame = match value {
-            WriteValue::Bool(b) => encode_set_boolean(addr, field as u8, b),
-            WriteValue::Float(f) => encode_set_float(addr, field as u8, f),
-            WriteValue::ListIndex(i) => encode_set_list(addr, field as u8, i),
+            WriteValue::Bool(b) => encode_set_boolean(addr, wire, b),
+            WriteValue::Float(f) => encode_set_float(addr, wire, f),
+            WriteValue::ListIndex(i) => encode_set_list(addr, wire, i),
         };
         self.send(frame);
         // Relay-style boolean controls (e.g. the CombiMaster inverter/charger)
@@ -310,7 +311,7 @@ impl Sched {
                 .map(|s| s.field(cmd).is_none())
                 .unwrap_or(true);
             if cmd_hidden {
-                self.send(encode_commit(addr, cmd as u8));
+                self.send(encode_commit(addr, field_id::wire_index(cmd)));
             }
         }
         self.state.mark_outdated(addr, field);
@@ -343,7 +344,7 @@ impl Sched {
     fn process_due(&mut self, subs: &mut [SubState]) {
         let now = Instant::now();
         // Collect work first to avoid borrow issues.
-        let mut work: Vec<(usize, i32)> = Vec::new();
+        let mut work: Vec<(usize, FieldId)> = Vec::new();
         for (i, s) in subs.iter().enumerate() {
             for (&f, &due) in &s.next_due {
                 if due <= now {

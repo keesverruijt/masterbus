@@ -7,7 +7,10 @@ use std::time::Duration;
 use crossbeam_channel::Receiver;
 
 use crate::error::{Error, Result};
-use crate::model::{AccessLevel, DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
+use crate::model::{
+    AccessLevel, DeviceId, DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo,
+    GroupInfo, Menu,
+};
 use crate::runtime::{Config, DeviceEvent, Engine, ValueUpdate};
 use crate::protocol::VisualizationType;
 use crate::transport::Transport;
@@ -58,7 +61,7 @@ impl MasterBus {
     }
 
     /// A handle to a specific device id (does not check presence).
-    pub fn device(&self, id: u32) -> Device {
+    pub fn device(&self, id: DeviceId) -> Device {
         Device { engine: self.engine.clone(), id }
     }
 
@@ -70,8 +73,8 @@ impl MasterBus {
     /// Subscribe to live updates of `fields` on `device` at `interval`.
     pub fn subscribe(
         &self,
-        device: u32,
-        fields: impl IntoIterator<Item = i32>,
+        device: DeviceId,
+        fields: impl IntoIterator<Item = FieldId>,
         interval: Duration,
         change_only: bool,
     ) -> Subscription {
@@ -85,12 +88,12 @@ impl MasterBus {
 #[derive(Clone)]
 pub struct Device {
     engine: Arc<Engine>,
-    id: u32,
+    id: DeviceId,
 }
 
 impl Device {
-    /// The device id (its CAN address).
-    pub fn id(&self) -> u32 {
+    /// The device id (its 24-bit CAN address).
+    pub fn id(&self) -> DeviceId {
         self.id
     }
 
@@ -163,8 +166,8 @@ impl Device {
         Ok(schema.groups.into_iter().filter(|g| g.menu == menu).collect())
     }
 
-    /// A handle to a field by its global index.
-    pub fn field(&self, index: i32) -> Field {
+    /// A handle to a field by its channel-aware id.
+    pub fn field(&self, index: FieldId) -> Field {
         Field { engine: self.engine.clone(), device: self.id, index }
     }
 
@@ -206,7 +209,7 @@ impl Device {
 #[derive(Clone)]
 pub struct Group {
     engine: Arc<Engine>,
-    device: u32,
+    device: DeviceId,
     group_id: i32,
 }
 
@@ -250,8 +253,8 @@ impl Group {
 #[derive(Clone)]
 pub struct Field {
     engine: Arc<Engine>,
-    device: u32,
-    index: i32,
+    device: DeviceId,
+    index: FieldId,
 }
 
 impl Field {
@@ -264,11 +267,11 @@ impl Field {
             .state
             .schema(self.device)
             .and_then(|s| s.field(self.index).cloned())
-            .ok_or(Error::FieldNotAvailable(self.index))
+            .ok_or(Error::FieldNotAvailable(self.index as i32))
     }
 
-    /// Field index.
-    pub fn index(&self) -> i32 {
+    /// Channel-aware field id (channel in bit 8, wire index in bits 0..8).
+    pub fn index(&self) -> FieldId {
         self.index
     }
     /// Field name.

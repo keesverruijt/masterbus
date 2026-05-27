@@ -138,11 +138,74 @@ impl Menu {
     }
 }
 
+/// A device's 24-bit address on the bus — the unique id by which the rest of
+/// the API addresses it. Carried in bits 23..0 of every CAN frame's id; the
+/// top 8 bits of the wire `u32` are never set. Aliased rather than newtyped
+/// so collection keys and literal addresses (`0x188EA2`) stay ergonomic.
+pub type DeviceId = u32;
+
+/// Which on-wire metadata channel a field lives on. The two channels share
+/// the byte-sized wire field-index space but expose **different fields per
+/// index** (different names, different live values). See PROTOCOL.md §6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Channel {
+    /// Btm1 — the legacy MasterBus protocol (named after the BTM battery
+    /// monitor family). Per-field metadata `0x18 → 0x08` on `addr | 0x800000`;
+    /// values + writes on the real address.
+    Btm1,
+    /// Btm3 — MasterBus revision 3 (BTM-III). Per-field metadata
+    /// `0x1C → 0x0C` on the real address; headerless values + writes on
+    /// `addr | 0x800000` via classes `0x1B`/`0x0B`.
+    Btm3,
+}
+
+/// Channel-aware field id. Bits `0..8` are the on-wire 8-bit field index
+/// within the channel; bit 8 selects the channel (`0` = Btm1, `1` = Btm3);
+/// bits `9..16` are reserved for future channels and must currently be `0`.
+///
+/// `FieldId` is a `u16` typedef rather than a newtype to keep collection
+/// keys (`HashMap<FieldId, _>`) and serde encodings boring.
+pub type FieldId = u16;
+
+/// Helpers for composing and inspecting [`FieldId`]s.
+pub mod field_id {
+    use super::{Channel, FieldId};
+
+    /// Bit that distinguishes the channel. Clear = Btm1; set = Btm3.
+    pub const CHANNEL_BIT: FieldId = 0x0100;
+
+    /// Compose a `FieldId` for a Btm1 wire index.
+    pub const fn btm1(wire: u8) -> FieldId {
+        wire as FieldId
+    }
+
+    /// Compose a `FieldId` for a Btm3 wire index.
+    pub const fn btm3(wire: u8) -> FieldId {
+        (wire as FieldId) | CHANNEL_BIT
+    }
+
+    /// The channel this field id refers to.
+    pub const fn channel(id: FieldId) -> Channel {
+        if id & CHANNEL_BIT != 0 {
+            Channel::Btm3
+        } else {
+            Channel::Btm1
+        }
+    }
+
+    /// The 8-bit wire field index within its channel (the byte that goes
+    /// out in the request payload). Bits above 8 are masked off.
+    pub const fn wire_index(id: FieldId) -> u8 {
+        (id & 0xFF) as u8
+    }
+}
+
 /// One field within a group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldInfo {
-    /// Global field index (used in monitoring/metadata requests).
-    pub index: i32,
+    /// Channel-aware field id (channel in bit 8, wire index in bits 0..8).
+    /// See [`field_id`] for accessors.
+    pub index: FieldId,
     /// Field name.
     pub name: String,
     /// Unit (may be empty).
@@ -176,9 +239,9 @@ pub struct GroupInfo {
 }
 
 impl GroupInfo {
-    /// Find a field by its index.
-    pub fn field(&self, index: i32) -> Option<&FieldInfo> {
-        self.fields.iter().find(|f| f.index == index)
+    /// Find a field by its channel-aware id.
+    pub fn field(&self, id: FieldId) -> Option<&FieldInfo> {
+        self.fields.iter().find(|f| f.index == id)
     }
 }
 
@@ -239,9 +302,9 @@ impl DeviceSchema {
         }
     }
 
-    /// Find a field anywhere in the schema by its global index.
-    pub fn field(&self, index: i32) -> Option<&FieldInfo> {
-        self.groups.iter().find_map(|g| g.field(index))
+    /// Find a field anywhere in the schema by its channel-aware id.
+    pub fn field(&self, id: FieldId) -> Option<&FieldInfo> {
+        self.groups.iter().find_map(|g| g.field(id))
     }
 
     /// Groups belonging to a given menu.

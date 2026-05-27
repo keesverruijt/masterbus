@@ -290,7 +290,9 @@ pub extern "C" fn mb_group_fields(
         return -1;
     };
     let Ok(fields) = group.fields() else { return -1 };
-    let idx: Vec<i32> = fields.iter().map(|f| f.index()).collect();
+    // The C ABI uses `i32` for field ids; channel-aware `FieldId` (u16)
+    // fits losslessly.
+    let idx: Vec<i32> = fields.iter().map(|f| f.index() as i32).collect();
     let (ptr, len) = alloc_slice(idx);
     unsafe { *out_fields = ptr };
     len
@@ -308,7 +310,7 @@ pub extern "C" fn mb_free_fields(fields: *mut i32, len: i32) {
 /// Field name (NULL on error). Free with [`mb_free_str`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_field_name(bus: *mut MbBus, id: u32, field: i32) -> *mut c_char {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field).name().ok()) {
+    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).name().ok()) {
         Some(s) => to_cstr(s),
         None => ptr::null_mut(),
     }
@@ -317,7 +319,7 @@ pub extern "C" fn mb_field_name(bus: *mut MbBus, id: u32, field: i32) -> *mut c_
 /// Field unit, possibly empty (NULL on error). Free with [`mb_free_str`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_field_unit(bus: *mut MbBus, id: u32, field: i32) -> *mut c_char {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field).unit().ok()) {
+    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).unit().ok()) {
         Some(s) => to_cstr(s),
         None => ptr::null_mut(),
     }
@@ -327,7 +329,7 @@ pub extern "C" fn mb_field_unit(bus: *mut MbBus, id: u32, field: i32) -> *mut c_
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_field_writable(bus: *mut MbBus, id: u32, field: i32) -> bool {
     bus_ref(bus)
-        .and_then(|b| b.device(id).field(field).is_writable().ok())
+        .and_then(|b| b.device(id).field(field as u16).is_writable().ok())
         .unwrap_or(false)
 }
 
@@ -336,7 +338,7 @@ pub extern "C" fn mb_field_writable(bus: *mut MbBus, id: u32, field: i32) -> boo
 /// Read a field's current value (NULL on error). Free with [`mb_free_value`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_field_value(bus: *mut MbBus, id: u32, field: i32) -> *mut MbValue {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field).value().ok()) {
+    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).value().ok()) {
         Some(v) => alloc_value(v),
         None => ptr::null_mut(),
     }
@@ -346,7 +348,7 @@ pub extern "C" fn mb_field_value(bus: *mut MbBus, id: u32, field: i32) -> *mut M
 /// rejected write). Free with [`mb_free_value`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_set_bool(bus: *mut MbBus, id: u32, field: i32, value: bool) -> *mut MbValue {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field).set(Value::Boolean(value)).ok()) {
+    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).set(Value::Boolean(value)).ok()) {
         Some(v) => alloc_value(v),
         None => ptr::null_mut(),
     }
@@ -356,7 +358,7 @@ pub extern "C" fn mb_set_bool(bus: *mut MbBus, id: u32, field: i32, value: bool)
 /// rejected write). Free with [`mb_free_value`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_set_float(bus: *mut MbBus, id: u32, field: i32, value: f32) -> *mut MbValue {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field).set(Value::Float(value)).ok()) {
+    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).set(Value::Float(value)).ok()) {
         Some(v) => alloc_value(v),
         None => ptr::null_mut(),
     }

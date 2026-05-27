@@ -12,6 +12,7 @@ use crossbeam_channel::Sender;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
+use crate::model::{field_id, DeviceId, FieldId};
 use crate::protocol::{
     decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage,
     BTM1_META_ADDR_FLAG,
@@ -19,8 +20,8 @@ use crate::protocol::{
 use crate::transport::TransportRx;
 
 /// Build the value-waiter key for an on-demand read/poll response.
-pub(super) fn value_key(addr: u32, field: i32) -> String {
-    format!("val:{:06X}:{}", addr, field)
+pub(super) fn value_key(addr: DeviceId, field: FieldId) -> String {
+    format!("val:{:06X}:{:04X}", addr, field)
 }
 
 pub(super) fn spawn(
@@ -45,7 +46,7 @@ fn reader_loop(
     shutdown: &AtomicBool,
     config: &Config,
 ) {
-    let mut alive: HashSet<u32> = HashSet::new();
+    let mut alive: HashSet<DeviceId> = HashSet::new();
     while !shutdown.load(Ordering::Relaxed) {
         match rx.recv(Duration::from_millis(200)) {
             Ok(Some((raw_id, data))) => handle_frame(raw_id, &data, state, waiter),
@@ -56,7 +57,7 @@ fn reader_loop(
         }
 
         // Liveness diff → presence events.
-        let now: HashSet<u32> = state.alive_ids(config.liveness).into_iter().collect();
+        let now: HashSet<DeviceId> = state.alive_ids(config.liveness).into_iter().collect();
         for &a in now.difference(&alive) {
             let _ = dev_tx.send(DeviceEvent::Alive(a));
         }
@@ -83,17 +84,20 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
         MbMessage::MonitoringData { device_addr, field_index, raw, .. }
             if device_addr & BTM1_META_ADDR_FLAG == 0 =>
         {
+            // Monitoring data arrives on the Btm1 channel: build a Btm1
+            // `FieldId` from the wire field index.
+            let field = field_id::btm1(field_index);
             state.touch(device_addr);
             // Wake any pending on-demand read/poll for this field.
-            waiter.deliver(&value_key(device_addr, field_index as i32), raw.clone());
+            waiter.deliver(&value_key(device_addr, field), raw.clone());
             // Cache the decoded value if we know the field's type.
             if let Some(schema) = state.schema(device_addr)
-                && let Some(f) = schema.field(field_index as i32)
+                && let Some(f) = schema.field(field)
             {
                 // Carry the schema's option labels so callers get both the
                 // numeric index and its meaning.
                 let v = decode_value(&raw, f.viz_type).with_options(&f.options);
-                state.put_value(device_addr, field_index as i32, v);
+                state.put_value(device_addr, field, v);
             }
         }
         _ => {
