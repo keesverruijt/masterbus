@@ -99,6 +99,24 @@ pub fn btm3_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> 
     )
 }
 
+/// Btm3 write: class `0x1B` to the alternative address (`real | 0x800000`),
+/// headerless payload `[fid_lo, fid_hi, b0, b1, b2, b3]` — a 16-bit wire
+/// field index followed by a 4-byte little-endian `f32` value.
+///
+/// Every Btm3 write is 4 bytes, even when the field is a boolean or a list
+/// pick: booleans go as `1.0` / `0.0`, list indices go as the index as
+/// `f32`. (Same "everything's a float" rule as the Btm1 monitoring write
+/// path; observed live in FINDINGS §3e.) The device acks by echoing the
+/// new value on class `0x0B` at the same address.
+pub fn btm3_write_raw(device_addr: u32, wire_idx: u8, value: f32) -> (u32, Vec<u8>) {
+    let [fid_lo, fid_hi] = (wire_idx as u16).to_le_bytes();
+    let [v0, v1, v2, v3] = value.to_le_bytes();
+    (
+        id(can_class::SCHEMA_REQ_HISTORY, btm1_meta_addr(device_addr)),
+        vec![fid_lo, fid_hi, v0, v1, v2, v3],
+    )
+}
+
 /// Schema group-name query on a non-default channel. `class` selects which
 /// schema tab to query:
 /// - [`can_class::SCHEMA_REQ`]         — Monitoring (default in [`schema_group_name_req_raw`])
@@ -219,6 +237,25 @@ mod tests {
         // is class 0x18 to that exact address.
         assert_eq!(monitoring_req_raw(0x188EA2, 0x17, 0).0, 0x18188EA2);
         assert_eq!(monitoring_req_raw(0x6E96CF, 0, 0).0, 0x186E96CF);
+    }
+
+    #[test]
+    fn btm3_write_matches_captured_wire_bytes() {
+        // From FINDINGS §3e: ShutDown voltage (field 0x30) on the Nav Chg
+        // (`0x3A3B4B`) written to 17.0 V went on the wire as
+        //     `Dn 1B BA3B4B [6] 30 00 00 00 88 41`
+        // class 0x1B, address `3A3B4B | 0x800000`, headerless `[fid_lo,
+        // fid_hi, b0..b3]` with the f32 value little-endian.
+        assert_eq!(
+            btm3_write_raw(0x3A3B4B, 0x30, 17.0),
+            (0x1B_BA3B4B, vec![0x30, 0x00, 0x00, 0x00, 0x88, 0x41]),
+        );
+        // Mode field 0x2C set to option index 2 ("Stabilizer") — list pick
+        // as `f32(2.0)`, same as Btm1's "everything is a float" rule.
+        assert_eq!(
+            btm3_write_raw(0x3A3B4B, 0x2C, 2.0),
+            (0x1B_BA3B4B, vec![0x2C, 0x00, 0x00, 0x00, 0x00, 0x40]),
+        );
     }
 
     #[test]

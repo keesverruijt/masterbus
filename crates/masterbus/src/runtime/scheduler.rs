@@ -16,16 +16,22 @@ use super::state::State;
 use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
-use crate::model::{field_id, AccessLevel, DeviceId, FieldId};
+use crate::model::{field_id, AccessLevel, Channel, DeviceId, FieldId};
 use crate::protocol::{
-    decode_value, encode_commit, encode_login_read, encode_login_write, encode_logout,
-    encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw, monitoring_req_raw,
-    TAB_DEFAULT, VisualizationType,
+    btm3_write_raw, decode_value, encode_commit, encode_login_read, encode_login_write,
+    encode_logout, encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw,
+    monitoring_req_raw, TAB_DEFAULT, VisualizationType,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
 
-const VALUE_READ_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long to wait for an on-demand value response. Btm1 actively requests
+/// the value and gets a fast echo on the same class. Btm3 is passive — the
+/// next device-side push or write-ack delivers, and pushes are observed at
+/// ~2 s intervals on the reference bus, so a single read after discovery
+/// can wait that long.
+const VALUE_READ_TIMEOUT_BTM1: Duration = Duration::from_millis(500);
+const VALUE_READ_TIMEOUT_BTM3: Duration = Duration::from_millis(2500);
 
 struct SubState {
     spec: SubSpec,
@@ -220,8 +226,17 @@ impl Sched {
     fn poll_value(&mut self, addr: DeviceId, field: FieldId, viz: VisualizationType) -> Result<Value> {
         let key = value_key(addr, field);
         self.waiter.register(&key);
-        self.send(monitoring_req_raw(addr, field_id::wire_index(field), TAB_DEFAULT));
-        match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
+        // Btm1: actively request the value. Btm3: passive — the next push or
+        // write-ack on class `0x0B` delivers via the reader, no request to
+        // send (see PROTOCOL.md §6 / FINDINGS §3e).
+        let timeout = match field_id::channel(field) {
+            Channel::Btm1 => {
+                self.send(monitoring_req_raw(addr, field_id::wire_index(field), TAB_DEFAULT));
+                VALUE_READ_TIMEOUT_BTM1
+            }
+            Channel::Btm3 => VALUE_READ_TIMEOUT_BTM3,
+        };
+        match self.waiter.wait(&key, timeout) {
             Some(raw) => {
                 let opts = self
                     .state
@@ -255,7 +270,9 @@ impl Sched {
 
     fn await_access_level(&mut self, addr: DeviceId) -> Result<AccessLevel> {
         let key = format!("p:{:06X}:08:19", addr);
-        match self.waiter.wait(&key, VALUE_READ_TIMEOUT) {
+        // The login response shares timing with a Btm1 value-read echo —
+        // both arrive in the tens of ms.
+        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_BTM1) {
             Some(data) if data.len() >= 3 => {
                 AccessLevel::from_byte(data[2]).ok_or_else(|| {
                     Error::Protocol(format!("unknown access level byte 0x{:02X}", data[2]))
@@ -292,30 +309,50 @@ impl Sched {
 
     fn do_write(&mut self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
         let wire = field_id::wire_index(field);
-        let frame = match value {
-            WriteValue::Bool(b) => encode_set_boolean(addr, wire, b),
-            WriteValue::Float(f) => encode_set_float(addr, wire, f),
-            WriteValue::ListIndex(i) => encode_set_list(addr, wire, i),
-        };
-        self.send(frame);
-        // Relay-style boolean controls (e.g. the CombiMaster inverter/charger)
-        // only act when the value write is followed by a fixed "commit" token to
-        // the adjacent hidden command register at field+1. Only emit it when that
-        // register is hidden (not a real schema field), so we never clobber a
-        // neighbouring setting on devices that don't use this pattern.
-        if matches!(value, WriteValue::Bool(_)) {
-            let cmd = field + 1;
-            let cmd_hidden = self
-                .state
-                .schema(addr)
-                .map(|s| s.field(cmd).is_none())
-                .unwrap_or(true);
-            if cmd_hidden {
-                self.send(encode_commit(addr, field_id::wire_index(cmd)));
+        match field_id::channel(field) {
+            Channel::Btm1 => {
+                let frame = match value {
+                    WriteValue::Bool(b) => encode_set_boolean(addr, wire, b),
+                    WriteValue::Float(f) => encode_set_float(addr, wire, f),
+                    WriteValue::ListIndex(i) => encode_set_list(addr, wire, i),
+                };
+                self.send(frame);
+                // Relay-style boolean controls (e.g. the CombiMaster inverter
+                // / charger) only act when the value write is followed by a
+                // fixed "commit" token to the adjacent hidden command
+                // register at field+1. Only emit it when that register is
+                // hidden (not a real schema field), so we never clobber a
+                // neighbouring setting on devices that don't use this
+                // pattern.
+                if matches!(value, WriteValue::Bool(_)) {
+                    let cmd = field + 1;
+                    let cmd_hidden = self
+                        .state
+                        .schema(addr)
+                        .map(|s| s.field(cmd).is_none())
+                        .unwrap_or(true);
+                    if cmd_hidden {
+                        self.send(encode_commit(addr, field_id::wire_index(cmd)));
+                    }
+                }
+            }
+            Channel::Btm3 => {
+                // Every Btm3 write is a 4-byte f32, regardless of viz type:
+                // booleans go as 1.0 / 0.0, list picks go as the index as
+                // f32 (PROTOCOL.md §6, observed live in FINDINGS §3e).
+                let v = match value {
+                    WriteValue::Bool(true) => 1.0,
+                    WriteValue::Bool(false) => 0.0,
+                    WriteValue::Float(f) => f,
+                    WriteValue::ListIndex(i) => i as f32,
+                };
+                self.send(btm3_write_raw(addr, wire, v));
             }
         }
         self.state.mark_outdated(addr, field);
-        // Confirm by observing the resulting value.
+        // Confirm by observing the resulting value. On Btm1 the echo on class
+        // 0x08 lands within tens of ms; on Btm3 the ack on class 0x0B lands
+        // within ~10 ms.
         let viz = self.viz_of(addr, field)?;
         self.poll_value(addr, field, viz)
     }

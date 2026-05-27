@@ -14,7 +14,7 @@ use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
 use crate::model::{field_id, DeviceId, FieldId};
 use crate::protocol::{
-    decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage,
+    can_class, decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage,
     BTM1_META_ADDR_FLAG,
 };
 use crate::transport::TransportRx;
@@ -101,12 +101,31 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             }
         }
         _ => {
-            // Class `0x0B` on the Btm1 metadata address is a headerless
-            // **Btm3** live-value push (different field namespace than Btm1).
-            // Caching it under the Btm1 `field_index` produced incorrect
-            // values. The reader ignores it until Btm3 has its own
-            // channel-tagged field collection — see FINDINGS §3f.
-            let _ = (data,); // silence unused while the alt-channel handler is gone
+            // Btm3 live-value carrier: class `0x0B` on `addr | 0x800000`
+            // with a headerless 6-byte payload `[fid_lo, fid_hi, b0..b3]`.
+            // Same frame shape serves both unsolicited pushes *and*
+            // write-acks; both populate the value cache and wake any
+            // pending `poll_value` waiter via the channel-tagged value
+            // key. See PROTOCOL.md §6 / FINDINGS §3e+§3f.
+            if frame.can_class == can_class::SCHEMA_DATA_HISTORY
+                && frame.device_addr & BTM1_META_ADDR_FLAG != 0
+                && data.len() >= 6
+            {
+                let real = frame.device_addr & !BTM1_META_ADDR_FLAG;
+                // The Btm3 channel uses an 8-bit wire index in our
+                // `FieldId` encoding; the on-the-wire high byte has been
+                // 0 on every device seen so far.
+                let field = field_id::btm3(data[0]);
+                let raw_value = data[2..6].to_vec();
+                state.touch(real);
+                waiter.deliver(&value_key(real, field), raw_value.clone());
+                if let Some(schema) = state.schema(real)
+                    && let Some(f) = schema.field(field)
+                {
+                    let v = decode_value(&raw_value, f.viz_type).with_options(&f.options);
+                    state.put_value(real, field, v);
+                }
+            }
         }
     }
 }
