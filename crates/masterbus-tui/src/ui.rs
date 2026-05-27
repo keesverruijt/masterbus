@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use masterbus::{DeviceStatus, Value};
 
-use crate::app::{menu_label, App, EditKind, Focus, Row, TABS};
+use crate::app::{level_label, menu_label, App, EditKind, Focus, Row, LOGIN_LEVELS, TABS};
 
 /// Braille spinner frames.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -22,6 +22,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_devices(f, app, panes[0]);
     draw_fields(f, app, panes[1]);
     draw_footer(f, app, outer[1]);
+    if app.login.is_some() {
+        draw_login(f, app, f.area());
+    }
 }
 
 fn draw_devices(f: &mut Frame, app: &App, area: Rect) {
@@ -56,13 +59,20 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let block = bordered(format!("{}  [{:06X}]", app.device_label(id), id), app.focus == Focus::Fields);
+    let level_suffix = app
+        .cur_access_level
+        .map(|l| format!("  · {}", level_label(l)))
+        .unwrap_or_default();
+    let block = bordered(
+        format!("{}  [{:06X}]{}", app.device_label(id), id, level_suffix),
+        app.focus == Focus::Fields,
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Tab bar (Information + menus) + content below it.
+    // Tab bar (Summary + menus) + content below it.
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
-    let mut titles: Vec<Line> = vec![Line::raw("Information")];
+    let mut titles: Vec<Line> = vec![Line::raw("Summary")];
     titles.extend(TABS.iter().map(|&m| Line::raw(menu_label(m))));
     let sel = if app.on_info {
         0
@@ -164,10 +174,63 @@ fn draw_info(f: &mut Frame, app: &App, id: u32, area: Rect) {
             Span::styled(format!("  {:<11}", "Status"), Style::new().fg(Color::DarkGray)),
             Span::styled(format!("{sym} {status:?}"), Style::new().fg(color)),
         ]));
+        let access = app.cur_access_level.map(level_label).unwrap_or("—").to_string();
+        lines.push(row("Access", access));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "  press l to log in / out",
+            Style::new().fg(Color::DarkGray),
+        )));
     } else {
         lines.push(Line::raw("  (identity unavailable)"));
     }
     f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_login(f: &mut Frame, app: &App, area: Rect) {
+    let Some(prompt) = &app.login else { return };
+    // 50×11 centred overlay.
+    let w = 50u16.min(area.width.saturating_sub(2));
+    let h = 11u16.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title(format!(" Login → device 0x{:06X} ", prompt.device));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(8);
+    let current = prompt
+        .current
+        .map(|l| format!("currently: {}", level_label(l)))
+        .unwrap_or_else(|| "currently: (unknown)".into());
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {current}"),
+        Style::new().fg(Color::DarkGray),
+    )));
+    lines.push(Line::raw(""));
+    for (i, &level) in LOGIN_LEVELS.iter().enumerate() {
+        let marker = if i == prompt.sel { "› " } else { "  " };
+        let style = if i == prompt.sel {
+            Style::new().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{}", level_label(level)), style)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓ pick · Enter login · Esc cancel",
+        Style::new().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {

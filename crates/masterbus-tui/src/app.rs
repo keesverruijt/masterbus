@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use masterbus::{
-    DeviceIdentity, DeviceStatus, FieldInfo, GroupInfo, MasterBus, Menu, Subscription, Value,
-    VisualizationType,
+    AccessLevel, DeviceIdentity, DeviceStatus, FieldInfo, GroupInfo, MasterBus, Menu, Subscription,
+    Value, VisualizationType,
 };
 
 /// Live-poll rate for the selected device's monitoring fields.
@@ -46,6 +46,24 @@ pub enum EditKind {
     Choice { options: Vec<String>, sel: usize },
 }
 
+/// The fixed four access levels, in display order. Used by the login modal.
+pub const LOGIN_LEVELS: [AccessLevel; 4] = [
+    AccessLevel::EndUser,
+    AccessLevel::Installer,
+    AccessLevel::Distributor,
+    AccessLevel::MvService,
+];
+
+/// A modal that picks an access level for the currently-selected device.
+pub struct LoginPrompt {
+    /// Target device id.
+    pub device: u32,
+    /// Highlighted option in [`LOGIN_LEVELS`].
+    pub sel: usize,
+    /// Level the device reports when the prompt opened (for display).
+    pub current: Option<AccessLevel>,
+}
+
 /// A single-menu discovery running on a worker thread.
 pub struct Pending {
     pub id: u32,
@@ -64,8 +82,11 @@ pub struct App {
     pub cur_device: Option<u32>,
     /// Whether the Information tab (device identity) is showing instead of a menu.
     pub on_info: bool,
-    /// Cached identity for the Information tab.
+    /// Cached identity for the Summary tab.
     pub cur_info: Option<DeviceIdentity>,
+    /// Cached access level for the open device (shown in the title; refreshed
+    /// on device open, after login, and on Summary-tab visit).
+    pub cur_access_level: Option<AccessLevel>,
     /// The currently-displayed tab (menu).
     pub cur_menu: Menu,
     /// Menus already discovered for `cur_device`.
@@ -75,6 +96,7 @@ pub struct App {
     pub values: HashMap<i32, Value>,
     pub sub: Option<Subscription>,
     pub editor: Option<Editor>,
+    pub login: Option<LoginPrompt>,
     pub pending: Option<Pending>,
     pub tick: usize,
     pub status: String,
@@ -95,6 +117,7 @@ impl App {
             cur_device: None,
             on_info: false,
             cur_info: None,
+            cur_access_level: None,
             cur_menu: Menu::Monitoring,
             loaded_menus: HashSet::new(),
             rows: Vec::new(),
@@ -102,9 +125,10 @@ impl App {
             values: HashMap::new(),
             sub: None,
             editor: None,
+            login: None,
             pending: None,
             tick: 0,
-            status: "scanning bus… ↑/↓ select · Enter open · q quit".into(),
+            status: "scanning bus… ↑/↓ select · Enter open · l login · q quit".into(),
             should_quit: false,
         }
     }
@@ -142,8 +166,6 @@ impl App {
     pub fn open_device(&mut self) {
         let Some(&id) = self.device_ids.get(self.dev_sel) else { return };
         self.cur_device = Some(id);
-        self.on_info = false;
-        self.cur_info = None;
         self.cur_menu = Menu::Monitoring;
         self.loaded_menus.clear();
         self.sub = None;
@@ -151,7 +173,8 @@ impl App {
         self.values.clear();
         self.row_sel = 0;
         self.focus = Focus::Fields;
-        self.start_tab_discovery(id, Menu::Monitoring);
+        // Open on the Summary tab; user can Tab into Monitoring/Config/Service.
+        self.enter_info();
     }
 
     /// Cycle to the next / previous tab.
@@ -182,7 +205,7 @@ impl App {
         }
     }
 
-    /// Switch to the Information tab: device identity, no field list.
+    /// Switch to the Summary tab: device identity + access level, no field list.
     fn enter_info(&mut self) {
         let Some(id) = self.cur_device else { return };
         self.on_info = true;
@@ -190,7 +213,8 @@ impl App {
         self.rows.clear();
         self.row_sel = 0;
         self.cur_info = self.bus.device(id).identity().ok();
-        self.status = format!("{} / Information — Tab switch · Esc back", self.device_label(id));
+        self.cur_access_level = self.bus.device(id).access_level().ok();
+        self.status = format!("{} / Summary — Tab switch · Esc back", self.device_label(id));
     }
 
     fn switch_tab(&mut self, menu: Menu) {
@@ -296,6 +320,7 @@ impl App {
         self.loaded_menus.clear();
         self.on_info = false;
         self.cur_info = None;
+        self.cur_access_level = None;
         self.cur_device = None;
         self.status = "↑/↓ select · Enter open · q quit".into();
     }
@@ -466,6 +491,78 @@ impl App {
     pub fn editing(&self) -> bool {
         self.editor.is_some()
     }
+
+    // ---- login modal ------------------------------------------------------
+
+    /// True when the login picker is active and owns the keys.
+    pub fn login_modal(&self) -> bool {
+        self.login.is_some()
+    }
+
+    /// Open the login modal for the currently-targeted device. When focused on
+    /// the device list this targets the highlighted device; when inside a
+    /// device's tabs it targets that device.
+    pub fn open_login(&mut self) {
+        let Some(device) = self
+            .cur_device
+            .or_else(|| self.device_ids.get(self.dev_sel).copied())
+        else {
+            return;
+        };
+        let current = self.bus.device(device).access_level().ok();
+        let sel = current
+            .and_then(|l| LOGIN_LEVELS.iter().position(|&x| x == l))
+            .unwrap_or(0);
+        self.login = Some(LoginPrompt { device, sel, current });
+        self.status = "select access level — ↑/↓ pick · Enter login · Esc cancel".into();
+    }
+
+    pub fn login_move(&mut self, delta: i32) {
+        if let Some(p) = &mut self.login {
+            let n = LOGIN_LEVELS.len() as i32;
+            p.sel = (((p.sel as i32 + delta) % n + n) % n) as usize;
+        }
+    }
+
+    pub fn cancel_login(&mut self) {
+        self.login = None;
+        self.status = "login cancelled".into();
+    }
+
+    /// Apply the highlighted access level on the modal's target device.
+    /// On success the engine drops its cached schema (writability re-queries),
+    /// and we re-discover the currently-shown tab so the field list refreshes.
+    pub fn commit_login(&mut self) {
+        let Some(p) = self.login.take() else { return };
+        let level = LOGIN_LEVELS[p.sel];
+        let label = level_label(level);
+        match self.bus.device(p.device).login(level) {
+            Ok(reported) => {
+                self.status =
+                    format!("device 0x{:06X} → {} (reported: {})", p.device, label, level_label(reported));
+                // If we're currently inside this device, reload everything the
+                // UI was showing (schema attributes, identity, title).
+                if self.cur_device == Some(p.device) {
+                    self.cur_access_level = Some(reported);
+                    self.loaded_menus.clear();
+                    self.values.clear();
+                    self.sub = None;
+                    if self.on_info {
+                        // Refresh the identity card; nothing to discover here.
+                        self.cur_info = self.bus.device(p.device).identity().ok();
+                    } else {
+                        let menu = self.cur_menu;
+                        self.rows.clear();
+                        self.row_sel = 0;
+                        self.start_tab_discovery(p.device, menu);
+                    }
+                }
+            }
+            Err(e) => {
+                self.status = format!("login({label}) on 0x{:06X} failed: {e}", p.device);
+            }
+        }
+    }
 }
 
 pub fn menu_label(menu: Menu) -> String {
@@ -474,5 +571,15 @@ pub fn menu_label(menu: Menu) -> String {
         Menu::Configuration => "Config".into(),
         Menu::Service => "Service".into(),
         Menu::Other(s) => format!("Menu {s:#04x}"),
+    }
+}
+
+/// User-facing label for an access level (matches MasterAdjust's terminology).
+pub fn level_label(level: AccessLevel) -> &'static str {
+    match level {
+        AccessLevel::EndUser => "End User",
+        AccessLevel::Installer => "Installer",
+        AccessLevel::Distributor => "Distributor",
+        AccessLevel::MvService => "MV Service",
     }
 }

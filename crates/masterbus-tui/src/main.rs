@@ -151,6 +151,18 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Login picker owns the keys when open.
+    if app.login_modal() {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => app.login_move(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.login_move(1),
+            KeyCode::Enter => app.commit_login(),
+            KeyCode::Esc => app.cancel_login(),
+            _ => {}
+        }
+        return;
+    }
+
     // While a device is being enumerated, only quit or cancel are allowed.
     if app.discovering() {
         match key.code {
@@ -163,11 +175,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     match key.code {
         KeyCode::Char('q') => app.quit(),
+        KeyCode::Char('l') | KeyCode::Char('L') => app.open_login(),
         _ => match app.focus {
             Focus::Devices => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => app.move_device(-1),
                 KeyCode::Down | KeyCode::Char('j') => app.move_device(1),
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.open_device(),
+                KeyCode::Enter | KeyCode::Right => app.open_device(),
                 _ => {}
             },
             Focus::Fields => match key.code {
