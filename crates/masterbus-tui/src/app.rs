@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use masterbus::{
-    AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus, Menu,
-    Subscription, Value, VisualizationType,
+    field_id, AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus,
+    Menu, Subscription, Value, VisualizationType,
 };
 
 /// Live-poll rate for the selected device's monitoring fields.
@@ -15,26 +15,41 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// The tabs the UI exposes inside a device, in display order. Position 0 is
 /// always the Summary tab (device identity); the rest are the data tabs.
+///
+/// **Btm1 channel** (legacy MasterBus) exposes its groups via
+/// Monitoring / Configuration / Service; some devices (e.g. the Magic-class
+/// Nav Chg) report empty group lists on Btm1, so those tabs may be sparse
+/// or empty depending on the device.
+///
+/// **Btm3 channel** (newer MasterBus revision) has no Btm1-style group
+/// structure on the wire — it lives in a flat per-channel field-index
+/// space, surfaced as the **Settings** tab.
+///
+/// Alarms / History tabs are intentionally absent here; the Menu variants
+/// in core still exist so they can be restored once the Btm3 sub-channel
+/// structure (class `0x1A` / `0x1B` on real address) is properly understood.
 pub const TABS: [TabKind; 5] = [
     TabKind::Summary,
     TabKind::Menu(Menu::Monitoring),
-    TabKind::Menu(Menu::Alarm),
-    TabKind::Menu(Menu::History),
-    TabKind::AllFields,
+    TabKind::Menu(Menu::Configuration),
+    TabKind::Menu(Menu::Service),
+    TabKind::Settings,
 ];
 
-/// Which inside-a-device tab is showing.
+/// Which inside-a-device tab is showing. [`TabKind::Summary`] is used only
+/// as the right-pane preview / first-landing tab; [`TabKind::Settings`] is
+/// the Btm3-flat tab built from `Device::all_fields()` filtered to fields
+/// with the Btm3 channel bit set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabKind {
     /// Device identity + access level.
     Summary,
-    /// One of the wire menus (Monitoring is the only one with reliable group
-    /// structure; Configuration / Service are flat-enumerated instead — see
-    /// the AllFields tab and PROTOCOL.md §4.3).
+    /// One of the Btm1 wire menus. Btm1 groups are enumerated via
+    /// `Device::tab(menu)`.
     Menu(Menu),
-    /// Flat field-index probe of the entire device (covers Configuration /
-    /// Service for devices whose per-menu group counts lie).
-    AllFields,
+    /// Flat list of every Btm3 field on the device. Built from
+    /// `Device::all_fields()` filtered by `field_id::channel == Btm3`.
+    Settings,
 }
 
 /// Device id → name, shared with the background name-backfill thread.
@@ -113,7 +128,7 @@ pub struct App {
     /// Menus already discovered for `cur_device`.
     pub loaded_menus: HashSet<Menu>,
     /// Whether the flat field probe (`all_fields`) is loaded for `cur_device`.
-    pub all_fields_loaded: bool,
+    pub settings_loaded: bool,
     pub rows: Vec<Row>,
     pub row_sel: usize,
     pub values: HashMap<FieldId, Value>,
@@ -142,7 +157,7 @@ impl App {
             cur_access_level: None,
             cur_tab: TabKind::Summary,
             loaded_menus: HashSet::new(),
-            all_fields_loaded: false,
+            settings_loaded: false,
             rows: Vec::new(),
             row_sel: 0,
             values: HashMap::new(),
@@ -190,7 +205,7 @@ impl App {
         let Some(&id) = self.device_ids.get(self.dev_sel) else { return };
         self.cur_device = Some(id);
         self.loaded_menus.clear();
-        self.all_fields_loaded = false;
+        self.settings_loaded = false;
         self.sub = None;
         self.rows.clear();
         self.values.clear();
@@ -245,14 +260,14 @@ impl App {
                     self.start_menu_discovery(id, menu);
                 }
             }
-            TabKind::AllFields => {
-                if self.all_fields_loaded {
+            TabKind::Settings => {
+                if self.settings_loaded {
                     let fields = self.bus.device(id).all_fields().unwrap_or_default();
-                    self.show_all_fields(id, fields);
+                    self.show_settings(id, fields);
                 } else {
                     self.rows.clear();
                     self.row_sel = 0;
-                    self.start_all_fields_discovery(id);
+                    self.start_settings_discovery(id);
                 }
             }
         }
@@ -272,16 +287,25 @@ impl App {
         self.pending = Some(Pending { id, tab: TabKind::Menu(menu), name, started: Instant::now(), rx });
     }
 
-    /// Spawn a worker to do the flat field-index probe (selector `0x01`).
-    fn start_all_fields_discovery(&mut self, id: u32) {
+    /// Spawn a worker to probe the device's full field-index space and
+    /// keep only the Btm3 fields for the Settings tab.
+    fn start_settings_discovery(&mut self, id: u32) {
         let name = self.device_label(id);
-        self.status = format!("probing all fields of {}…", name);
+        self.status = format!("probing Btm3 fields of {}…", name);
         let (tx, rx) = bounded(1);
         let bus = self.bus.clone();
         std::thread::spawn(move || {
-            if let Ok(fields) = bus.device(id).all_fields() {
-                // Reuse the GroupInfo carrier with a single synthetic group so the
-                // existing `poll_pending` / `show_tab` plumbing stays uniform.
+            if let Ok(all) = bus.device(id).all_fields() {
+                // Filter to Btm3 only; Btm1 fields show up under the
+                // Monitoring / Configuration / Service tabs (with their
+                // proper Btm1 group structure where available).
+                let fields: Vec<FieldInfo> = all
+                    .into_iter()
+                    .filter(|f| field_id::channel(f.index) == masterbus::Channel::Btm3)
+                    .collect();
+                // Reuse the GroupInfo carrier with a single synthetic group so
+                // the existing `poll_pending` / `show_*` plumbing stays
+                // uniform.
                 let one = GroupInfo {
                     id: -1,
                     name: String::new(),
@@ -291,7 +315,7 @@ impl App {
                 let _ = tx.send(vec![one]);
             }
         });
-        self.pending = Some(Pending { id, tab: TabKind::AllFields, name, started: Instant::now(), rx });
+        self.pending = Some(Pending { id, tab: TabKind::Settings, name, started: Instant::now(), rx });
     }
 
     /// Whether a tab discovery is in flight.
@@ -319,12 +343,12 @@ impl App {
                         self.loaded_menus.insert(menu);
                         self.show_groups(id, menu, groups);
                     }
-                    TabKind::AllFields => {
-                        self.all_fields_loaded = true;
+                    TabKind::Settings => {
+                        self.settings_loaded = true;
                         // The worker packs the flat result into a single
                         // synthetic group; pull the fields back out.
                         let fields = groups.into_iter().next().map(|g| g.fields).unwrap_or_default();
-                        self.show_all_fields(id, fields);
+                        self.show_settings(id, fields);
                     }
                     TabKind::Summary => {} // never spawned
                 }
@@ -363,17 +387,25 @@ impl App {
             format!("{} / {} — Tab switch · Enter edit · Esc back", self.device_label(id), menu_label(menu));
     }
 
-    fn show_all_fields(&mut self, id: u32, fields: Vec<FieldInfo>) {
+    fn show_settings(&mut self, id: u32, fields: Vec<FieldInfo>) {
         self.rows.clear();
         for f in &fields {
             self.rows.push(Row::Field(f.clone()));
         }
         self.values.clear();
-        self.sub = None; // no live subscription for the flat probe
+        // Subscribe to every Btm3 field so values stream in (mostly via
+        // passive `0x0B` pushes on the wire). Use the standard live-poll
+        // interval; the engine will rate-limit redundant work.
+        let ids: Vec<FieldId> = fields.iter().map(|f| f.index).collect();
+        self.sub = if ids.is_empty() {
+            None
+        } else {
+            Some(self.bus.subscribe(id, ids, POLL_INTERVAL, false))
+        };
         self.row_sel = 0;
         self.select_first_field();
         self.status = format!(
-            "{} / All Fields ({} found) — Tab switch · Enter edit · Esc back",
+            "{} / Settings ({} Btm3 fields) — Tab switch · Enter edit · Esc back",
             self.device_label(id),
             fields.len()
         );
@@ -395,7 +427,7 @@ impl App {
         self.pending = None;
         self.rows.clear();
         self.loaded_menus.clear();
-        self.all_fields_loaded = false;
+        self.settings_loaded = false;
         self.cur_tab = TabKind::Summary;
         self.cur_info = None;
         self.cur_access_level = None;
@@ -623,7 +655,7 @@ impl App {
                 if self.cur_device == Some(p.device) {
                     self.cur_access_level = Some(reported);
                     self.loaded_menus.clear();
-                    self.all_fields_loaded = false;
+                    self.settings_loaded = false;
                     self.values.clear();
                     self.sub = None;
                     match self.cur_tab {
@@ -661,7 +693,7 @@ pub fn tab_label(tab: TabKind) -> String {
     match tab {
         TabKind::Summary => "Summary".into(),
         TabKind::Menu(m) => menu_label(m),
-        TabKind::AllFields => "All Fields".into(),
+        TabKind::Settings => "Settings".into(),
     }
 }
 
