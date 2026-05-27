@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
-use super::discovery::{discover_menu, fetch_identity, Disc, MENUS};
+use super::discovery::{discover_menu, enumerate_all_fields, fetch_identity, Disc, MENUS};
 use crate::model::{DeviceIdentity, Menu};
 use super::reader::value_key;
 use super::state::State;
@@ -78,6 +78,10 @@ impl Sched {
                 }
                 Ok(Command::Discover { addr, reply }) => {
                     self.do_discover_all(addr);
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(Command::DiscoverAllFields { addr, reply }) => {
+                    self.do_discover_all_fields(addr);
                     let _ = reply.send(Ok(()));
                 }
                 Ok(Command::Read { addr, field, max_age, reply }) => {
@@ -180,6 +184,17 @@ impl Sched {
         for menu in MENUS {
             self.do_discover_menu(addr, menu);
         }
+    }
+
+    /// Discover every field via the flat index-space probe (selector `0x01`).
+    fn do_discover_all_fields(&mut self, addr: u32) {
+        if self.state.has_all_fields(addr) {
+            return;
+        }
+        let _ = self.ensure_identity(addr);
+        let fields = self.with_disc(|disc| enumerate_all_fields(disc, addr));
+        self.last_send = Instant::now();
+        self.state.put_all_fields(addr, fields);
     }
 
     /// Run a closure with a `Disc` bound to this scheduler's transport.

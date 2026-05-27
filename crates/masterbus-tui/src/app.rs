@@ -13,8 +13,29 @@ use masterbus::{
 /// Live-poll rate for the selected device's monitoring fields.
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
-/// The tabs (menus) the UI exposes, in display order.
-pub const TABS: [Menu; 3] = [Menu::Monitoring, Menu::Configuration, Menu::Service];
+/// The tabs the UI exposes inside a device, in display order. Position 0 is
+/// always the Summary tab (device identity); the rest are the data tabs.
+pub const TABS: [TabKind; 5] = [
+    TabKind::Summary,
+    TabKind::Menu(Menu::Monitoring),
+    TabKind::Menu(Menu::Alarm),
+    TabKind::Menu(Menu::History),
+    TabKind::AllFields,
+];
+
+/// Which inside-a-device tab is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind {
+    /// Device identity + access level.
+    Summary,
+    /// One of the wire menus (Monitoring is the only one with reliable group
+    /// structure; Configuration / Service are flat-enumerated instead — see
+    /// the AllFields tab and PROTOCOL.md §4.3).
+    Menu(Menu),
+    /// Flat field-index probe of the entire device (covers Configuration /
+    /// Service for devices whose per-menu group counts lie).
+    AllFields,
+}
 
 /// Device id → name, shared with the background name-backfill thread.
 pub type Names = Arc<Mutex<HashMap<u32, String>>>;
@@ -64,10 +85,12 @@ pub struct LoginPrompt {
     pub current: Option<AccessLevel>,
 }
 
-/// A single-menu discovery running on a worker thread.
+/// A single-tab discovery running on a worker thread. Either a menu (groups)
+/// or the flat field probe; the rendered result in both cases is a list of
+/// rows, but the worker fetches them via different code paths.
 pub struct Pending {
     pub id: u32,
-    pub menu: Menu,
+    pub tab: TabKind,
     pub name: String,
     pub started: Instant,
     rx: Receiver<Vec<GroupInfo>>,
@@ -80,17 +103,17 @@ pub struct App {
     pub dev_sel: usize,
     pub focus: Focus,
     pub cur_device: Option<u32>,
-    /// Whether the Information tab (device identity) is showing instead of a menu.
-    pub on_info: bool,
     /// Cached identity for the Summary tab.
     pub cur_info: Option<DeviceIdentity>,
     /// Cached access level for the open device (shown in the title; refreshed
     /// on device open, after login, and on Summary-tab visit).
     pub cur_access_level: Option<AccessLevel>,
-    /// The currently-displayed tab (menu).
-    pub cur_menu: Menu,
+    /// The currently-displayed tab.
+    pub cur_tab: TabKind,
     /// Menus already discovered for `cur_device`.
     pub loaded_menus: HashSet<Menu>,
+    /// Whether the flat field probe (`all_fields`) is loaded for `cur_device`.
+    pub all_fields_loaded: bool,
     pub rows: Vec<Row>,
     pub row_sel: usize,
     pub values: HashMap<i32, Value>,
@@ -115,11 +138,11 @@ impl App {
             dev_sel: 0,
             focus: Focus::Devices,
             cur_device: None,
-            on_info: false,
             cur_info: None,
             cur_access_level: None,
-            cur_menu: Menu::Monitoring,
+            cur_tab: TabKind::Summary,
             loaded_menus: HashSet::new(),
+            all_fields_loaded: false,
             rows: Vec::new(),
             row_sel: 0,
             values: HashMap::new(),
@@ -161,20 +184,20 @@ impl App {
         self.dev_sel = (self.dev_sel as i32 + delta).clamp(0, n - 1) as usize;
     }
 
-    /// Drill into the selected device, showing the Monitoring tab first. Other
-    /// tabs are discovered lazily when selected.
+    /// Drill into the selected device, landing on the Summary tab. The user
+    /// can Tab into Monitoring / All Fields.
     pub fn open_device(&mut self) {
         let Some(&id) = self.device_ids.get(self.dev_sel) else { return };
         self.cur_device = Some(id);
-        self.cur_menu = Menu::Monitoring;
         self.loaded_menus.clear();
+        self.all_fields_loaded = false;
         self.sub = None;
         self.rows.clear();
         self.values.clear();
         self.row_sel = 0;
         self.focus = Focus::Fields;
-        // Open on the Summary tab; user can Tab into Monitoring/Config/Service.
-        self.enter_info();
+        self.cur_tab = TabKind::Summary;
+        self.enter_summary();
     }
 
     /// Cycle to the next / previous tab.
@@ -189,26 +212,16 @@ impl App {
         if self.cur_device.is_none() || self.pending.is_some() {
             return;
         }
-        // Tab 0 is Information; tabs 1.. are the menus in `TABS` order.
-        let n = TABS.len() as i32 + 1;
-        let cur = if self.on_info {
-            0
-        } else {
-            1 + TABS.iter().position(|&m| m == self.cur_menu).unwrap_or(0) as i32
-        };
+        let n = TABS.len() as i32;
+        let cur = TABS.iter().position(|&t| t == self.cur_tab).unwrap_or(0) as i32;
         let next = ((cur + delta) % n + n) % n;
-        if next == 0 {
-            self.enter_info();
-        } else {
-            self.on_info = false;
-            self.switch_tab(TABS[(next - 1) as usize]);
-        }
+        self.switch_tab(TABS[next as usize]);
     }
 
     /// Switch to the Summary tab: device identity + access level, no field list.
-    fn enter_info(&mut self) {
+    fn enter_summary(&mut self) {
         let Some(id) = self.cur_device else { return };
-        self.on_info = true;
+        self.cur_tab = TabKind::Summary;
         self.sub = None;
         self.rows.clear();
         self.row_sel = 0;
@@ -217,22 +230,36 @@ impl App {
         self.status = format!("{} / Summary — Tab switch · Esc back", self.device_label(id));
     }
 
-    fn switch_tab(&mut self, menu: Menu) {
+    fn switch_tab(&mut self, tab: TabKind) {
         let Some(id) = self.cur_device else { return };
-        self.cur_menu = menu;
-        if self.loaded_menus.contains(&menu) {
-            // Already discovered — rebuild instantly from the cached schema.
-            let groups = self.bus.device(id).tab_info(menu).unwrap_or_default();
-            self.show_tab(id, menu, groups);
-        } else {
-            self.rows.clear();
-            self.row_sel = 0;
-            self.start_tab_discovery(id, menu);
+        self.cur_tab = tab;
+        match tab {
+            TabKind::Summary => self.enter_summary(),
+            TabKind::Menu(menu) => {
+                if self.loaded_menus.contains(&menu) {
+                    let groups = self.bus.device(id).tab_info(menu).unwrap_or_default();
+                    self.show_groups(id, menu, groups);
+                } else {
+                    self.rows.clear();
+                    self.row_sel = 0;
+                    self.start_menu_discovery(id, menu);
+                }
+            }
+            TabKind::AllFields => {
+                if self.all_fields_loaded {
+                    let fields = self.bus.device(id).all_fields().unwrap_or_default();
+                    self.show_all_fields(id, fields);
+                } else {
+                    self.rows.clear();
+                    self.row_sel = 0;
+                    self.start_all_fields_discovery(id);
+                }
+            }
         }
     }
 
     /// Spawn a worker to discover one menu's groups (UI shows a spinner).
-    fn start_tab_discovery(&mut self, id: u32, menu: Menu) {
+    fn start_menu_discovery(&mut self, id: u32, menu: Menu) {
         let name = self.device_label(id);
         self.status = format!("discovering {} / {}…", name, menu_label(menu));
         let (tx, rx) = bounded(1);
@@ -242,7 +269,29 @@ impl App {
                 let _ = tx.send(groups);
             }
         });
-        self.pending = Some(Pending { id, menu, name, started: Instant::now(), rx });
+        self.pending = Some(Pending { id, tab: TabKind::Menu(menu), name, started: Instant::now(), rx });
+    }
+
+    /// Spawn a worker to do the flat field-index probe (selector `0x01`).
+    fn start_all_fields_discovery(&mut self, id: u32) {
+        let name = self.device_label(id);
+        self.status = format!("probing all fields of {}…", name);
+        let (tx, rx) = bounded(1);
+        let bus = self.bus.clone();
+        std::thread::spawn(move || {
+            if let Ok(fields) = bus.device(id).all_fields() {
+                // Reuse the GroupInfo carrier with a single synthetic group so the
+                // existing `poll_pending` / `show_tab` plumbing stays uniform.
+                let one = GroupInfo {
+                    id: -1,
+                    name: String::new(),
+                    menu: Menu::Other(0x01),
+                    fields,
+                };
+                let _ = tx.send(vec![one]);
+            }
+        });
+        self.pending = Some(Pending { id, tab: TabKind::AllFields, name, started: Instant::now(), rx });
     }
 
     /// Whether a tab discovery is in flight.
@@ -250,23 +299,35 @@ impl App {
         self.pending.is_some()
     }
 
-    /// (name, menu, elapsed seconds) of the in-flight discovery, if any.
-    pub fn pending_info(&self) -> Option<(&str, Menu, u64)> {
-        self.pending.as_ref().map(|p| (p.name.as_str(), p.menu, p.started.elapsed().as_secs()))
+    /// (name, tab, elapsed seconds) of the in-flight discovery, if any.
+    pub fn pending_info(&self) -> Option<(&str, TabKind, u64)> {
+        self.pending.as_ref().map(|p| (p.name.as_str(), p.tab, p.started.elapsed().as_secs()))
     }
 
-    /// Check the discovery worker; when the menu's groups arrive, show them.
+    /// Check the discovery worker; when the result arrives, show it.
     pub fn poll_pending(&mut self) {
         let Some(p) = &self.pending else { return };
         match p.rx.try_recv() {
             Ok(groups) => {
-                let (id, menu) = (p.id, p.menu);
+                let (id, tab) = (p.id, p.tab);
                 self.pending = None;
-                self.loaded_menus.insert(menu);
                 if let Ok(n) = self.bus.device(id).name() {
                     self.names.lock().unwrap().insert(id, n);
                 }
-                self.show_tab(id, menu, groups);
+                match tab {
+                    TabKind::Menu(menu) => {
+                        self.loaded_menus.insert(menu);
+                        self.show_groups(id, menu, groups);
+                    }
+                    TabKind::AllFields => {
+                        self.all_fields_loaded = true;
+                        // The worker packs the flat result into a single
+                        // synthetic group; pull the fields back out.
+                        let fields = groups.into_iter().next().map(|g| g.fields).unwrap_or_default();
+                        self.show_all_fields(id, fields);
+                    }
+                    TabKind::Summary => {} // never spawned
+                }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
@@ -285,7 +346,7 @@ impl App {
         self.status = "discovery cancelled".into();
     }
 
-    fn show_tab(&mut self, id: u32, menu: Menu, groups: Vec<GroupInfo>) {
+    fn show_groups(&mut self, id: u32, menu: Menu, groups: Vec<GroupInfo>) {
         self.build_rows(&groups);
         self.values.clear();
         // Monitoring fields get live updates; other tabs are read lazily on
@@ -300,6 +361,22 @@ impl App {
         self.select_first_field();
         self.status =
             format!("{} / {} — Tab switch · Enter edit · Esc back", self.device_label(id), menu_label(menu));
+    }
+
+    fn show_all_fields(&mut self, id: u32, fields: Vec<FieldInfo>) {
+        self.rows.clear();
+        for f in &fields {
+            self.rows.push(Row::Field(f.clone()));
+        }
+        self.values.clear();
+        self.sub = None; // no live subscription for the flat probe
+        self.row_sel = 0;
+        self.select_first_field();
+        self.status = format!(
+            "{} / All Fields ({} found) — Tab switch · Enter edit · Esc back",
+            self.device_label(id),
+            fields.len()
+        );
     }
 
     fn build_rows(&mut self, groups: &[GroupInfo]) {
@@ -318,7 +395,8 @@ impl App {
         self.pending = None;
         self.rows.clear();
         self.loaded_menus.clear();
-        self.on_info = false;
+        self.all_fields_loaded = false;
+        self.cur_tab = TabKind::Summary;
         self.cur_info = None;
         self.cur_access_level = None;
         self.cur_device = None;
@@ -545,16 +623,18 @@ impl App {
                 if self.cur_device == Some(p.device) {
                     self.cur_access_level = Some(reported);
                     self.loaded_menus.clear();
+                    self.all_fields_loaded = false;
                     self.values.clear();
                     self.sub = None;
-                    if self.on_info {
-                        // Refresh the identity card; nothing to discover here.
-                        self.cur_info = self.bus.device(p.device).identity().ok();
-                    } else {
-                        let menu = self.cur_menu;
-                        self.rows.clear();
-                        self.row_sel = 0;
-                        self.start_tab_discovery(p.device, menu);
+                    match self.cur_tab {
+                        TabKind::Summary => {
+                            self.cur_info = self.bus.device(p.device).identity().ok();
+                        }
+                        tab => {
+                            self.rows.clear();
+                            self.row_sel = 0;
+                            self.switch_tab(tab);
+                        }
                     }
                 }
             }
@@ -568,9 +648,20 @@ impl App {
 pub fn menu_label(menu: Menu) -> String {
     match menu {
         Menu::Monitoring => "Monitoring".into(),
-        Menu::Configuration => "Config".into(),
+        Menu::Configuration => "Configuration".into(),
         Menu::Service => "Service".into(),
+        Menu::Alarm => "Alarms".into(),
+        Menu::History => "History".into(),
         Menu::Other(s) => format!("Menu {s:#04x}"),
+    }
+}
+
+/// User-facing label for a [`TabKind`] (shown in the tab bar and status line).
+pub fn tab_label(tab: TabKind) -> String {
+    match tab {
+        TabKind::Summary => "Summary".into(),
+        TabKind::Menu(m) => menu_label(m),
+        TabKind::AllFields => "All Fields".into(),
     }
 }
 

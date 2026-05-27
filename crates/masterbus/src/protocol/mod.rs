@@ -10,9 +10,11 @@ pub use decode::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame
 pub use encode::{
     encode_commit, encode_login_read, encode_login_write, encode_logout, encode_set_boolean,
     encode_set_float, encode_set_list, fw_req_raw, group_count_req_raw, heartbeat_raw,
-    monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_raw,
-    schema_field_id_req_raw, schema_group_name_req_raw, shadow_meta_req_raw,
-    shadow_option_req_raw, string_chunk_req_raw, LOGIN_OPCODE,
+    monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_class_raw,
+    schema_field_count_req_raw, schema_field_id_req_class_raw, schema_field_id_req_raw,
+    schema_group_name_req_class_raw, schema_group_name_req_raw, shadow_meta_req_magic_raw,
+    shadow_meta_req_raw, shadow_option_req_magic_raw, shadow_option_req_raw,
+    string_chunk_req_raw, LOGIN_OPCODE,
 };
 
 /// CAN class bytes (bits 28:24 of the 29-bit id).
@@ -27,14 +29,39 @@ pub mod can_class {
     pub const PROPERTY_REQ: u8 = 0x07;
     /// Monitoring/shadow data pushed from a device.
     pub const MONITORING_DATA: u8 = 0x08;
-    /// Schema response from a device.
+    /// Schema response (Monitoring channel) from a device.
     pub const SCHEMA_DATA: u8 = 0x09;
+    /// Schema response — Alarms tab schema channel (paired with [`SCHEMA_REQ_ALARM`]).
+    pub const SCHEMA_DATA_ALARM: u8 = 0x0A;
+    /// Dual-purpose class:
+    /// - On the **real** address: schema response for the History/Service-events
+    ///   tab (paired with [`SCHEMA_REQ_HISTORY`]).
+    /// - On the **shadow** address (`addr | 0x800000`): a headerless live-value
+    ///   push `[fid_lo, fid_hi, b0..b3]` used by Magic-class devices to
+    ///   broadcast field values without a `class 0x18` request.
+    pub const SCHEMA_DATA_HISTORY: u8 = 0x0B;
+    /// Magic-class shadow metadata response on the **real** address
+    /// (paired with [`SHADOW_REQ_MAGIC`]). Same payload layout as a standard
+    /// shadow response on the shadow address.
+    pub const SHADOW_DATA_MAGIC: u8 = 0x0C;
     /// Write/no-value acknowledgement from a device (`[field, tab]`).
     pub const WRITE_ACK: u8 = 0x10;
+    /// Compact / "not available" schema response (4-byte). Sent when a
+    /// schema query targets a tab+gid that exists only via a sibling channel
+    /// (e.g. Config gids 7-9 on a CombiMaster respond with this on class 0x19).
+    pub const SCHEMA_DATA_NA: u8 = 0x11;
     /// Monitoring/shadow request to a device (also a device push when 6 bytes).
     pub const MONITORING_REQ: u8 = 0x18;
-    /// Schema request to a device.
+    /// Schema request — Monitoring tab.
     pub const SCHEMA_REQ: u8 = 0x19;
+    /// Schema request — Alarms tab.
+    pub const SCHEMA_REQ_ALARM: u8 = 0x1A;
+    /// Schema request — History / Service-events tab.
+    pub const SCHEMA_REQ_HISTORY: u8 = 0x1B;
+    /// Shadow metadata request — Magic-class channel (real address). Same
+    /// opcode set as the standard `0x18` shadow request, but sent to the
+    /// device's real address; the device replies on [`SHADOW_DATA_MAGIC`].
+    pub const SHADOW_REQ_MAGIC: u8 = 0x1C;
 }
 
 /// Tab byte used in monitoring requests. The field index is global; the tab byte

@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use masterbus::{DeviceStatus, Value};
 
-use crate::app::{level_label, menu_label, App, EditKind, Focus, Row, LOGIN_LEVELS, TABS};
+use crate::app::{level_label, tab_label, App, EditKind, Focus, Row, TabKind, LOGIN_LEVELS, TABS};
 
 /// Braille spinner frames.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -70,15 +70,10 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Tab bar (Summary + menus) + content below it.
+    // Tab bar + content below it.
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
-    let mut titles: Vec<Line> = vec![Line::raw("Summary")];
-    titles.extend(TABS.iter().map(|&m| Line::raw(menu_label(m))));
-    let sel = if app.on_info {
-        0
-    } else {
-        1 + TABS.iter().position(|&m| m == app.cur_menu).unwrap_or(0)
-    };
+    let titles: Vec<Line> = TABS.iter().map(|&t| Line::raw(tab_label(t))).collect();
+    let sel = TABS.iter().position(|&t| t == app.cur_tab).unwrap_or(0);
     f.render_widget(
         Tabs::new(titles)
             .select(sel)
@@ -87,19 +82,19 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
     );
     let content = parts[1];
 
-    // Information tab: device identity, not a field list.
-    if app.on_info {
+    // Summary tab: device identity, not a field list.
+    if app.cur_tab == TabKind::Summary {
         draw_info(f, app, id, content);
         return;
     }
 
     // While a tab is being discovered, show an animated progress panel.
-    if let Some((name, menu, secs)) = app.pending_info() {
+    if let Some((name, tab, secs)) = app.pending_info() {
         let spin = SPINNER[app.tick % SPINNER.len()];
         let lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
-                format!("{spin}  Discovering {name} / {}…  ({secs}s)", menu_label(menu)),
+                format!("{spin}  Discovering {name} / {}…  ({secs}s)", tab_label(tab)),
                 Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )),
             Line::raw(""),

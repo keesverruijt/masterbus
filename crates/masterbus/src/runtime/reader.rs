@@ -12,7 +12,10 @@ use crossbeam_channel::Sender;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
-use crate::protocol::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage, SHADOW_BIT};
+use crate::protocol::{
+    can_class, decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage,
+    SHADOW_BIT,
+};
 use crate::transport::TransportRx;
 
 /// Build the value-waiter key for an on-demand read/poll response.
@@ -93,6 +96,27 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
                 state.put_value(device_addr, field_index as i32, v);
             }
         }
-        _ => {}
+        _ => {
+            // Magic-class headerless live-value push on the shadow address:
+            // class `0x0B` payload is `[fid_lo, fid_hi, b0, b1, b2, b3]` —
+            // u16 field id (no opcode/tab prefix) + 4-byte value, broadcast
+            // ~every 2 s with no request. See PROTOCOL.md §7 + FINDINGS.
+            if frame.can_class == can_class::SCHEMA_DATA_HISTORY
+                && frame.device_addr & SHADOW_BIT != 0
+                && data.len() >= 6
+            {
+                let real = frame.device_addr & !SHADOW_BIT;
+                let field = u16::from_le_bytes([data[0], data[1]]) as i32;
+                let raw_value = data[2..6].to_vec();
+                state.touch(real);
+                waiter.deliver(&value_key(real, field), raw_value.clone());
+                if let Some(schema) = state.schema(real)
+                    && let Some(f) = schema.field(field)
+                {
+                    let v = decode_value(&raw_value, f.viz_type).with_options(&f.options);
+                    state.put_value(real, field, v);
+                }
+            }
+        }
     }
 }

@@ -70,32 +70,64 @@ impl AccessLevel {
     }
 }
 
-/// A menu / access level (the `[0x08, selector]` partition of the global group
-/// list — e.g. monitoring, configuration/installer, service).
+/// A menu / tab on the device. The first three live in the global gid space
+/// addressed via class `0x19` schema requests and `[0x08, selector]` counts.
+/// `Alarm` and `History` use parallel schema channels (`0x1A` / `0x1B`) with
+/// their own gid namespaces (each starting at 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Menu {
-    /// User-visible monitoring (selector 0x02).
+    /// User-visible monitoring (selector 0x02, schema channel 0x19).
     Monitoring,
-    /// Configuration / installer (selector 0x03).
+    /// Configuration / installer (selector 0x03, schema channel 0x19).
     Configuration,
-    /// Service (selector 0x04).
+    /// Service (selector 0x04, schema channel 0x19).
     Service,
+    /// Alarms tab (schema channel 0x1A, separate gid namespace).
+    Alarm,
+    /// History / Service-events tab (schema channel 0x1B, separate gid namespace).
+    History,
     /// Any other selector value.
     Other(u8),
 }
 
 impl Menu {
-    /// The wire selector byte for this menu.
+    /// The wire selector byte for this menu's group-count query (`[0x08, sel]`).
+    /// [`Menu::Alarm`] and [`Menu::History`] don't fit this query pattern —
+    /// their group counts are discovered by probe-and-stop on their own
+    /// schema channel; callers should branch on the menu before relying on
+    /// this byte.
     pub fn selector(self) -> u8 {
         match self {
             Menu::Monitoring => 0x02,
             Menu::Configuration => 0x03,
             Menu::Service => 0x04,
+            // Hypothesised: `[0x08, 0x08]` is the Alarm-group count on devices
+            // that have one — matches the 2 Alarm groups on the CombiMaster and
+            // the 0 on the Magic-class Nav Chg. Treat as TBD until cross-device
+            // confirmation; falls back to probe-and-stop in any case.
+            Menu::Alarm => 0x08,
+            // No known selector for History; rely on probe-and-stop.
+            Menu::History => 0x00,
             Menu::Other(s) => s,
         }
     }
 
-    /// Map a wire selector byte to a [`Menu`].
+    /// CAN class of the schema-request channel that enumerates this menu's
+    /// groups. Pairs with the matching response class
+    /// (`SCHEMA_DATA*` = class - 0x10).
+    pub fn schema_request_class(self) -> u8 {
+        use crate::protocol::can_class;
+        match self {
+            Menu::Monitoring | Menu::Configuration | Menu::Service | Menu::Other(_) => {
+                can_class::SCHEMA_REQ
+            }
+            Menu::Alarm => can_class::SCHEMA_REQ_ALARM,
+            Menu::History => can_class::SCHEMA_REQ_HISTORY,
+        }
+    }
+
+    /// Map a wire selector byte to a [`Menu`] (only well-defined for the
+    /// global-gid menus Monitoring / Configuration / Service).
     pub fn from_selector(s: u8) -> Menu {
         match s {
             0x02 => Menu::Monitoring,

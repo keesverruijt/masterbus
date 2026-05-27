@@ -12,9 +12,11 @@ use super::waiter::Waiter;
 use super::Config;
 use crate::model::{DeviceIdentity, FieldInfo, GroupInfo, Menu};
 use crate::protocol::{
-    fw_req_raw, group_count_req_raw, prop_str_id_req_raw, schema_field_count_req_raw,
-    schema_field_id_req_raw, schema_group_name_req_raw, shadow_meta_req_raw, shadow_option_req_raw,
-    string_chunk_req_raw, viz_from_wire, VisualizationType,
+    can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
+    schema_field_count_req_class_raw, schema_field_id_req_class_raw,
+    schema_group_name_req_class_raw, shadow_meta_req_magic_raw, shadow_meta_req_raw,
+    shadow_option_req_magic_raw, shadow_option_req_raw, string_chunk_req_raw, viz_from_wire,
+    VisualizationType,
 };
 use crate::transport::TransportTx;
 
@@ -42,6 +44,27 @@ impl Disc<'_> {
     fn req_std(&mut self, key: &str, frame: (u32, Vec<u8>)) -> Option<Vec<u8>> {
         let n = self.cfg.discovery_retries;
         self.req(key, frame, n)
+    }
+
+    /// Like [`req`], but fires *two* frames per attempt that resolve to the
+    /// same waiter key (e.g. a standard-channel + Magic-channel pair). The
+    /// first response wins.
+    fn req_dual(
+        &mut self,
+        key: &str,
+        frame_a: (u32, Vec<u8>),
+        frame_b: (u32, Vec<u8>),
+        retries: usize,
+    ) -> Option<Vec<u8>> {
+        for _ in 0..retries {
+            self.waiter.register(key);
+            let _ = self.tx.send(frame_a.0, &frame_a.1);
+            let _ = self.tx.send(frame_b.0, &frame_b.1);
+            if let Some(r) = self.waiter.wait(key, self.cfg.discovery_timeout) {
+                return Some(r);
+            }
+        }
+        None
     }
 
     /// Fetch a string by id via chunked reads.
@@ -82,14 +105,24 @@ impl Disc<'_> {
     /// shared timeout window. Absent metadata (silent or a `0x10` "no value")
     /// resolves within that one window instead of timing out per op — this is the
     /// main discovery speed-up. Returns op → raw response payload.
+    ///
+    /// Each op is fired on **both** the standard shadow channel (`0x18` to the
+    /// shadow address, response on `0x08`) and the Magic-class shadow channel
+    /// (`0x1C` to the real address, response on `0x0C`); the waiter key is the
+    /// same in both cases, so whichever response lands first is what we use.
+    /// Devices that don't speak the Magic channel ignore the second frame and
+    /// vice versa — this is the cheapest fallback we can do without a per-device
+    /// preference. See PROTOCOL.md §6.
     fn shadow_batch(&mut self, addr: u32, field: u8, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
         let key = |op: u8| format!("shadow:{:06X}:{:02X}:{}", addr, op, field);
         for &op in ops {
             self.waiter.register(&key(op));
         }
         for &op in ops {
-            let frame = shadow_meta_req_raw(addr, op, field as u16);
-            let _ = self.tx.send(frame.0, &frame.1);
+            let std_frame = shadow_meta_req_raw(addr, op, field as u16);
+            let _ = self.tx.send(std_frame.0, &std_frame.1);
+            let magic_frame = shadow_meta_req_magic_raw(addr, op, field as u16);
+            let _ = self.tx.send(magic_frame.0, &magic_frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
         let mut out = HashMap::with_capacity(ops.len());
@@ -140,12 +173,35 @@ pub(super) fn fetch_identity(disc: &mut Disc, addr: u32) -> DeviceIdentity {
     DeviceIdentity { article, serial, revision, name, firmware }
 }
 
-/// The menus enumerated for a "full" discovery, in global group-id order.
-pub(super) const MENUS: [Menu; 3] = [Menu::Monitoring, Menu::Configuration, Menu::Service];
+/// The menus enumerated for a "full" discovery. Monitoring / Configuration /
+/// Service share one global gid space (0..mon+cfg+svc). Alarm and History use
+/// their own gid namespaces (each starting at 0) on parallel schema channels.
+pub(super) const MENUS: [Menu; 5] = [
+    Menu::Monitoring,
+    Menu::Configuration,
+    Menu::Service,
+    Menu::Alarm,
+    Menu::History,
+];
 
-/// Base global group id of `menu` (number of groups in the menus before it) and
-/// the count of groups in `menu` itself. Groups are a single global list ordered
-/// monitoring → config → service.
+/// Maximum gid we'll probe-and-stop on for menus without a known count
+/// selector (Alarm without confirmed `sel_08`, History always).
+const PROBE_GID_MAX: u8 = 16;
+
+/// Waiter-key prefix for the schema response that pairs with a given request
+/// class — must agree with the routing in `protocol::decode::waiter_key_for_frame`.
+fn schema_waiter_prefix(class: u8) -> &'static str {
+    match class {
+        can_class::SCHEMA_REQ_ALARM => "schema_alarm",
+        can_class::SCHEMA_REQ_HISTORY => "schema_history",
+        _ => "schema", // SCHEMA_REQ and any future variants land in the default key family
+    }
+}
+
+/// Base global group id of `menu` and the count of groups in `menu` itself.
+/// For Monitoring/Configuration/Service the gid is global (offset by the prior
+/// menus); for Alarm/History the gid starts at 0 in the menu's own namespace
+/// and the offset returned here is 0.
 fn menu_range(disc: &mut Disc, addr: u32, menu: Menu) -> (u32, u32) {
     match menu {
         Menu::Monitoring => (0, disc.group_count(addr, 0x02)),
@@ -158,6 +214,11 @@ fn menu_range(disc: &mut Disc, addr: u32, menu: Menu) -> (u32, u32) {
             let cfg = disc.group_count(addr, 0x03);
             (mon + cfg, disc.group_count(addr, 0x04))
         }
+        // Alarm/History gid namespaces are independent and don't always
+        // expose their count via `[0x08, sel]`. `selector()` returns the
+        // hypothesised selector (0x08 for Alarm); when zero or unreliable
+        // we fall back to probe-and-stop inside `enumerate_menu`.
+        Menu::Alarm | Menu::History => (0, 0),
         Menu::Other(_) => (0, 0),
     }
 }
@@ -186,34 +247,61 @@ pub(super) fn discover_menu(
 fn enumerate_menu(disc: &mut Disc, addr: u32, menu: Menu) -> Vec<GroupInfo> {
     let (offset, count) = menu_range(disc, addr, menu);
     let mut groups = Vec::new();
-    for i in 0..count {
-        let gid = (offset + i) as u8;
-        if let Some(g) = enumerate_group(disc, addr, gid, menu) {
-            groups.push(g);
+    if count > 0 {
+        for i in 0..count {
+            let gid = (offset + i) as u8;
+            if let Some(g) = enumerate_group(disc, addr, gid, menu) {
+                groups.push(g);
+            }
+        }
+    } else if matches!(menu, Menu::Alarm | Menu::History) {
+        // Probe-and-stop on the menu's own schema channel — stop after two
+        // consecutive misses or when we hit PROBE_GID_MAX.
+        let mut misses = 0;
+        for gid in 0..PROBE_GID_MAX {
+            match enumerate_group(disc, addr, gid, menu) {
+                Some(g) => {
+                    misses = 0;
+                    groups.push(g);
+                }
+                None => {
+                    misses += 1;
+                    if misses >= 2 {
+                        break;
+                    }
+                }
+            }
         }
     }
     groups
 }
 
 fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<GroupInfo> {
+    let class = menu.schema_request_class();
+    let key_prefix = schema_waiter_prefix(class);
     let name_sid = {
-        let key = format!("schema:{:06X}:28:{}", addr, g);
-        disc.req_std(&key, schema_group_name_req_raw(addr, g))
+        let key = format!("{}:{:06X}:28:{}", key_prefix, addr, g);
+        disc.req_std(&key, schema_group_name_req_class_raw(class, addr, g))
             .filter(|r| r.len() >= 6)
             .map(|r| u16::from_le_bytes([r[4], r[5]]))
     };
     let field_count = {
-        let key = format!("schema:{:06X}:07:{}", addr, g);
-        disc.req_std(&key, schema_field_count_req_raw(addr, g))
+        let key = format!("{}:{:06X}:07:{}", key_prefix, addr, g);
+        disc.req_std(&key, schema_field_count_req_class_raw(class, addr, g))
             .filter(|r| r.len() >= 8)
             .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]) as u32)
             .unwrap_or(0)
     };
+    // For Alarm/History, "no name and no fields" likely means the gid is
+    // unallocated — the probe-and-stop loop above relies on this to terminate.
+    if matches!(menu, Menu::Alarm | Menu::History) && name_sid.is_none() && field_count == 0 {
+        return None;
+    }
 
     let mut field_ids: Vec<i32> = Vec::new();
     for idx in 0..field_count {
-        let key = format!("schema:{:06X}:03:{}:{}", addr, g, idx as u8);
-        if let Some(r) = disc.req_std(&key, schema_field_id_req_raw(addr, g, idx as u8))
+        let key = format!("{}:{:06X}:03:{}:{}", key_prefix, addr, g, idx as u8);
+        if let Some(r) = disc.req_std(&key, schema_field_id_req_class_raw(class, addr, g, idx as u8))
             && r.len() >= 6
         {
             field_ids.push(u16::from_le_bytes([r[4], r[5]]) as i32);
@@ -223,12 +311,38 @@ fn enumerate_group(disc: &mut Disc, addr: u32, g: u8, menu: Menu) -> Option<Grou
     let name = name_sid.map(|sid| disc.fetch_str(addr, sid)).unwrap_or_default();
     let mut fields = Vec::new();
     for fid in field_ids {
-        fields.push(enumerate_field(disc, addr, fid));
+        if let Some(f) = enumerate_field(disc, addr, fid) {
+            fields.push(f);
+        }
     }
     Some(GroupInfo { id: g as i32, name, menu, fields })
 }
 
-fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
+/// Probe every field index in the device's full index space (selector `0x01`,
+/// see PROTOCOL.md §4.3 + the Nav Chg / TDevice_MacMagic discussion in
+/// FINDINGS), dropping indices that don't respond to any shadow query.
+///
+/// This is the only way to enumerate Configuration items on devices whose
+/// `0x08 0x03` group count lies (e.g. the Magic-class Nav Chg, which reports
+/// zero config groups despite having ~25 settings). The grouping that
+/// MasterAdjust shows comes from a hard-coded per-device-family layout
+/// (`TDevice_MacMagic` etc. inside `MasterAdjust.exe`); the wire protocol
+/// itself only exposes a flat field-index space.
+pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: u32) -> Vec<FieldInfo> {
+    let n = disc.group_count(addr, 0x01) as i32;
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for fid in 0..n {
+        if let Some(f) = enumerate_field(disc, addr, fid) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> Option<FieldInfo> {
     use crate::protocol::shadow_op as op;
     let f = fid as u8;
 
@@ -237,6 +351,11 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
     // so we skip them here (op::MAX is still fetched: it doubles as the option
     // count for lists).
     let meta = disc.shadow_batch(addr, f, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
+    // If nothing came back, this field index is unallocated — used by the
+    // `enumerate_all_fields` flat probe to skip holes in the index space.
+    if meta.is_empty() {
+        return None;
+    }
     let u16_at4 = |o: u8| meta.get(&o).filter(|r| r.len() >= 6).map(|r| u16::from_le_bytes([r[4], r[5]]));
     let byte4 = |o: u8| meta.get(&o).and_then(|r| r.get(4).copied());
     let f32_at4 = |o: u8| {
@@ -260,8 +379,15 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
         let mut opts = Vec::new();
         for opt in 0..n_opts {
             let key = format!("shadow:{:06X}:26:{}:{}", addr, f, opt as u8);
+            // Fire standard + Magic option requests together; the waiter key
+            // is the same so whichever channel answers first delivers.
             let osid = disc
-                .req(&key, shadow_option_req_raw(addr, f, opt as u8), OPTIONAL_RETRIES)
+                .req_dual(
+                    &key,
+                    shadow_option_req_raw(addr, f, opt as u8),
+                    shadow_option_req_magic_raw(addr, f, opt as u8),
+                    OPTIONAL_RETRIES,
+                )
                 .filter(|r| r.len() >= 6)
                 .map(|r| u16::from_le_bytes([r[4], r[5]]));
             opts.push(osid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default());
@@ -274,7 +400,7 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
     let field_name = name_sid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default();
     let field_unit = unit_sid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default();
 
-    FieldInfo {
+    Some(FieldInfo {
         index: fid,
         name: field_name,
         unit: field_unit,
@@ -285,7 +411,7 @@ fn enumerate_field(disc: &mut Disc, addr: u32, fid: i32) -> FieldInfo {
         max: n_or_max as f64,
         step: 0.0,
         options,
-    }
+    })
 }
 
 // ── disk cache (groups keyed by serial+firmware+menu, i.e. per device) ────────

@@ -75,6 +75,52 @@ pub fn shadow_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u3
     )
 }
 
+/// Magic-class shadow metadata query: class `0x1C` to the **real** address
+/// (not the shadow address), `[opcode, field_lo, field_hi]`. Same opcode set
+/// as [`shadow_meta_req_raw`]; the device replies on class `0x0C`. Used by
+/// Magic / HFcombi families for the bulk of their per-field metadata,
+/// alongside or in place of the standard shadow channel. See PROTOCOL.md §6.
+pub fn shadow_meta_req_magic_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
+    let [lo, hi] = field_id.to_le_bytes();
+    (id(can_class::SHADOW_REQ_MAGIC, device_addr), vec![opcode, lo, hi])
+}
+
+/// Magic-class shadow option-string query: class `0x1C` to the real address,
+/// `[0x26, field_id, 0x00, opt_idx]`.
+pub fn shadow_option_req_magic_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
+    (
+        id(can_class::SHADOW_REQ_MAGIC, device_addr),
+        vec![shadow_op::OPTION, field_id, 0x00, opt_idx],
+    )
+}
+
+/// Schema group-name query on a non-default channel. `class` selects which
+/// schema tab to query:
+/// - [`can_class::SCHEMA_REQ`]         — Monitoring (default in [`schema_group_name_req_raw`])
+/// - [`can_class::SCHEMA_REQ_ALARM`]   — Alarms
+/// - [`can_class::SCHEMA_REQ_HISTORY`] — History / Service-events
+///
+/// Payload is the same `[0x28, group_id, 0x00]` regardless of channel; the
+/// device replies on the matching response class (`0x09` / `0x0A` / `0x0B`).
+pub fn schema_group_name_req_class_raw(class: u8, device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
+    (id(class, device_addr), vec![0x28, group_id, 0x00])
+}
+
+/// Channel-specific schema field-count query (see [`schema_group_name_req_class_raw`]).
+pub fn schema_field_count_req_class_raw(class: u8, device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
+    (id(class, device_addr), vec![0x07, group_id, 0x00])
+}
+
+/// Channel-specific schema field-id query (see [`schema_group_name_req_class_raw`]).
+pub fn schema_field_id_req_class_raw(
+    class: u8,
+    device_addr: u32,
+    group_id: u8,
+    idx: u8,
+) -> (u32, Vec<u8>) {
+    (id(class, device_addr), vec![0x03, group_id, 0x00, idx])
+}
+
 /// Boolean write: class `0x18`, `[field, tab, f32 LE]` with `1.0`=true / `0.0`=false.
 /// Booleans go on the wire as the field's full 4-byte value (a `CheckBox` is just
 /// a float that's 0 or 1), so a 1-byte write is ignored by e.g. the CombiMaster.

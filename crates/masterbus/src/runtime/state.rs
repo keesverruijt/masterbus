@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, GroupInfo, Menu};
+use crate::model::{DeviceIdentity, DeviceSchema, DeviceStatus, FieldInfo, GroupInfo, Menu};
 use crate::value::Value;
 
 /// A cached field value with its observation time and a dirty flag.
@@ -35,6 +35,10 @@ pub struct DeviceEntry {
     pub schema: Option<DeviceSchema>,
     /// Which menus have been discovered into `schema.groups`.
     pub menus: HashSet<Menu>,
+    /// Flat enumeration of every reachable field (probed via shadow metadata
+    /// across the full index space `0..0x08 0x01`). Populated lazily, cached
+    /// in memory until a login/logout invalidates it. `None` until probed.
+    pub all_fields: Option<Vec<FieldInfo>>,
     /// Latest value per field index.
     pub values: HashMap<i32, CachedValue>,
 }
@@ -49,6 +53,7 @@ impl DeviceEntry {
             identity: None,
             schema: None,
             menus: HashSet::new(),
+            all_fields: None,
             values: HashMap::new(),
         }
     }
@@ -186,7 +191,26 @@ impl State {
         if let Some(e) = map.get_mut(&addr) {
             e.schema = None;
             e.menus.clear();
+            e.all_fields = None;
         }
+    }
+
+    /// Whether the flat field enumeration has been populated for a device.
+    pub fn has_all_fields(&self, addr: u32) -> bool {
+        self.devices.lock().unwrap().get(&addr).is_some_and(|e| e.all_fields.is_some())
+    }
+
+    /// Clone the flat field enumeration for a device, if discovered.
+    pub fn all_fields(&self, addr: u32) -> Option<Vec<FieldInfo>> {
+        self.devices.lock().unwrap().get(&addr).and_then(|e| e.all_fields.clone())
+    }
+
+    /// Store the flat field enumeration for a device.
+    pub fn put_all_fields(&self, addr: u32, fields: Vec<FieldInfo>) {
+        let now = Instant::now();
+        let mut map = self.devices.lock().unwrap();
+        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        e.all_fields = Some(fields);
     }
 
 

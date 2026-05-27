@@ -101,6 +101,7 @@ pub(crate) enum Command {
     Identify { addr: u32, reply: Sender<Result<()>> },
     DiscoverMenu { addr: u32, menu: crate::model::Menu, reply: Sender<Result<()>> },
     Discover { addr: u32, reply: Sender<Result<()>> },
+    DiscoverAllFields { addr: u32, reply: Sender<Result<()>> },
     Read { addr: u32, field: i32, max_age: Duration, reply: Sender<Result<Value>> },
     Write { addr: u32, field: i32, value: WriteValue, reply: Sender<Result<Value>> },
     AccessLevelRead { addr: u32, reply: Sender<Result<crate::model::AccessLevel>> },
@@ -207,6 +208,16 @@ impl Engine {
             return Ok(());
         }
         self.call(|reply| Command::Discover { addr, reply })?
+    }
+
+    /// Ensure the flat field enumeration (selector `0x01` probe of every index)
+    /// is populated. Used for devices like the Magic-class Nav Chg whose
+    /// per-menu group counts (`0x08 0x03`) under-report their schema.
+    pub fn ensure_all_fields(&self, addr: u32) -> Result<()> {
+        if self.state.has_all_fields(addr) {
+            return Ok(());
+        }
+        self.call(|reply| Command::DiscoverAllFields { addr, reply })?
     }
 
     /// Read a field value (cache if fresh enough, else poll).

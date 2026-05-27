@@ -139,16 +139,26 @@ pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -
                 Some(format!("p:{:06X}:{:02X}:{:02X}", device_addr, data[0], data[1]))
             }
         }
-        can_class::SCHEMA_DATA => {
+        can_class::SCHEMA_DATA => schema_key("schema", device_addr, data),
+        can_class::SCHEMA_DATA_ALARM => schema_key("schema_alarm", device_addr, data),
+        // The history schema-response class is also used on the shadow address
+        // for headerless Magic-class monitoring pushes — route only the real-addr
+        // form here; the value-push form is handled by the reader.
+        can_class::SCHEMA_DATA_HISTORY if device_addr & SHADOW_BIT == 0 => {
+            schema_key("schema_history", device_addr, data)
+        }
+        can_class::SHADOW_DATA_MAGIC => {
+            // Magic-class shadow response on the real address. Payload layout
+            // matches the standard shadow response, so route to the same key
+            // family — the request side fires standard + Magic together and
+            // accepts whichever returns first.
             if data.len() < 2 {
                 return None;
             }
-            match data[0] {
-                0x03 if data.len() >= 4 => {
-                    Some(format!("schema:{:06X}:03:{}:{}", device_addr, data[1], data[3]))
-                }
-                0x03 => None,
-                op => Some(format!("schema:{:06X}:{:02X}:{}", device_addr, op, data[1])),
+            if data[0] == shadow_op::OPTION && data.len() >= 4 {
+                Some(format!("shadow:{:06X}:26:{}:{}", device_addr, data[1], data[3]))
+            } else {
+                Some(format!("shadow:{:06X}:{:02X}:{}", device_addr, data[0], data[1]))
             }
         }
         can_class::MONITORING_DATA => {
@@ -183,6 +193,20 @@ pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -
             }
         }
         _ => None,
+    }
+}
+
+/// Build a schema-response waiter key with the channel-specific prefix.
+fn schema_key(prefix: &str, device_addr: u32, data: &[u8]) -> Option<String> {
+    if data.len() < 2 {
+        return None;
+    }
+    match data[0] {
+        0x03 if data.len() >= 4 => {
+            Some(format!("{}:{:06X}:03:{}:{}", prefix, device_addr, data[1], data[3]))
+        }
+        0x03 => None,
+        op => Some(format!("{}:{:06X}:{:02X}:{}", prefix, device_addr, op, data[1])),
     }
 }
 

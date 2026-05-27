@@ -46,18 +46,29 @@ Strip the top 3 flag bits (`& 0x1FFF_FFFF`) before extracting `can_class` /
 
 Class is bits 28:24 of the CAN ID. Observed classes:
 
-| Class | Name             | Dir | Meaning                                                   |
-|-------|------------------|-----|-----------------------------------------------------------|
-| 0x04  | DEVICE_BROADCAST | ←   | Periodic 8-byte device self-announcement                  |
-| 0x05  | BUS_POLL         | ←   | Bus-master heartbeat (0-byte frame from node `0x500001`)  |
-| 0x06  | PROPERTY_INFO    | ←   | Property / group-count response from a device             |
-| 0x07  | PROPERTY_REQ     | →   | Property / group-count request to a device                |
-| 0x08  | MONITORING_DATA  | ←   | Monitoring value pushed from a device (also shadow resp.) |
-| 0x09  | SCHEMA_DATA      | ←   | Schema response from a device                             |
-| 0x18  | MONITORING_REQ   | →   | Monitoring request to a device (also shadow request)      |
-| 0x19  | SCHEMA_REQ       | →   | Schema request to a device                                |
+| Class | Name              | Dir | Meaning                                                   |
+|-------|-------------------|-----|-----------------------------------------------------------|
+| 0x04  | DEVICE_BROADCAST  | ←   | Periodic 8-byte device self-announcement                  |
+| 0x05  | BUS_POLL          | ←   | Bus-master heartbeat (0-byte frame from node `0x500001`)  |
+| 0x06  | PROPERTY_INFO     | ←   | Property / group-count response from a device             |
+| 0x07  | PROPERTY_REQ      | →   | Property / group-count request to a device                |
+| 0x08  | MONITORING_DATA   | ←   | Monitoring value pushed from a device (also shadow resp.) |
+| 0x09  | SCHEMA_DATA       | ←   | Schema response from a device (full 8-byte form)          |
+| 0x10  | WRITE_ACK / NA    | ←   | Write acknowledgement; shadow "no value" response         |
+| 0x11  | SCHEMA_DATA_NA    | ←   | Compact / NA schema response (4-byte form, see §5)        |
+| 0x18  | MONITORING_REQ    | →   | Monitoring request to a device (also shadow request)      |
+| 0x19  | SCHEMA_REQ        | →   | Schema request to a device                                |
+| 0x1A  | SCHEMA_REQ_ALT_A  | →   | Alternate schema request (variant — semantics unconfirmed)|
+| 0x1B  | SCHEMA_REQ_ALT_B  | →   | Alternate schema request (variant — semantics unconfirmed)|
+| 0x1C  | SCHEMA_REQ_GROUP  | →   | Group-as-field shadow request (per-group attributes, see §5)|
 
 `→` = controller→device (request), `←` = device→controller (response/push).
+
+Classes `0x1A` / `0x1B` / `0x1C` are observed in captures of MasterAdjust
+querying group-level metadata on devices whose `0x19` schema returns empty
+or is silent (see §4.3 caveat and FINDINGS). Their full opcode space hasn't
+been reversed; treat them as TBD and refer to live capture before relying
+on a specific interpretation.
 
 There is **no correlation token** in responses. Requests and responses are
 matched by `(device_addr, class, payload-key)` — see §8.
@@ -76,11 +87,20 @@ so a short collection window captures the whole bus.
 [0]   type_code         device family
 [1:3] addr_lo, addr_hi  low 16 bits of device_addr (mirror of CAN ID)
 [3]   instance          sub-device instance (0..3)
-[4:6] firmware_version  u16 little-endian (basic)
+[4]   event_counter     ticks (+1 or +4) on state changes — see §4.5
+[5]   (status / flags — bits not fully decoded)
 [6:8] (unidentified)
 ```
 
 The 24-bit `device_addr` comes from the CAN ID, not the payload.
+
+> Byte `[4]` is **not** a login-state indicator. It increments on a wide
+> range of device-state changes (login, logout, value writes, and others
+> we haven't characterised) — so a transition is a useful "device woke up
+> and refreshed" signal, but the value alone doesn't reveal *what*
+> changed. To read the access level, query opcode `0x08 0x19` (§4.5). The
+> earlier theory that bytes `[4:6]` encoded firmware version did not hold
+> up across devices.
 
 ---
 
@@ -121,14 +141,41 @@ Response: `[0x09, n, sid_lo, sid_hi]` → `str_id = u16LE(sid_lo, sid_hi)`.
   derived as the **5th character of the serial** (index 4). When n=4 *does*
   answer, it is a full code string (e.g. `"DD0012"`, `"AA0101"`). See FINDINGS.
 
-### 4.3 Monitoring group count — `[0x08, 0x02]`
+### 4.3 Property-by-selector — `[0x08, SEL]`
 
-Response `[0x08, 0x02, count_lo, count_hi]` → `u16LE` = number of **monitoring**
-groups.
+A wide family of small counters/sizes is keyed by a single selector byte:
+request `[0x08, SEL]` on class `0x07`, response `[0x08, SEL, lo, hi]` on
+class `0x06` with `u16LE(lo, hi)`. Selectors that matter:
 
-> The frequently-seen query `[0x08, 0x3F]` returns the **total tab count**
-> (Monitoring + Alarm + History + Configuration), *not* the monitoring-group
-> count. Use `[0x08, 0x02]` for monitoring groups.
+| SEL    | Meaning                                                                  |
+|--------|--------------------------------------------------------------------------|
+| `0x01` | **Total field-index range** — `N` such that the device's addressable field indices are `0..N`. The basis for the flat probe in §4.6. |
+| `0x02` | Number of **Monitoring** groups (selector for the schema offset, §5).    |
+| `0x03` | Number of **Configuration** groups. **Unreliable** on some devices — see caveat below. |
+| `0x04` | Number of **Service** groups.                                            |
+| `0x3F` | **Total tab count** (`mon + alarm + history + config`), *not* a per-tab count. |
+
+> **`[0x08, 0x03]` is unreliable** on Magic-class devices (and likely
+> others). The Mac/Magic family — e.g. the **INT Nav Chg** at `0x3A3B4B`
+> in the reference bus — returns `0` for `[0x08, 0x03]` and `[0x08, 0x04]`
+> despite exposing ~25 configurable fields. The vendor's MasterAdjust
+> application papers over this with hard-coded layout knowledge built
+> into per-device-family Delphi classes (`TDevice_MacMagic`,
+> `TDevice_HFcombi`, `TDevice_Mass2And3`, …) recovered from
+> `MasterAdjust.exe`; the section names ("Main", "Stabilize voltage",
+> "Dimmer", "Charger", …) and field grouping come from those classes,
+> not from the wire. See FINDINGS §3e for the capture that proved this.
+>
+> For a transport-only client, **don't trust `0x03` as ground truth**;
+> use the flat probe (§4.6) and accept losing the per-section grouping.
+
+Other selectors observed in MasterAdjust traces (`0x05`, `0x06`, `0x07`,
+`0x08`, `0x12`, `0x13`, `0x1B`–`0x1F`, `0x23`, `0x3E`) return values whose
+exact meaning hasn't been pinned down across devices. On the INT Nav Chg
+`[0x08, 0x06]` returns `5`, which happens to match the number of
+Configuration sections in the MasterAdjust UI, but the same selector on
+the CombiMaster returns `14`, so it isn't a generic "section count" —
+treat it as TBD.
 
 ### 4.4 String-table chunk — `[0x30, id_lo, id_hi, seq]`
 
@@ -194,20 +241,79 @@ power cycles has not been characterised. MasterAdjust polls `08 19` on
 every enrolled device periodically (~once per minute in the reference
 capture) so it can resync its UI to actual device state.
 
+### 4.6 Flat field-index probe (group-count fallback)
+
+Because `[0x08, 0x03]` lies on some devices (§4.3), the only universally
+reliable way to enumerate a device's settings is to probe the **full
+field-index space** directly via shadow metadata (§6), bypassing groups
+entirely.
+
+Algorithm:
+
+1. Read `[0x08, 0x01]` to get `N` — the device's total field-index count.
+2. For each `field_idx ∈ 0..N`, send the pipelined shadow batch
+   (`NAME / VIZ / MAX / UNIT / WRITEABLE`) to the shadow address (§6).
+3. Drop indices that produce no response in any opcode of the batch —
+   those are holes in the index space and not addressable fields.
+4. What remains is every reachable field, **without group structure**.
+
+This is what `Device::all_fields()` does in the crate. Tradeoffs vs.
+the group-based discovery in §5:
+
+- **Pro:** Recovers fields on devices whose `0x08, 0x03` count is `0`
+  (e.g. Magic-class). On the INT Nav Chg this returns the ~25 fields
+  MasterAdjust shows; the `0x19` schema path returns nothing.
+- **Pro:** Works without per-device-family knowledge — no hard-coded
+  `TDevice_*` analogue is needed.
+- **Con:** No section labels. MasterAdjust's "Serial interface / Main /
+  Stabilize / Dimmer / Charger" headings come from a hard-coded layout
+  inside `MasterAdjust.exe` (one Delphi class per device family); the
+  bus itself never exposes them. Recovering those headings means RE'ing
+  the Delphi classes and porting them into the client.
+- **Con:** Linear cost in `N` shadow batches (~150 ms each at our
+  per-attempt timeout). The Nav Chg's `N = 64` takes a few seconds on a
+  cold cache; subsequent visits are free.
+
+A login (§4.5) invalidates the flat-probe cache the same way it
+invalidates the group cache: writability bits change per level and stale
+attributes would lie to the caller.
+
 ---
 
-## 5. Schema queries (class 0x19 request → 0x09 response)
+## 5. Schema queries (class 0x19 request → 0x09 / 0x11 response)
 
-Per-group structure. Requests are class `0x19` to `device_addr`; responses class
-`0x09`. Result fields live at `bytes[4:..]` of the response.
+Per-group structure. Requests are class `0x19` to `device_addr`. Responses
+arrive on either class `0x09` (the rich form, 8 bytes) or class `0x11`
+(compact / NA, 4 bytes). Result fields live at `bytes[4:..]` of the
+class-`0x09` response.
 
-| Purpose         | Request payload              | Response value                         |
+| Purpose         | Request payload              | Class-0x09 response value              |
 |-----------------|------------------------------|----------------------------------------|
 | Group name id   | `[0x28, group_id, 0x00]`     | `u16LE` at bytes[4:6] (string id)      |
 | Field count     | `[0x07, group_id, 0x00]`     | `f32LE` at bytes[4:8] (count)          |
 | Field id        | `[0x03, group_id, 0x00, idx]`| `u16LE` at bytes[4:6] (field id)       |
 
 The field-id response echoes `idx` in `bytes[3]` (used for matching, §8).
+
+**Class `0x11` compact / NA response.** On the CombiMaster reference bus,
+schema queries for Configuration-tab group ids consistently came back on
+class `0x11` with a 4-byte payload `[opcode, group_id, sub, value]`,
+e.g. `Up 11 188EA2 [4] 07 07 00 03`. The `value` byte was inconsistent
+across retries of the same query (e.g. `03`, `01`, `01` for three
+back-to-back probes of gid 7's field count), which is more consistent
+with a "not-available / try-again" status than a real value. The crate
+currently ignores `0x11` and treats the request as silent; treat the
+byte at `[3]` as TBD until further captures clarify whether it carries
+useful data.
+
+**Group-as-field requests (class `0x1C`).** MasterAdjust separately
+queries shadow-style opcodes (`0x02 VIZ`, `0x07 MAX`, `0x09 FACTORY`,
+`0x0B WRITEABLE`, `0x0C GRAY`, `0x28 NAME`) on **group ids** via class
+`0x1C` with payload `[opcode, gid, 0x00]`. Responses come back on class
+`0x11` with the 4-byte compact form. This appears to be how MasterAdjust
+treats a Configuration group as a single field-like row when its layout
+table tells it to (see §4.3 caveat). Semantics still TBD; not used by
+the crate.
 
 ---
 
@@ -413,3 +519,13 @@ UTF-8 bytes of the payload (lossy decode).
 6. For each field: shadow name/viz/max/unit (§6); fetch name & unit strings;
    fetch option strings for list types.
 7. (Optional) pre-poll each field's value (§7.1).
+
+For Configuration / Service (or any time `[0x08, 0x03]` returns `0`
+despite the device clearly being configurable), skip steps 4–6 above for
+that menu and fall back to the **flat field-index probe** (§4.6):
+
+4'. Total field count: `[0x08, 0x01]` → `N`.
+5'. For each `field_idx ∈ 0..N`: pipelined shadow batch (§6); drop
+    indices with no response in any opcode.
+6'. Render the survivors as a flat list — no group structure is available
+    from the bus for these devices.

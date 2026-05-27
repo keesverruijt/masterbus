@@ -168,6 +168,15 @@ impl Device {
         Field { engine: self.engine.clone(), device: self.id, index }
     }
 
+    /// Flat probe of the device's entire field-index space, ignoring the
+    /// per-menu group counts (which lie on some devices — see PROTOCOL.md
+    /// §4.3 + FINDINGS for the Magic-class Nav Chg). Returns every field
+    /// index that responded to a shadow query, with no group structure.
+    pub fn all_fields(&self) -> Result<Vec<FieldInfo>> {
+        self.engine.ensure_all_fields(self.id)?;
+        self.engine.state.all_fields(self.id).ok_or(Error::NotReady)
+    }
+
     /// Read the device's current access level (PROTOCOL.md §4.5).
     ///
     /// Note: a level change does not always change the index space, but it
