@@ -327,12 +327,10 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
                 });
             }
             "device_name" => device_name = value.to_string(),
-            "cache_dir" => {
-                if !value.is_empty() {
-                    cache_dir = Some(PathBuf::from(value));
-                }
+            "cache_dir" if !value.is_empty() => {
+                cache_dir = Some(PathBuf::from(value));
             }
-            _ => {} // forward-compat: ignore unknown keys
+            _ => {} // forward-compat: ignore unknown keys + empty cache_dir
         }
     }
     let device_type = device_type.ok_or_else(|| {
