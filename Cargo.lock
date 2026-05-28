@@ -745,27 +745,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "masterbus-set-field"
-version = "0.2.0"
-dependencies = [
- "masterbus",
-]
-
-[[package]]
-name = "masterbus-signalk"
-version = "0.2.0"
-dependencies = [
- "masterbus",
- "serde_json",
-]
-
-[[package]]
-name = "masterbus-tui"
+name = "masterbus-tools"
 version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "masterbus",
  "ratatui",
+ "serde_json",
 ]
 
 [[package]]

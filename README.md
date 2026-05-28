@@ -10,8 +10,7 @@ A Cargo workspace:
 | crate | what |
 |-------|------|
 | [`masterbus`](crates/masterbus) | core library (the protocol, discovery, caching, subscriptions, the `MasterBus`/`Device`/`Group`/`Field` navigator API and a non-blocking channel API) |
-| [`masterbus-tui`](crates/masterbus-tui) | terminal UI to browse devices/values and edit settings |
-| [`masterbus-signalk`](crates/masterbus-signalk) | long-running sidecar that streams MasterBus values as Signal K deltas (newline-delimited JSON) over TCP |
+| [`masterbus-tools`](crates/masterbus-tools) | three command-line tools — `masterbus-tui` (terminal UI), `masterbus-signalk` (Signal K sidecar), `masterbus-set-field` (one-shot field writer). `cargo install masterbus-tools` installs all three |
 | [`masterbus-ffi`](crates/masterbus-ffi) | C ABI `cdylib` (single-threaded), header generated with cbindgen, plus C demos (not published to crates.io) |
 
 The wire protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).

@@ -1,0 +1,29 @@
+[package]
+name = "masterbus-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI, Signal K sidecar, and CLI writer for Mastervolt MasterBus"
+readme = "README.md"
+keywords = ["mastervolt", "masterbus", "canbus", "marine"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[[bin]]
+name = "masterbus-tui"
+path = "src/bin/masterbus-tui/main.rs"
+
+[[bin]]
+name = "masterbus-signalk"
+path = "src/bin/masterbus-signalk.rs"
+
+[[bin]]
+name = "masterbus-set-field"
+path = "src/bin/masterbus-set-field.rs"
+
+[dependencies]
+masterbus.workspace = true
+ratatui.workspace = true
+crossbeam-channel.workspace = true
+serde_json.workspace = true

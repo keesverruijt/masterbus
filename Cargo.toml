@@ -3,9 +3,7 @@ resolver = "2"
 members = [
     "crates/masterbus",
     "crates/masterbus-ffi",
-    "crates/masterbus-tui",
-    "crates/masterbus-signalk",
-    "crates/masterbus-set-field",
+    "crates/masterbus-tools",
 ]
 
 [workspace.package]
