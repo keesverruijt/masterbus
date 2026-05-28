@@ -45,6 +45,7 @@ const MENU: &str = "monitoring";
 const RATE: Duration = Duration::from_millis(1000);
 
 fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let listen = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 

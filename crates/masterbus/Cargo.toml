@@ -16,8 +16,12 @@ name = "masterbus"
 [dependencies]
 thiserror.workspace = true
 crossbeam-channel.workspace = true
+log.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+env_logger.workspace = true
 
 # Cross-platform Mastervolt USB-link (HID) transport. On Linux use hidapi's
 # pure-Rust hidraw backend (no libudev, no C toolchain) so cross-compiles stay

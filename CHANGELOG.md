@@ -7,15 +7,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Logging via the `log` facade.** The library emits `info`/`warn`/`error`/
+  `debug`/`trace` on these targets: `masterbus` (default, connect /
+  alive / offline), `masterbus::discovery` (per-menu enumeration, retries),
+  `masterbus::cache` (schema-cache load/save), `masterbus::settings`
+  (config-file creation, cache_dir fallback), `masterbus::write`
+  (per-write debug), `masterbus::frame` (candump-style Tx/Rx dump on
+  `trace`). No runtime cost when no backend is installed.
+- The bundled binaries pull in `env_logger`. `masterbus-signalk` defaults
+  to `info`; `masterbus-set-field` defaults to `warn`; `masterbus-tui`
+  defaults to `warn` and writes to `masterbus-tui.log` (or
+  `$MASTERBUS_TUI_LOG`) so the alt-screen stays clean.
 - `MasterBus::auto(Config)` — one-call constructor that reads (and on
   first run creates) a per-host config file, then picks the right
-  transport. The file lives at `/etc/default/masterbus/config.ini`
-  (or `$HOME/.local/masterbus/config.ini` if `/etc` isn't writable),
-  carries three keys (`heartbeat_master`, `device_type`, `device_name`),
-  and is auto-populated from the hardware on first run (USB link
-  preferred; otherwise the lone CAN interface). The path and detected
-  values are logged to stderr on creation.
+  transport. The file lives at `/etc/default/masterbus/config.ini` on
+  Linux (when writable) and otherwise at the OS-native per-user path
+  (`$XDG_CONFIG_HOME/masterbus/...` on Linux, `~/Library/Application
+  Support/masterbus/...` on macOS, `%APPDATA%\masterbus\...` on
+  Windows). It carries four keys (`heartbeat_master`, `device_type`,
+  `device_name`, `cache_dir`) and is auto-populated from the hardware
+  on first run (USB link preferred; otherwise the lone CAN interface).
+  The path and detected values are logged via `log::debug!` on creation.
 - New public types: `masterbus::FileConfig`, `masterbus::DeviceType`.
+
+### Removed
+- `MASTERBUS_LOG` env var (point-at-a-file frame log). Replaced by
+  `RUST_LOG=masterbus::frame=trace` — same data, candump-compatible
+  format (`Tx 05000001 [0]` / `Rx 04188EA2 [8] 14 93 …`), routed through
+  whatever `log` backend the consuming binary installs.
 
 ### Changed
 - **All four binaries** (`masterbus-tui`, `masterbus-signalk`,

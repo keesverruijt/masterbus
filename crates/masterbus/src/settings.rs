@@ -100,8 +100,9 @@ impl FileConfig {
             .map_err(|e| Error::Connection(format!("create {}: {e}", path.display())))?;
         f.write_all(body.as_bytes())
             .map_err(|e| Error::Connection(format!("write {}: {e}", path.display())))?;
-        eprintln!(
-            "masterbus: created {} (device_type={:?}, device_name={:?}, cache_dir={:?})",
+        log::debug!(
+            target: "masterbus::settings",
+            "created {} (device_type={:?}, device_name={:?}, cache_dir={:?})",
             path.display(),
             detected.device_type,
             detected.device_name,
@@ -138,8 +139,9 @@ pub(crate) fn resolve_cache_dir(requested: &std::path::Path) -> Option<PathBuf> 
         return None;
     }
     if try_use_dir(&user_cache) {
-        eprintln!(
-            "masterbus: {} not writable, falling back to {}",
+        log::debug!(
+            target: "masterbus::settings",
+            "cache_dir {} not writable, falling back to {}",
             requested.display(),
             user_cache.display()
         );

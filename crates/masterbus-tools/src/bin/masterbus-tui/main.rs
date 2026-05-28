@@ -25,17 +25,37 @@ use app::{App, Focus, Names};
 use masterbus::{Config, MasterBus};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_logger();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("usage: masterbus-tui");
         eprintln!("transport, heartbeat-master role, and schema cache come from");
         eprintln!("the config file (see `masterbus::FileConfig`)");
+        eprintln!();
+        eprintln!("logs are written to $MASTERBUS_TUI_LOG (default: ./masterbus-tui.log)");
+        eprintln!("filter via RUST_LOG, e.g. RUST_LOG=masterbus=debug");
         return Ok(());
     }
     let bus = MasterBus::auto(Config::default())?;
     println!("connected; scanning the bus…");
     run_tui(bus)?;
     Ok(())
+}
+
+/// Send `log` output to a file so it doesn't corrupt the alt-screen TUI.
+/// Default level is `warn` — set `RUST_LOG=masterbus=debug` (etc.) to widen.
+fn init_logger() {
+    let path = std::env::var_os("MASTERBUS_TUI_LOG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("masterbus-tui.log"));
+    let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+        // Couldn't open the log file — silently disable logging rather than
+        // corrupting the UI; the TUI runs without any logs in that case.
+        return;
+    };
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .target(env_logger::Target::Pipe(Box::new(file)))
+        .try_init();
 }
 
 fn run_tui(bus: MasterBus) -> std::io::Result<()> {

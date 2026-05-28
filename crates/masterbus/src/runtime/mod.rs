@@ -157,10 +157,16 @@ impl Engine {
         let deadline = Instant::now() + config.connect_timeout;
         while !state.any_device() {
             if Instant::now() >= deadline {
+                log::error!("no devices heard on the bus within {:?}", config.connect_timeout);
                 return Err(Error::Connection("no devices heard on the bus".into()));
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        log::info!(
+            "connected (first device after {:?}, heartbeat_master={:?})",
+            started.elapsed(),
+            config.heartbeat_master,
+        );
 
         Ok(Arc::new(Engine {
             state,

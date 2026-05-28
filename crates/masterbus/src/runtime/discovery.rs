@@ -43,14 +43,26 @@ pub(super) struct Disc<'a> {
 
 impl Disc<'_> {
     fn req(&mut self, key: &str, frame: (u32, Vec<u8>), retries: usize) -> Option<Vec<u8>> {
-        for _ in 0..retries {
+        for attempt in 0..retries {
             self.waiter.register(key);
-            frame_log("Dn", ((frame.0 >> 24) & 0x1F) as u8, frame.0 & 0x00FF_FFFF, &frame.1);
+            frame_log("Tx", frame.0, &frame.1);
             let _ = self.tx.send(frame.0, &frame.1);
             if let Some(r) = self.waiter.wait(key, self.cfg.discovery_timeout) {
+                if attempt > 0 {
+                    log::debug!(target: "masterbus::discovery", "{key}: ok on retry {attempt}");
+                }
                 return Some(r);
             }
+            log::debug!(
+                target: "masterbus::discovery",
+                "{key}: timeout after {:?} (attempt {}/{retries})",
+                self.cfg.discovery_timeout, attempt + 1
+            );
         }
+        log::warn!(
+            target: "masterbus::discovery",
+            "{key}: giving up after {retries} attempt(s)"
+        );
         None
     }
 
@@ -115,7 +127,7 @@ impl Disc<'_> {
         }
         for &op in ops {
             let frame = encode(addr, op, wire as u16);
-            frame_log("Dn", ((frame.0 >> 24) & 0x1F) as u8, frame.0 & 0x00FF_FFFF, &frame.1);
+            frame_log("Tx", frame.0, &frame.1);
             let _ = self.tx.send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
@@ -154,7 +166,7 @@ impl Disc<'_> {
             }
             for w in wire..end {
                 let frame = encode(addr, op::VIZ, w);
-                frame_log("Dn", ((frame.0 >> 24) & 0x1F) as u8, frame.0 & 0x00FF_FFFF, &frame.1);
+                frame_log("Tx", frame.0, &frame.1);
                 let _ = self.tx.send(frame.0, &frame.1);
                 // Respect the bus budget so the kernel TX queue can drain at
                 // wire rate; a tight burst of 64 frames in 2 ms (the rate
@@ -302,11 +314,25 @@ pub(super) fn discover_menu(
 ) -> Vec<GroupInfo> {
     let dir = disc.cfg.cache_path.as_deref();
     let level = disc.level;
-    load_cached_menu(dir, &id.serial, &id.firmware, level, menu).unwrap_or_else(|| {
-        let g = enumerate_menu(disc, addr, menu);
-        store_cached_menu(dir, &id.serial, &id.firmware, level, menu, &g);
-        g
-    })
+    if let Some(g) = load_cached_menu(dir, &id.serial, &id.firmware, level, menu) {
+        log::debug!(
+            target: "masterbus::discovery",
+            "0x{addr:06X} {menu:?}: schema loaded from cache ({} groups)",
+            g.len(),
+        );
+        return g;
+    }
+    let started = std::time::Instant::now();
+    log::debug!(target: "masterbus::discovery", "0x{addr:06X} {menu:?}: enumerating");
+    let g = enumerate_menu(disc, addr, menu);
+    log::info!(
+        target: "masterbus::discovery",
+        "0x{addr:06X} {menu:?}: discovered {} groups in {:?}",
+        g.len(),
+        started.elapsed(),
+    );
+    store_cached_menu(dir, &id.serial, &id.firmware, level, menu, &g);
+    g
 }
 
 fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Vec<GroupInfo> {
@@ -556,8 +582,24 @@ fn store_cached_menu(
     if serial.is_empty() {
         return;
     }
-    let _ = std::fs::create_dir_all(dir);
-    if let Ok(json) = serde_json::to_vec_pretty(groups) {
-        let _ = std::fs::write(cache_file(dir, serial, firmware, level, menu), json);
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!(target: "masterbus::cache", "mkdir {}: {e}", dir.display());
+        return;
+    }
+    let path = cache_file(dir, serial, firmware, level, menu);
+    match serde_json::to_vec_pretty(groups) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!(target: "masterbus::cache", "write {}: {e}", path.display());
+            } else {
+                log::debug!(
+                    target: "masterbus::cache",
+                    "saved {} ({} groups)",
+                    path.display(),
+                    groups.len()
+                );
+            }
+        }
+        Err(e) => log::warn!(target: "masterbus::cache", "encode {}: {e}", path.display()),
     }
 }

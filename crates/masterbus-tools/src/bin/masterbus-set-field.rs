@@ -25,6 +25,7 @@ use std::time::Duration;
 use masterbus::{Config, DeviceId, FieldId, MasterBus, Value, VisualizationType};
 
 fn main() -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() != 3 {
         eprintln!(

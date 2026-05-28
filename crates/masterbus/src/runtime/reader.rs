@@ -60,9 +60,11 @@ fn reader_loop(
         // Liveness diff → presence events.
         let now: HashSet<DeviceId> = state.alive_ids(config.liveness).into_iter().collect();
         for &a in now.difference(&alive) {
+            log::info!("device 0x{a:06X} alive");
             let _ = dev_tx.send(DeviceEvent::Alive(a));
         }
         for &a in alive.difference(&now) {
+            log::info!("device 0x{a:06X} offline");
             let _ = dev_tx.send(DeviceEvent::Offline(a));
         }
         alive = now;
@@ -72,7 +74,7 @@ fn reader_loop(
 
 fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
     let frame = frame_from_raw(raw_id, data);
-    frame_log("Up", frame.can_class, frame.device_addr, data);
+    frame_log("Rx", raw_id, data);
 
     // Only DEVICE-originated frames register a device: a frame's `device_addr`
     // is the addressed device for master→device requests (class `0x05`/`0x07`/

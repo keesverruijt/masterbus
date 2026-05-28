@@ -154,9 +154,7 @@ impl Sched {
 
     fn send(&mut self, frame: (u32, Vec<u8>)) {
         self.pace();
-        let can_class = ((frame.0 >> 24) & 0x1F) as u8;
-        let addr = frame.0 & 0x00FF_FFFF;
-        frame_log("Dn", can_class, addr, &frame.1);
+        frame_log("Tx", frame.0, &frame.1);
         let _ = self.tx.send(frame.0, &frame.1);
     }
 
@@ -355,6 +353,10 @@ impl Sched {
     }
 
     fn do_write(&mut self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
+        log::debug!(
+            target: "masterbus::write",
+            "0x{addr:06X} fid 0x{field:04X} = {value:?}",
+        );
         // Text fields write via the string-chunk protocol (PROTOCOL.md §4.4),
         // not the numeric-write path: the field's "value" is the sid, the
         // editable content lives at that sid in the string table.
