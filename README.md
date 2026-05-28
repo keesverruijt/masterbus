@@ -68,15 +68,46 @@ Or install the three command-line tools (`masterbus-tui`,
 cargo install masterbus-tools
 ```
 
+### Configuration (where the bus is, and whether we drive it)
+
+All tools share a small INI file describing the transport and the optional
+"act as bus master" role, so the tools don't need transport arguments on every
+invocation. The file is **read on every start** and **auto-created on first
+run** with sensible defaults:
+
+| OS | Path |
+|----|------|
+| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) |
+| Linux (user) / macOS / Windows | `$HOME/.local/masterbus/config.ini` (`%USERPROFILE%\.local\masterbus\config.ini` on Windows) |
+
+Auto-detection at creation time prefers a plugged-in **Mastervolt USB link**;
+otherwise the **lone CAN interface** (e.g. `can0`) is selected. Multiple CAN
+interfaces with no USB link is an error — edit the file and pick one. The path
+and detected values are logged to stderr on creation, so a first run isn't
+silent.
+
+```ini
+# /etc/default/masterbus/config.ini
+# 24-bit hex device id we announce as master (class-0x05 heartbeat). Devices
+# announce themselves and stay responsive in response; comment out to stay
+# passive (a hardware master must drive the bus, e.g. an EasyView panel).
+heartbeat_master = 000001
+
+# Transport: "usb" for the Mastervolt USB link, "can" for SocketCAN.
+device_type = can
+
+# When device_type = can: interface name. When usb: optional serial number
+# (blank = first link found).
+device_name = can0
+```
+
+To change the heartbeat-master behaviour or swap transports, edit the file
+(or delete it and let auto-detection re-create it).
+
 ### TUI
 
 ```sh
-# Linux: SocketCAN, or the USB link
-masterbus-tui can0 [cache-dir]               # e.g. masterbus-tui can0 ~/.cache/masterbus
-masterbus-tui usb  [serial] [cache-dir]      # over the Mastervolt USB link
-
-# macOS / Windows: USB link only (no argument needed)
-masterbus-tui
+masterbus-tui [cache-dir]
 ```
 
 Browse devices on the left; the selected device's tabs are on the right —
@@ -95,12 +126,9 @@ devices/menus/groups are published; new devices are auto-added with sane default
 Ships with a hardened systemd unit.
 
 ```sh
-masterbus-signalk <can-interface> [listen-addr] [cache-dir]
-# e.g. masterbus-signalk can0 0.0.0.0:3009 /var/lib/masterbus
+masterbus-signalk [listen-addr] [cache-dir]
+# e.g. masterbus-signalk 0.0.0.0:3009 /var/lib/masterbus
 ```
-
-To act as the bus master (so devices keep responding when no hardware master is
-present), set `HEARTBEAT_MASTER=<24-bit hex>` in the environment.
 
 ### C library and demos
 

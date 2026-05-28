@@ -3,14 +3,15 @@
 # Install:
 #   sudo cp target/<triple>/release/masterbus-signalk /usr/local/bin/
 #   sudo cp masterbus-signalk.service /etc/systemd/system/
-#   sudo mkdir -p /etc/default/masterbus-signalk
-#   # set your CAN interface / listen address:
-#   echo 'CAN_IFACE=can0' | sudo tee /etc/default/masterbus-signalk/config
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now masterbus-signalk
 #
-# Config dir /etc/default/masterbus-signalk/ holds:
-#   config       environment (CAN_IFACE, LISTEN); read by systemd.
+# Transport + master role come from /etc/default/masterbus/config.ini
+# (auto-created on first run with detected defaults; review and edit as
+# needed — see `masterbus::FileConfig` for the format).
+#
+# /etc/default/masterbus-signalk/ optionally holds:
+#   config       environment overrides (e.g. LISTEN); read by systemd.
 #   mapping.ini  per-device publish toggles; the service auto-creates and updates
 #                it as devices are discovered. Edit the true/false flags while the
 #                service is stopped, then restart.
@@ -28,12 +29,11 @@ Wants=network-online.target
 Type=exec
 SyslogIdentifier=masterbus-signalk
 
-# Defaults; override in /etc/default/masterbus-signalk/config (CAN_IFACE, LISTEN).
-Environment=CAN_IFACE=can0
+# Default listen address; override in /etc/default/masterbus-signalk/config.
 Environment=LISTEN=0.0.0.0:3009
 Environment=MAPPING=/etc/default/masterbus-signalk/mapping.ini
 EnvironmentFile=-/etc/default/masterbus-signalk/config
-ExecStart=/usr/local/bin/masterbus-signalk ${CAN_IFACE} ${LISTEN} %S/masterbus
+ExecStart=/usr/local/bin/masterbus-signalk ${LISTEN} %S/masterbus
 
 Restart=on-failure
 RestartSec=5
@@ -43,13 +43,13 @@ StateDirectory=masterbus
 
 # Hardening. The service auto-rewrites mapping.ini in /etc, which a DynamicUser
 # sandbox can't own, so it runs as root but is tightly confined: the only
-# writable paths are the config dir and the state dir, the only capability is
+# writable paths are the config dirs and the state dir, the only capability is
 # CAP_NET_RAW (for SocketCAN), and the syscall/address-family surface is limited.
 CapabilityBoundingSet=CAP_NET_RAW
 AmbientCapabilities=CAP_NET_RAW
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/default/masterbus-signalk
+ReadWritePaths=/etc/default/masterbus-signalk /etc/default/masterbus
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes

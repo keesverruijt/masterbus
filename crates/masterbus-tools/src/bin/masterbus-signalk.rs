@@ -6,8 +6,11 @@
 //! (data connection type: Signal K, over TCP).
 //!
 //! ```text
-//! masterbus-signalk <can-interface> [listen-addr] [cache-dir]
+//! masterbus-signalk [listen-addr] [cache-dir]
 //! ```
+//!
+//! Transport (USB / SocketCAN) and master role come from the per-host config
+//! file (see `masterbus::FileConfig`); the file is created on first run.
 //!
 //! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
 //! in [`map_field`]; it currently covers batteries and the CombiMaster and is
@@ -20,10 +23,6 @@
 //! the battery `cluster` group = on) and the file is rewritten; edit the
 //! `true`/`false` flags while the service is stopped. Without `MAPPING`, every
 //! mapped field is published.
-
-// The bus runtime is reachable only on Linux (SocketCAN); elsewhere the helpers
-// type-check but are unused.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
@@ -46,46 +45,20 @@ const RATE: Duration = Duration::from_millis(1000);
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let iface = match args.next() {
-        Some(s) => s,
-        None => {
-            eprintln!("usage: masterbus-signalk <can-interface> [listen-addr] [cache-dir]");
-            eprintln!("       listen-addr defaults to {DEFAULT_LISTEN}");
-            std::process::exit(1);
-        }
-    };
     let listen = args.next().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
-    // HEARTBEAT_MASTER=<hex addr> makes us drive the bus as master (class-0x05
-    // heartbeat) so devices announce/respond when no hardware master is present.
-    let heartbeat_master = std::env::var("HEARTBEAT_MASTER").ok().and_then(|s| {
-        u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
-    });
-    let config = Config {
-        cache_path: args.next().map(Into::into),
-        heartbeat_master,
-        ..Default::default()
-    };
+    let config = Config { cache_path: args.next().map(Into::into), ..Default::default() };
     let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 
-    #[cfg(target_os = "linux")]
-    {
-        match MasterBus::socketcan(&iface, config) {
-            Ok(bus) => {
-                if let Err(e) = run(bus, &listen, mapping.as_deref()) {
-                    eprintln!("masterbus-signalk: {e}");
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                eprintln!("masterbus-signalk: connect failed: {e}");
-                std::process::exit(2);
-            }
+    let bus = match MasterBus::auto(config) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("masterbus-signalk: connect failed: {e}");
+            std::process::exit(2);
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (iface, listen, config, mapping);
-        eprintln!("masterbus-signalk requires Linux/SocketCAN");
+    };
+    if let Err(e) = run(bus, &listen, mapping.as_deref()) {
+        eprintln!("masterbus-signalk: {e}");
+        std::process::exit(1);
     }
 }
 

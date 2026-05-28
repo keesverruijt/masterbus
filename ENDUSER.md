@@ -30,14 +30,13 @@ application that lists every device, lets you drill into its menus
 (Summary, Monitoring, Configuration, Service, Settings), and shows live
 values. Writable fields can be edited inline.
 
-On Linux with a CAN adapter, tell it which interface to use:
-
-    masterbus-tui can0
-
-On macOS, Windows, or Linux with the Mastervolt USB Interface plugged
-in, no argument is needed:
-
     masterbus-tui
+
+The first run creates `/etc/default/masterbus/config.ini` (or
+`$HOME/.local/masterbus/config.ini` if `/etc` isn't writable) with the
+detected transport (USB link if present, otherwise the lone CAN
+interface). Edit that file to switch transports or enable bus-master
+mode; see the **Configuration** section in the project README.
 
 You'll see a left pane with all alive devices and a right pane with
 that device's tabs. `Tab` / `Shift+Tab` switch tabs, arrow keys move
@@ -55,7 +54,7 @@ For pulling data off the bus in a long-running stream, use
 `masterbus-signalk`. It connects to the bus, subscribes to every field,
 and emits Signal K deltas (newline-delimited JSON) on a TCP socket.
 
-    masterbus-signalk can0 0.0.0.0:3009
+    masterbus-signalk 0.0.0.0:3009
 
 Then `nc localhost 3009` shows the live stream. Any language that can
 read a TCP socket and parse JSON can consume this — Python, Node,
@@ -77,9 +76,9 @@ shell script or cron), the API is exposed through the
 use masterbus::{Config, MasterBus, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Linux/SocketCAN: MasterBus::socketcan("can0", config).
-    // macOS / Windows or USB-link on Linux: MasterBus::usb(None, config).
-    let bus = MasterBus::socketcan("can0", Config::default())?;
+    // Picks the transport from the per-host config file (auto-created on
+    // first run; see `masterbus::FileConfig`).
+    let bus = MasterBus::auto(Config::default())?;
     let device = bus.device(0x188EA2);          // your device id
     let field  = device.field(0x0013);          // your field id (three-digit hex from the TUI)
     field.set(Value::Boolean(true))?;            // turn it on
@@ -89,9 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For shell-script / one-off writes there's also a dedicated CLI:
 
-    masterbus-set-field <transport> <device_id> <field_id> <value>
+    masterbus-set-field <device_id> <field_id> <value>
 
-- `<transport>` is `can0` on Linux or `usb` for the Mastervolt USB Interface.
 - `<device_id>` is the hex address from the TUI's title bar, e.g.
   `188EA2`.
 - `<field_id>` is the three-digit hex shown next to each editable row in
@@ -107,9 +105,9 @@ For shell-script / one-off writes there's also a dedicated CLI:
 
 Examples:
 
-    masterbus-set-field can0 188EA2 0x013 on            # toggle a CombiMaster bool
-    masterbus-set-field can0 3A3B4B 0x104 "Nav Chg"      # rename Magic Nav Chg
-    masterbus-set-field usb  53A493 0x160 "Schakelaar"   # rename EasyView Switch 1
+    masterbus-set-field 188EA2 0x013 on             # toggle a CombiMaster bool
+    masterbus-set-field 3A3B4B 0x104 "Nav Chg"      # rename Magic Nav Chg
+    masterbus-set-field 53A493 0x160 "Schakelaar"   # rename EasyView Switch 1
 
 The TUI shows the *device id* (title bar, e.g. `[188EA2]`) and the
 *field id* on every editable row, so picking the right ids is a

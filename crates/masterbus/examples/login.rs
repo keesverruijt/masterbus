@@ -5,10 +5,10 @@
 //! Verifies the writability of one field before and after so the effect of
 //! a successful login is visible.
 //!
-//! Usage (Linux):
-//!     login <can-iface> <device-hex>                             # read current level
-//!     login <can-iface> <device-hex> <level> <password> [field]  # try login
-//!     login <can-iface> <device-hex> logout [field]              # logout
+//! Usage:
+//!     login <device-hex>                             # read current level
+//!     login <device-hex> <level> <password> [field]  # try login
+//!     login <device-hex> logout [field]              # logout
 //!
 //! `<level>` is one of: installer, distributor, mvservice (case-insensitive).
 //! `<password>` is parsed as a number (e.g. `123`, `-45.6`); whatever value
@@ -18,7 +18,8 @@
 //! `[field]` is an optional field index to query `is_writable` on; defaults
 //! to `0x17`.
 //!
-//! USB: same as `devices`: `login usb [serial] <device-hex> ...`.
+//! Transport (USB / SocketCAN) and master role come from the per-host config
+//! file ([`masterbus::FileConfig`]); the file is created on first run.
 
 use std::time::Duration;
 
@@ -44,19 +45,15 @@ fn dump_writable(device: &Device, field: FieldId) {
 }
 
 fn main() {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let config = Config {
-        heartbeat_master: std::env::var("HEARTBEAT_MASTER")
-            .ok()
-            .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()),
-        ..Config::default()
-    };
-    let bus = connect(&mut args, config);
-
+    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("missing <device-hex> argument");
+        eprintln!("usage: login <device-hex> [<level> <password> | logout] [field]");
         std::process::exit(1);
     }
+    let bus = MasterBus::auto(Config::default()).unwrap_or_else(|e| {
+        eprintln!("connect failed: {e}");
+        std::process::exit(2)
+    });
     let dev_id = u32::from_str_radix(args[0].trim_start_matches("0x"), 16)
         .expect("device id must be 24-bit hex (e.g. 188EA2)");
     let device = bus.device(dev_id);
@@ -120,56 +117,4 @@ fn main() {
         println!("\npost-attempt writability:");
         dump_writable(&device, field);
     }
-}
-
-#[cfg(target_os = "linux")]
-fn connect(args: &mut Vec<String>, config: Config) -> MasterBus {
-    let r = match args.first().map(String::as_str) {
-        Some("usb") => {
-            let serial_or_dev = args.get(1).cloned();
-            // Distinguish `login usb <device>` from `login usb <serial> <device>`.
-            let (serial, drop_n) = match &serial_or_dev {
-                Some(s) if !looks_like_device_hex(s) => (Some(s.clone()), 2),
-                _ => (None, 1),
-            };
-            args.drain(..drop_n);
-            MasterBus::usb(serial.as_deref(), config)
-        }
-        Some(iface) => {
-            // Clone the iface before mutating `args` so we don't hold an
-            // immutable borrow into the same Vec across `remove`.
-            let iface = iface.to_string();
-            args.remove(0);
-            MasterBus::socketcan(&iface, config)
-        }
-        None => {
-            eprintln!("usage: login <can-iface> <device-hex> [level] [field-hex]");
-            eprintln!("       login usb [serial] <device-hex> [level] [field-hex]");
-            std::process::exit(1);
-        }
-    };
-    r.unwrap_or_else(|e| {
-        eprintln!("connect failed: {e}");
-        std::process::exit(2)
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn connect(args: &mut Vec<String>, config: Config) -> MasterBus {
-    // First arg may be a serial or the device hex. Heuristic: a 24-bit hex
-    // (6 chars, all hex) is a device id; anything else is a serial.
-    let (serial, drop_n) = match args.first() {
-        Some(s) if !looks_like_device_hex(s) => (Some(s.clone()), 1),
-        _ => (None, 0),
-    };
-    args.drain(..drop_n);
-    MasterBus::usb(serial.as_deref(), config).unwrap_or_else(|e| {
-        eprintln!("connect failed: {e}");
-        std::process::exit(2)
-    })
-}
-
-fn looks_like_device_hex(s: &str) -> bool {
-    let t = s.trim_start_matches("0x");
-    t.len() == 6 && t.chars().all(|c| c.is_ascii_hexdigit())
 }

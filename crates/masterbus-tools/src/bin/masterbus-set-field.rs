@@ -1,10 +1,9 @@
 //! One-shot CLI to write a single field on a MasterBus device.
 //!
 //! ```text
-//! masterbus-set-field <transport> <device_id> <field_id> <value>
+//! masterbus-set-field <device_id> <field_id> <value>
 //! ```
 //!
-//! - `<transport>`: `can0` (Linux SocketCAN) or `usb` (Mastervolt USB link).
 //! - `<device_id>`: hex device id from `masterbus-tui`'s title bar — e.g.
 //!   `188EA2` or `0x188EA2`.
 //! - `<field_id>`: hex field id as shown next to each row in the TUI
@@ -16,6 +15,9 @@
 //!       option's exact label string.
 //!     - **Text**: the new string content; the current sid is taken from
 //!       the cached value.
+//!
+//! Transport (USB / SocketCAN) and master role come from the per-host config
+//! file (see `masterbus::FileConfig`); the file is created on first run.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -24,39 +26,40 @@ use masterbus::{Config, DeviceId, FieldId, MasterBus, Value, VisualizationType};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 4 {
+    if args.len() != 3 {
         eprintln!(
-            "usage: masterbus-set-field <transport> <device_id> <field_id> <value>\n\
+            "usage: masterbus-set-field <device_id> <field_id> <value>\n\
              \n\
-             <transport>   can0 | usb\n\
              <device_id>   hex 24-bit address (e.g. 188EA2)\n\
              <field_id>    hex u16; bit 8 selects Btm1 (0) or Btm3 (1) channel\n\
              <value>       boolean (true/false), number, list index OR option label,\n\
-                           or free text — interpreted per the field's type"
+                           or free text — interpreted per the field's type\n\
+             \n\
+             Transport + heartbeat-master role come from the config file\n\
+             (see `masterbus::FileConfig` for the location and format)."
         );
         return ExitCode::from(1);
     }
-    let transport = &args[0];
-    let device_id = match parse_hex_u32(&args[1]) {
+    let device_id = match parse_hex_u32(&args[0]) {
         Some(v) if v <= 0x00FF_FFFF => v as DeviceId,
         _ => {
-            eprintln!("error: device_id must be a 24-bit hex value (got {:?})", args[1]);
+            eprintln!("error: device_id must be a 24-bit hex value (got {:?})", args[0]);
             return ExitCode::from(2);
         }
     };
-    let field_id = match parse_hex_u32(&args[2]) {
+    let field_id = match parse_hex_u32(&args[1]) {
         Some(v) if v <= u16::MAX as u32 => v as FieldId,
         _ => {
-            eprintln!("error: field_id must fit in 16 bits (got {:?})", args[2]);
+            eprintln!("error: field_id must fit in 16 bits (got {:?})", args[1]);
             return ExitCode::from(2);
         }
     };
-    let value_arg = &args[3];
+    let value_arg = &args[2];
 
     // Be generous on the connect timeout: we're only doing one round-trip and
     // a quiet bus can take a moment to broadcast.
     let config = Config { connect_timeout: Duration::from_secs(5), ..Default::default() };
-    let bus = match build_bus(transport, config) {
+    let bus = match MasterBus::auto(config) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: connect failed: {e}");
@@ -97,25 +100,6 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: set failed: {e}");
             ExitCode::from(7)
-        }
-    }
-}
-
-fn build_bus(transport: &str, config: Config) -> masterbus::Result<MasterBus> {
-    match transport {
-        "usb" => MasterBus::usb(None, config),
-        iface => {
-            #[cfg(target_os = "linux")]
-            {
-                MasterBus::socketcan(iface, config)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = iface;
-                Err(masterbus::Error::Connection(
-                    "SocketCAN requires Linux; pass `usb` on macOS / Windows".into(),
-                ))
-            }
         }
     }
 }

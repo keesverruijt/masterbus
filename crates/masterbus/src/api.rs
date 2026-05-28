@@ -13,6 +13,7 @@ use crate::model::{
 };
 use crate::runtime::{Config, DeviceEvent, Engine, ValueUpdate};
 use crate::protocol::VisualizationType;
+use crate::settings::{DeviceType, FileConfig};
 use crate::transport::Transport;
 use crate::value::{Value, WriteValue};
 
@@ -39,6 +40,36 @@ impl MasterBus {
     /// Connect over any [`Transport`].
     pub fn with_transport(transport: Box<dyn Transport>, config: Config) -> Result<Self> {
         Ok(MasterBus { engine: Engine::connect(transport, config)? })
+    }
+
+    /// Connect using the standard per-host config file (see [`FileConfig`]).
+    ///
+    /// On first run the file is created with auto-detected values: a USB link
+    /// if one is plugged in, otherwise the lone CAN interface. Path resolution
+    /// and the creation step both log to stderr.
+    ///
+    /// `config` lets callers override any [`Config`] field; for
+    /// [`Config::heartbeat_master`], a `Some` value wins, `None` falls back to
+    /// the file's setting.
+    pub fn auto(mut config: Config) -> Result<Self> {
+        let file = FileConfig::load_or_create()?;
+        if config.heartbeat_master.is_none() {
+            config.heartbeat_master = file.heartbeat_master;
+        }
+        let name = if file.device_name.is_empty() { None } else { Some(file.device_name.as_str()) };
+        match file.device_type {
+            DeviceType::Usb => Self::usb(name, config),
+            #[cfg(target_os = "linux")]
+            DeviceType::Can => {
+                let iface = name.unwrap_or("can0");
+                Self::socketcan(iface, config)
+            }
+            #[cfg(not(target_os = "linux"))]
+            DeviceType::Can => Err(Error::Connection(format!(
+                "{}: device_type = can but SocketCAN is Linux-only",
+                file.path.display()
+            ))),
+        }
     }
 
     /// Currently-alive devices.

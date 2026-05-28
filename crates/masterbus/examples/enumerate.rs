@@ -2,25 +2,23 @@
 //! menu, and print every group/field (with writability) plus the monitoring
 //! values.
 //!
-//! Usage (Linux):     `enumerate <can-iface>`     SocketCAN
-//!                    `enumerate usb [serial]`    USB link
-//! Usage (others):    `enumerate [serial]`        USB link (the only transport)
+//! Usage: `enumerate`
 //!
-//! Env: `CACHE_DIR=<path>`              on-disk schema cache (per device, by serial).
-//!      `HEARTBEAT_MASTER=<24-bit hex>` drive the bus as master.
+//! Transport (USB / SocketCAN) and master role come from the per-host config
+//! file ([`masterbus::FileConfig`]); the file is created on first run.
+//! Env: `CACHE_DIR=<path>` for an on-disk schema cache (per device, by serial).
 
 use masterbus::{Config, MasterBus, Menu};
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let config = Config {
-        heartbeat_master: std::env::var("HEARTBEAT_MASTER")
-            .ok()
-            .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()),
         cache_path: std::env::var_os("CACHE_DIR").map(Into::into),
         ..Config::default()
     };
-    let bus = connect(&args, config);
+    let bus = MasterBus::auto(config).unwrap_or_else(|e| {
+        eprintln!("connect failed: {e}");
+        std::process::exit(2)
+    });
 
     let devices = bus.devices_all();
     println!("{} device(s)", devices.len());
@@ -67,30 +65,4 @@ fn main() {
             }
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn connect(args: &[String], config: Config) -> MasterBus {
-    let r = match args.first().map(String::as_str) {
-        Some("usb") => MasterBus::usb(args.get(1).map(String::as_str), config),
-        Some(iface) => MasterBus::socketcan(iface, config),
-        None => {
-            eprintln!("usage: enumerate <can-iface>      # SocketCAN");
-            eprintln!("       enumerate usb [serial]     # USB link");
-            eprintln!("       (env: CACHE_DIR, HEARTBEAT_MASTER)");
-            std::process::exit(1);
-        }
-    };
-    r.unwrap_or_else(|e| {
-        eprintln!("connect failed: {e}");
-        std::process::exit(2)
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn connect(args: &[String], config: Config) -> MasterBus {
-    MasterBus::usb(args.first().map(String::as_str), config).unwrap_or_else(|e| {
-        eprintln!("connect failed: {e}");
-        std::process::exit(2)
-    })
 }

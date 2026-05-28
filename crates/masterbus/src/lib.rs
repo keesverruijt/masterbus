@@ -13,13 +13,13 @@
 //! [`MasterBus`] → [`Device`] → [`Group`] → [`Field`].
 //!
 //! ```no_run
-//! # #[cfg(target_os = "linux")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use masterbus::{Config, MasterBus, Menu, Value};
 //!
-//! // Connect over a Linux SocketCAN interface. `connect` returns as soon as one
-//! // device is heard — no multi-second enumeration wait.
-//! let bus = MasterBus::socketcan("can0", Config::default())?;
+//! // One-call connect using the per-host config file (auto-created on first
+//! // run; see [`FileConfig`]). Or call [`MasterBus::socketcan`] /
+//! // [`MasterBus::usb`] directly to bypass the file.
+//! let bus = MasterBus::auto(Config::default())?;
 //!
 //! // Browse the monitoring tab of every device currently on the bus.
 //! for device in bus.devices() {
@@ -37,8 +37,6 @@
 //! let applied = device.field(23).set(Value::Float(6.0))?;
 //! println!("AC input limit is now {applied:?}");
 //! # Ok(()) }
-//! # #[cfg(not(target_os = "linux"))]
-//! # fn main() {}
 //! ```
 //!
 //! # Two API surfaces over one engine
@@ -55,12 +53,11 @@
 //!   alongside its own (terminal input, timers, …).
 //!
 //!   ```no_run
-//!   # #[cfg(target_os = "linux")]
 //!   # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!   use std::time::Duration;
 //!   use masterbus::{Config, DeviceEvent, MasterBus, Menu};
 //!
-//!   let bus = MasterBus::socketcan("can0", Config::default())?;
+//!   let bus = MasterBus::auto(Config::default())?;
 //!   let events = bus.device_events();
 //!
 //!   // React to every device that comes online: subscribe to its
@@ -83,8 +80,6 @@
 //!       }
 //!   }
 //!   # Ok(()) }
-//!   # #[cfg(not(target_os = "linux"))]
-//!   # fn main() {}
 //!   ```
 //!
 //!   Dropping the [`Subscription`] unsubscribes from the engine; see
@@ -137,6 +132,7 @@ pub mod error;
 pub mod model;
 pub mod protocol;
 mod runtime;
+pub mod settings;
 pub mod transport;
 pub mod value;
 
@@ -148,4 +144,5 @@ pub use model::{
 };
 pub use protocol::VisualizationType;
 pub use runtime::{Config, DeviceEvent, ValueUpdate};
+pub use settings::{DeviceType, FileConfig};
 pub use value::{Date, Time, Value, WriteValue};

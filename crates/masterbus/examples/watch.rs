@@ -9,13 +9,10 @@
 //!   — a polled stream of [`ValueUpdate`]s for a chosen set of fields,
 //!   keyed by `(device, field)` and labelled with the decoded [`Value`].
 //!
-//! Usage (Linux):    `watch <can-iface>`     SocketCAN
-//!                   `watch usb [serial]`    USB link
-//! Usage (others):   `watch [serial]`        USB link (the only transport)
+//! Usage: `watch`
 //!
-//! Env: `HEARTBEAT_MASTER=<24-bit hex>` makes us drive the bus as master
-//! so devices announce themselves — needed when no hardware master is
-//! present.
+//! Transport (USB / SocketCAN) and master role come from the per-host config
+//! file ([`masterbus::FileConfig`]); the file is created on first run.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -29,14 +26,10 @@ use masterbus::{Config, DeviceEvent, DeviceId, MasterBus, Menu, Subscription};
 const POLL: Duration = Duration::from_millis(1_000);
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let config = Config {
-        heartbeat_master: std::env::var("HEARTBEAT_MASTER")
-            .ok()
-            .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()),
-        ..Config::default()
-    };
-    let bus = connect(&args, config);
+    let bus = MasterBus::auto(Config::default()).unwrap_or_else(|e| {
+        eprintln!("connect failed: {e}");
+        std::process::exit(2)
+    });
 
     // device_events: a single `Receiver<DeviceEvent>` for the whole bus. We
     // re-use the same receiver clone for the lifetime of the program.
@@ -91,30 +84,4 @@ fn main() {
             }
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn connect(args: &[String], config: Config) -> MasterBus {
-    let r = match args.first().map(String::as_str) {
-        Some("usb") => MasterBus::usb(args.get(1).map(String::as_str), config),
-        Some(iface) => MasterBus::socketcan(iface, config),
-        None => {
-            eprintln!("usage: watch <can-iface>        # SocketCAN");
-            eprintln!("       watch usb [serial]       # USB link");
-            std::process::exit(1);
-        }
-    };
-    r.unwrap_or_else(|e| {
-        eprintln!("connect failed: {e}");
-        std::process::exit(2)
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn connect(args: &[String], config: Config) -> MasterBus {
-    let serial = args.first().map(String::as_str);
-    MasterBus::usb(serial, config).unwrap_or_else(|e| {
-        eprintln!("connect failed: {e}");
-        std::process::exit(2)
-    })
 }

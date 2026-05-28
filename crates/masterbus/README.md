@@ -21,7 +21,7 @@ Two transports ship out of the box:
 | Crate / OS | Linux | macOS | Windows |
 |---|---|---|---|
 | `masterbus` library | ✅ SocketCAN **and** USB link | ✅ USB link | ✅ USB link |
-| `masterbus-tools` binaries (`-tui`, `-signalk`, `-set-field`) | ✅ | ✅ tui + set-field (signalk needs Linux/SocketCAN) | ✅ tui + set-field (same caveat) |
+| `masterbus-tools` binaries (`-tui`, `-signalk`, `-set-field`) | ✅ | ✅ (USB link only) | ✅ (USB link only) |
 | `masterbus-ffi` C ABI | ✅ | ✅ | ✅ |
 
 SocketCAN is compiled in only when `target_os = "linux"`; the USB transport is
@@ -31,13 +31,13 @@ the bus or a developer laptop using the USB interface.
 ## Example
 
 ```rust,no_run
-# #[cfg(target_os = "linux")]
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 use masterbus::{Config, MasterBus, Menu};
 
-// SocketCAN on Linux, or `MasterBus::usb(None, Config::default())` for
-// the Mastervolt USB Interface on any of Linux / macOS / Windows.
-let bus = MasterBus::socketcan("can0", Config::default())?;
+// One-call connect using the per-host config file (auto-created on first run;
+// see `masterbus::FileConfig`). Or call `MasterBus::socketcan(iface, …)` /
+// `MasterBus::usb(serial, …)` directly to bypass the file.
+let bus = MasterBus::auto(Config::default())?;
 for device in bus.devices() {
     println!("{} (id {})", device.name()?, device.id());
     for group in device.tab(Menu::Monitoring)? {
@@ -47,9 +47,25 @@ for device in bus.devices() {
     }
 }
 # Ok(()) }
-# #[cfg(not(target_os = "linux"))]
-# fn main() {}
 ```
+
+### Per-host config file
+
+`MasterBus::auto` reads (and on first run, creates) a small INI:
+
+| OS | Path |
+|----|------|
+| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) |
+| Linux (user) / macOS / Windows | `$HOME/.local/masterbus/config.ini` |
+
+```ini
+heartbeat_master = 000001       # 24-bit hex, or comment out to stay passive
+device_type      = can          # "usb" or "can"
+device_name      = can0         # CAN iface, or USB-link serial (blank = first)
+```
+
+On creation, a Mastervolt USB link is preferred; otherwise the lone CAN
+interface is selected. The path and detected values are logged to stderr.
 
 See the [repository](https://github.com/keesverruijt/masterbus) for the full
 workspace (C ABI, TUI, Signal K sidecar, one-shot CLI writer) and

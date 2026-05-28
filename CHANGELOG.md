@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `MasterBus::auto(Config)` — one-call constructor that reads (and on
+  first run creates) a per-host config file, then picks the right
+  transport. The file lives at `/etc/default/masterbus/config.ini`
+  (or `$HOME/.local/masterbus/config.ini` if `/etc` isn't writable),
+  carries three keys (`heartbeat_master`, `device_type`, `device_name`),
+  and is auto-populated from the hardware on first run (USB link
+  preferred; otherwise the lone CAN interface). The path and detected
+  values are logged to stderr on creation.
+- New public types: `masterbus::FileConfig`, `masterbus::DeviceType`.
+
+### Changed
+- **All four binaries** (`masterbus-tui`, `masterbus-signalk`,
+  `masterbus-set-field`, plus the examples) now use `MasterBus::auto`.
+  The `<transport>` / `<can-iface>` positional argument and the
+  `--heartbeat-master <hex>` flag are gone — edit the config file to
+  switch transports or change the master role. `masterbus-set-field`
+  now takes only `<device_id> <field_id> <value>`; `masterbus-signalk`
+  only `[listen-addr] [cache-dir]`.
+- The bundled systemd unit no longer sets `CAN_IFACE` — transport
+  comes from `/etc/default/masterbus/config.ini`. `ReadWritePaths`
+  extended to include that directory.
+
 ## [0.3.1] - 2026-05-28
 
 First tagged release on the 0.3 line (0.3.0 was bumped in source but
