@@ -317,11 +317,6 @@ mod tests {
             encode_login_write(0x53A493, 0x02, <redacted>),
             (0x07_53A493, vec![0x08, 0x19, 0x02, 0x00, <redacted>]),
         );
-        // MV Service login on 0x43DF24 (<redacted>).
-        assert_eq!(
-            encode_login_write(0x43DF24, 0x03, <redacted>),
-            (0x07_43DF24, vec![0x08, 0x19, 0x03, 0x00, <redacted>]),
-        );
         // Logout: 4 bytes, no code value.
         assert_eq!(encode_logout(0x43DF24), (0x07_43DF24, vec![0x08, 0x19, 0x00, 0x00]));
         // Read: 2 bytes.

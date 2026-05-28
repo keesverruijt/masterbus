@@ -292,7 +292,7 @@ fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> (u32, u32) {
 /// - Per-device (serial), not per-article/firmware — same-model devices
 ///   can differ (e.g. one battery in a cluster exposes an extra group).
 /// - Per access level — writability flips per level, so a schema
-///   discovered as End User can't be served as MV Service. Each level
+///   discovered as End User can't be served as Distributor. Each level
 ///   gets its own cache file.
 pub(super) fn discover_menu(
     disc: &mut Disc,

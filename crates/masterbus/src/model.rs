@@ -37,8 +37,6 @@ pub enum AccessLevel {
     Installer = 1,
     /// `code = <redacted>`.
     Distributor = 2,
-    /// `code = <redacted>`.
-    MvService = 3,
 }
 
 impl AccessLevel {
@@ -54,7 +52,6 @@ impl AccessLevel {
             AccessLevel::EndUser => None,
             AccessLevel::Installer => Some(<redacted>),
             AccessLevel::Distributor => Some(<redacted>),
-            AccessLevel::MvService => Some(<redacted>),
         }
     }
 
@@ -64,7 +61,6 @@ impl AccessLevel {
             0 => Some(AccessLevel::EndUser),
             1 => Some(AccessLevel::Installer),
             2 => Some(AccessLevel::Distributor),
-            3 => Some(AccessLevel::MvService),
             _ => None,
         }
     }

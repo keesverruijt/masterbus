@@ -87,12 +87,11 @@ pub enum EditKind {
     Text { str_id: u16, buf: String },
 }
 
-/// The fixed four access levels, in display order. Used by the login modal.
-pub const LOGIN_LEVELS: [AccessLevel; 4] = [
+/// The fixed three access levels, in display order. Used by the login modal.
+pub const LOGIN_LEVELS: [AccessLevel; 3] = [
     AccessLevel::EndUser,
     AccessLevel::Installer,
     AccessLevel::Distributor,
-    AccessLevel::MvService,
 ];
 
 /// A modal that picks an access level for the currently-selected device.
@@ -746,6 +745,5 @@ pub fn level_label(level: AccessLevel) -> &'static str {
         AccessLevel::EndUser => "End User",
         AccessLevel::Installer => "Installer",
         AccessLevel::Distributor => "Distributor",
-        AccessLevel::MvService => "MV Service",
     }
 }

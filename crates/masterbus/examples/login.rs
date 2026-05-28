@@ -25,7 +25,6 @@ fn parse_level(s: &str) -> Option<AccessLevel> {
         "enduser" | "0" | "logout" => Some(AccessLevel::EndUser),
         "installer" | "1" => Some(AccessLevel::Installer),
         "distributor" | "2" => Some(AccessLevel::Distributor),
-        "mvservice" | "service" | "3" => Some(AccessLevel::MvService),
         _ => None,
     }
 }

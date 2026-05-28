@@ -212,7 +212,6 @@ see FINDINGS §3c/3d):
 | `0x00`     | **End User**              | (no code; logout) | —          |
 | `0x01`     | **Installer**             | `<redacted>`      | `<redacted>`  |
 | `0x02`     | **Distributor**           | `<redacted>`    | `<redacted>`  |
-| `0x03`     | **MV Service**            | `<redacted>`  | `<redacted>`  |
 
 The codes are hard-coded in MasterAdjust and universal across devices — the
 GUI sends the same code regardless of device type. The level byte in the
