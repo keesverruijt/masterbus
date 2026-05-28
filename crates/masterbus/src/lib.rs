@@ -54,6 +54,43 @@
 //!   `crossbeam-channel` receivers, so a TUI or daemon can `select!` bus events
 //!   alongside its own (terminal input, timers, …).
 //!
+//!   ```no_run
+//!   # #[cfg(target_os = "linux")]
+//!   # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!   use std::time::Duration;
+//!   use masterbus::{Config, DeviceEvent, MasterBus, Menu};
+//!
+//!   let bus = MasterBus::socketcan("can0", Config::default())?;
+//!   let events = bus.device_events();
+//!
+//!   // React to every device that comes online: subscribe to its
+//!   // Monitoring tab and print value updates as they arrive.
+//!   while let Ok(ev) = events.recv() {
+//!       if let DeviceEvent::Alive(id) = ev {
+//!           let device = bus.device(id);
+//!           let mut fields = Vec::new();
+//!           for g in device.tab(Menu::Monitoring)? {
+//!               for f in g.fields()? {
+//!                   fields.push(f.index());
+//!               }
+//!           }
+//!           let sub = bus.subscribe(id, fields, Duration::from_secs(1), true);
+//!           std::thread::spawn(move || {
+//!               while let Some(u) = sub.recv() {
+//!                   println!("0x{:06X} fid 0x{:03X} = {:?}", u.device, u.field, u.value);
+//!               }
+//!           });
+//!       }
+//!   }
+//!   # Ok(()) }
+//!   # #[cfg(not(target_os = "linux"))]
+//!   # fn main() {}
+//!   ```
+//!
+//!   Dropping the [`Subscription`] unsubscribes from the engine; see
+//!   the `watch` example in the repo for a fuller program that also
+//!   tears down per-device subscriptions on `DeviceEvent::Offline`.
+//!
 //! # Discovery and caching
 //!
 //! Nothing is enumerated until you ask for it:
