@@ -31,14 +31,23 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_devices(f: &mut Frame, app: &App, area: Rect) {
+    use masterbus::AccessLevel;
     let items: Vec<ListItem> = app
         .device_ids
         .iter()
         .map(|&id| {
             let (sym, color) = status_style(app.device_status(id));
+            // Append " (<level>)" when logged in past End User — uses the
+            // cached level only, no wire query (cheap to call per render).
+            let mut label = app.device_label(id);
+            if let Some(lvl) = app.bus.device(id).cached_access_level()
+                && lvl != AccessLevel::EndUser
+            {
+                label.push_str(&format!(" ({})", crate::app::level_label(lvl)));
+            }
             Line::from(vec![
                 Span::styled(format!("{sym} "), Style::new().fg(color)),
-                Span::raw(app.device_label(id)),
+                Span::raw(label),
             ])
             .into()
         })
@@ -131,7 +140,7 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                 let val = truncate(&val, VALUE_COL);
                 let rw = if field.writeable { "rw" } else { "ro" };
                 ListItem::new(Line::raw(format!(
-                    "  {} {:<22} {val:>VALUE_COL$} {:<4} {}",
+                    "  {} {:<22} {val:>VALUE_COL$} {:<5} {}",
                     field_id_tag(field.index),
                     truncate(&field.name, 22),
                     field.unit,

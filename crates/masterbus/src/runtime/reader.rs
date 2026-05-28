@@ -74,10 +74,19 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
     let frame = frame_from_raw(raw_id, data);
     frame_log("Up", frame.can_class, frame.device_addr, data);
 
-    // Every frame from a device counts as a sign of life — register the
-    // address even before any class-0x04 broadcast lands. Mask the Btm1-meta
-    // shadow flag so 0xBA3B4B and 0x3A3B4B share one entry.
-    state.touch(frame.device_addr & !BTM1_META_ADDR_FLAG);
+    // Only DEVICE-originated frames register a device: a frame's `device_addr`
+    // is the addressed device for master→device requests (class `0x05`/`0x07`/
+    // `0x18`/`0x19`/`0x1A`/`0x1B`/`0x1C`), but the SOURCE device for the
+    // response/push/broadcast classes. SocketCAN loops our own outbound
+    // requests back as `Up` frames, so without this filter we'd register
+    // ourselves (when running as bus master, class `0x05` from our address)
+    // and any other master polling the bus. Real devices stay reachable
+    // because they emit broadcasts / responses / pushes on the device
+    // classes. Mask the Btm1-meta shadow flag so `0xBA3B4B` and `0x3A3B4B`
+    // share one entry.
+    if is_device_originated(frame.can_class) {
+        state.touch(frame.device_addr & !BTM1_META_ADDR_FLAG);
+    }
 
     // Discovery responses (property / schema / per-field metadata) → matching waiter.
     if let Some(key) = waiter_key_for_frame(frame.can_class, frame.device_addr, data) {
@@ -130,4 +139,25 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             }
         }
     }
+}
+
+/// Whether a CAN class is emitted by a *device* (broadcast / response / push)
+/// rather than by a master (request / heartbeat). Used by [`handle_frame`] to
+/// gate auto-registration of devices, so that our own loopback and any other
+/// master polling the bus don't appear as spurious entries in the device
+/// list. See PROTOCOL.md §3 for the class taxonomy.
+fn is_device_originated(can_class: u8) -> bool {
+    matches!(
+        can_class,
+        can_class::DEVICE_BROADCAST           // 0x04 — periodic self-announce
+        | can_class::PROPERTY_INFO            // 0x06 — reply to class-0x07 request
+        | can_class::MONITORING_DATA          // 0x08 — Btm1 value / Btm1 metadata reply
+        | can_class::SCHEMA_DATA              // 0x09 — schema reply (Monitoring)
+        | can_class::SCHEMA_DATA_ALARM        // 0x0A — schema reply (Alarms)
+        | can_class::SCHEMA_DATA_HISTORY      // 0x0B — schema reply / Btm3 value push
+        | can_class::BTM3_META_DATA           // 0x0C — Btm3 metadata reply
+        | can_class::WRITE_ACK                // 0x10 — write/no-value ack
+        | can_class::SCHEMA_DATA_NA           // 0x11 — short / "n/a" schema reply
+        | 0x14                                // metadata error reply (e.g. EasyView's 0x0C errors)
+    )
 }

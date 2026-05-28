@@ -190,6 +190,15 @@ impl Device {
         self.engine.access_level(self.id)
     }
 
+    /// Cached access level, if known — does **not** issue a wire query.
+    /// `None` until the level has been observed at least once (either via
+    /// [`Self::access_level`], [`Self::login`], [`Self::logout`], or any
+    /// scheduler-side discovery that needed to record it). Cheap enough to
+    /// call from a render loop.
+    pub fn cached_access_level(&self) -> Option<AccessLevel> {
+        self.engine.state.access_level(self.id)
+    }
+
     /// Attempt to log this device in at `level` using the f32 access `code`.
     /// The code is vendor-defined per device family; this crate is opaque
     /// to its value. The caller supplies whatever bytes they want sent.
