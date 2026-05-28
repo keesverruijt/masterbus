@@ -56,6 +56,14 @@ impl MasterBus {
         if config.heartbeat_master.is_none() {
             config.heartbeat_master = file.heartbeat_master;
         }
+        // Cache dir: explicit Config override wins; else the file's value, with
+        // a fallback to $HOME/.cache/masterbus when the file's path isn't
+        // writable by this user. `None` in the file means caching is off.
+        if config.cache_path.is_none() {
+            if let Some(requested) = &file.cache_dir {
+                config.cache_path = crate::settings::resolve_cache_dir(requested);
+            }
+        }
         let name = if file.device_name.is_empty() { None } else { Some(file.device_name.as_str()) };
         match file.device_type {
             DeviceType::Usb => Self::usb(name, config),

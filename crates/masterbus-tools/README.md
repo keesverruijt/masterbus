@@ -26,21 +26,25 @@ the lone CAN interface. The chosen path and detected values are logged
 to stderr on creation.
 
 ```ini
-heartbeat_master = 000001       # 24-bit hex; comment out to stay passive
-device_type      = can          # "usb" or "can"
-device_name      = can0         # CAN iface, or USB-link serial (blank = first)
+heartbeat_master = 000001               # 24-bit hex; comment out to stay passive
+device_type      = can                  # "usb" or "can"
+device_name      = can0                 # CAN iface, or USB-link serial (blank = first)
+cache_dir        = /var/lib/masterbus   # schema cache; comment out to disable
 ```
 
 Multiple CAN interfaces with no USB link is an error — edit the file
-and pick one. To switch transports or change the master role, edit the
-file (or delete it to re-auto-detect).
+and pick one. To switch transports, change the master role, or relocate
+the cache, edit the file (or delete it to re-auto-detect). If the
+configured `cache_dir` isn't writable by the running user (e.g.
+`/var/lib/masterbus` for an unprivileged shell), the engine silently
+falls back to `$HOME/.cache/masterbus`.
 
 ## `masterbus-tui`
 
 Terminal UI for browsing devices, viewing live values, and editing
 writable fields.
 
-    masterbus-tui [cache-dir]
+    masterbus-tui
 
 Devices are listed on the left with liveness; the selected device's
 groups and fields are on the right. `Tab` / `Shift-Tab` switch between
@@ -58,9 +62,9 @@ JSON over TCP (default `0.0.0.0:3009`), with values converted to SI
 units. The instance id is the device's name, lowercased and stripped of
 its leading class word (e.g. `BAT Main Batt 4` → `main-batt-4`).
 
-    masterbus-signalk [listen-addr] [cache-dir]
-    # e.g.: masterbus-signalk                            # default port
-    #       masterbus-signalk 0.0.0.0:4000 ~/.cache/masterbus
+    masterbus-signalk [listen-addr]
+    # e.g.: masterbus-signalk                # default port (0.0.0.0:3009)
+    #       masterbus-signalk 0.0.0.0:4000   # bind elsewhere
 
 Sample delta:
 

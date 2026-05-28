@@ -99,15 +99,22 @@ device_type = can
 # When device_type = can: interface name. When usb: optional serial number
 # (blank = first link found).
 device_name = can0
+
+# Where to persist discovered schemas (per device, by serial). The default is
+# /var/lib/masterbus for system installs and $HOME/.cache/masterbus for user
+# installs. A non-writable path silently falls back to $HOME/.cache/masterbus
+# at runtime, so root-owned daemons and user-run tools share schemas when
+# possible. Comment out to disable on-disk caching.
+cache_dir = /var/lib/masterbus
 ```
 
-To change the heartbeat-master behaviour or swap transports, edit the file
-(or delete it and let auto-detection re-create it).
+To change the heartbeat-master behaviour, swap transports, or relocate the
+cache, edit the file (or delete it and let auto-detection re-create it).
 
 ### TUI
 
 ```sh
-masterbus-tui [cache-dir]
+masterbus-tui
 ```
 
 Browse devices on the left; the selected device's tabs are on the right —
@@ -126,8 +133,8 @@ devices/menus/groups are published; new devices are auto-added with sane default
 Ships with a hardened systemd unit.
 
 ```sh
-masterbus-signalk [listen-addr] [cache-dir]
-# e.g. masterbus-signalk 0.0.0.0:3009 /var/lib/masterbus
+masterbus-signalk [listen-addr]
+# e.g. masterbus-signalk 0.0.0.0:3009
 ```
 
 ### C library and demos

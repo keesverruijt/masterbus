@@ -33,12 +33,14 @@ SyslogIdentifier=masterbus-signalk
 Environment=LISTEN=0.0.0.0:3009
 Environment=MAPPING=/etc/default/masterbus-signalk/mapping.ini
 EnvironmentFile=-/etc/default/masterbus-signalk/config
-ExecStart=/usr/local/bin/masterbus-signalk ${LISTEN} %S/masterbus
+ExecStart=/usr/local/bin/masterbus-signalk ${LISTEN}
 
 Restart=on-failure
 RestartSec=5
 
-# Persistent schema cache in /var/lib/masterbus (created and owned automatically).
+# Persistent schema cache in /var/lib/masterbus (created and owned automatically;
+# the path is read from /etc/default/masterbus/config.ini's `cache_dir` key,
+# which defaults to /var/lib/masterbus on first run).
 StateDirectory=masterbus
 
 # Hardening. The service auto-rewrites mapping.ini in /etc, which a DynamicUser

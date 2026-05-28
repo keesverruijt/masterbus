@@ -62,6 +62,9 @@ pub struct FileConfig {
     pub device_type: DeviceType,
     /// CAN interface name, or USB serial number. Empty string = unspecified.
     pub device_name: String,
+    /// On-disk schema cache directory; `None` = caching disabled (the key is
+    /// absent or commented out in the file).
+    pub cache_dir: Option<PathBuf>,
     /// Path the file was loaded from / created at.
     pub path: PathBuf,
 }
@@ -78,7 +81,8 @@ impl FileConfig {
             return parse(&raw, path);
         }
         // Doesn't exist yet — auto-detect and write.
-        let detected = autodetect()?;
+        let mut detected = autodetect()?;
+        detected.cache_dir = default_cache_dir(&path);
         let body = render(&detected);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -89,12 +93,65 @@ impl FileConfig {
         f.write_all(body.as_bytes())
             .map_err(|e| Error::Connection(format!("write {}: {e}", path.display())))?;
         eprintln!(
-            "masterbus: created {} (device_type={:?}, device_name={:?})",
+            "masterbus: created {} (device_type={:?}, device_name={:?}, cache_dir={:?})",
             path.display(),
             detected.device_type,
             detected.device_name,
+            detected.cache_dir,
         );
         Ok(FileConfig { path, ..detected })
+    }
+}
+
+/// Pick a sensible default schema-cache directory based on where the config
+/// file is being created. Mirrors the systemd unit's `StateDirectory` when the
+/// system path is chosen, so root-run daemons and user-run tools share schemas.
+fn default_cache_dir(config_path: &std::path::Path) -> Option<PathBuf> {
+    if config_path.starts_with("/etc/") {
+        Some(PathBuf::from("/var/lib/masterbus"))
+    } else {
+        home_dir().map(|h| h.join(".cache").join("masterbus"))
+    }
+}
+
+/// Resolve the file's `cache_dir` to a usable directory: try the requested
+/// path first (creating it if needed); if it's not writable, fall back to
+/// `$HOME/.cache/masterbus`. Returns `None` only if both attempts fail.
+///
+/// `None` input means the user intentionally disabled caching (the key was
+/// commented out or absent), so the caller passes `None` straight through.
+pub(crate) fn resolve_cache_dir(requested: &std::path::Path) -> Option<PathBuf> {
+    if try_use_dir(requested) {
+        return Some(requested.to_path_buf());
+    }
+    let home_cache = home_dir()?.join(".cache").join("masterbus");
+    if requested == home_cache {
+        // We already tried that.
+        return None;
+    }
+    if try_use_dir(&home_cache) {
+        eprintln!(
+            "masterbus: {} not writable, falling back to {}",
+            requested.display(),
+            home_cache.display()
+        );
+        return Some(home_cache);
+    }
+    None
+}
+
+/// Best-effort: `mkdir -p` and check we can create a file in the resulting dir.
+fn try_use_dir(dir: &std::path::Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".masterbus-write-probe");
+    match fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -153,6 +210,7 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
     let mut heartbeat_master: Option<DeviceId> = None;
     let mut device_type: Option<DeviceType> = None;
     let mut device_name = String::new();
+    let mut cache_dir: Option<PathBuf> = None;
     for (lineno, line) in raw.lines().enumerate() {
         let lineno = lineno + 1;
         let stripped = line.split(['#', ';']).next().unwrap_or("").trim();
@@ -195,13 +253,18 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
                 });
             }
             "device_name" => device_name = value.to_string(),
+            "cache_dir" => {
+                if !value.is_empty() {
+                    cache_dir = Some(PathBuf::from(value));
+                }
+            }
             _ => {} // forward-compat: ignore unknown keys
         }
     }
     let device_type = device_type.ok_or_else(|| {
         Error::Connection(format!("{}: device_type is required", path.display()))
     })?;
-    Ok(FileConfig { heartbeat_master, device_type, device_name, path })
+    Ok(FileConfig { heartbeat_master, device_type, device_name, cache_dir, path })
 }
 
 /// Render a `FileConfig` to its on-disk INI form, with explanatory comments.
@@ -209,6 +272,10 @@ fn render(cfg: &FileConfig) -> String {
     let hb = match cfg.heartbeat_master {
         Some(v) => format!("heartbeat_master = {:06X}\n", v),
         None => "# heartbeat_master = 000001\n".to_string(),
+    };
+    let cache = match &cfg.cache_dir {
+        Some(p) => format!("cache_dir = {}\n", p.display()),
+        None => "# cache_dir = /var/lib/masterbus\n".to_string(),
     };
     format!(
         "# masterbus configuration.\n\
@@ -222,7 +289,12 @@ fn render(cfg: &FileConfig) -> String {
          \n\
          # When device_type = can: interface name (e.g. can0, vcan0).\n\
          # When device_type = usb: optional USB-link serial number (blank = first).\n\
-         device_name = {dn}\n",
+         device_name = {dn}\n\
+         \n\
+         # Where to persist discovered schemas (per device, by serial). If the\n\
+         # path isn't writable by the running user, the engine falls back to\n\
+         # $HOME/.cache/masterbus. Comment out to disable on-disk caching.\n\
+         {cache}",
         dt = match cfg.device_type {
             DeviceType::Can => "can",
             DeviceType::Usb => "usb",
@@ -241,6 +313,7 @@ fn autodetect() -> Result<FileConfig> {
             heartbeat_master: None,
             device_type: DeviceType::Usb,
             device_name: serial,
+            cache_dir: None,
             path: PathBuf::new(),
         });
     }
@@ -258,6 +331,7 @@ fn autodetect() -> Result<FileConfig> {
                 heartbeat_master: None,
                 device_type: DeviceType::Can,
                 device_name: one.clone(),
+                cache_dir: None,
                 path: PathBuf::new(),
             }),
             many => Err(Error::Connection(format!(
@@ -357,6 +431,7 @@ mod tests {
             heartbeat_master: Some(0x000001),
             device_type: DeviceType::Can,
             device_name: "can0".into(),
+            cache_dir: Some(PathBuf::from("/var/lib/masterbus")),
             path: PathBuf::from("t.ini"),
         };
         let s = render(&cfg);
@@ -364,5 +439,26 @@ mod tests {
         assert_eq!(back.heartbeat_master, Some(1));
         assert_eq!(back.device_type, DeviceType::Can);
         assert_eq!(back.device_name, "can0");
+        assert_eq!(back.cache_dir, Some(PathBuf::from("/var/lib/masterbus")));
+    }
+
+    #[test]
+    fn cache_dir_commented_means_disabled() {
+        let raw = "device_type = can\n# cache_dir = /var/lib/masterbus\n";
+        let cfg = parse(raw, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.cache_dir, None);
+    }
+
+    #[test]
+    fn cache_dir_present() {
+        let raw = "device_type = can\ncache_dir = /tmp/cache\n";
+        let cfg = parse(raw, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.cache_dir, Some(PathBuf::from("/tmp/cache")));
+    }
+
+    #[test]
+    fn default_cache_for_system_path() {
+        let sys = default_cache_dir(std::path::Path::new("/etc/default/masterbus/config.ini"));
+        assert_eq!(sys, Some(PathBuf::from("/var/lib/masterbus")));
     }
 }

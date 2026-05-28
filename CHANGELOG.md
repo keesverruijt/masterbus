@@ -20,14 +20,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - **All four binaries** (`masterbus-tui`, `masterbus-signalk`,
   `masterbus-set-field`, plus the examples) now use `MasterBus::auto`.
-  The `<transport>` / `<can-iface>` positional argument and the
+  The `<transport>` / `<can-iface>` positional argument, the
+  `[cache-dir]` positional, the `CACHE_DIR` env var, and the
   `--heartbeat-master <hex>` flag are gone — edit the config file to
-  switch transports or change the master role. `masterbus-set-field`
-  now takes only `<device_id> <field_id> <value>`; `masterbus-signalk`
-  only `[listen-addr] [cache-dir]`.
-- The bundled systemd unit no longer sets `CAN_IFACE` — transport
-  comes from `/etc/default/masterbus/config.ini`. `ReadWritePaths`
-  extended to include that directory.
+  change any of them. `masterbus-set-field` now takes only
+  `<device_id> <field_id> <value>`; `masterbus-signalk` only
+  `[listen-addr]`; `masterbus-tui` takes no arguments.
+- `FileConfig` gains `cache_dir: Option<PathBuf>`. On creation the key
+  defaults to `/var/lib/masterbus` for system installs and
+  `$HOME/.cache/masterbus` for user installs. At runtime, a non-writable
+  configured path silently falls back to `$HOME/.cache/masterbus`, so
+  root-owned daemons and user-run tools share schemas when possible.
+  Comment the key out to disable on-disk caching entirely.
+- The bundled systemd unit no longer sets `CAN_IFACE` or passes the
+  cache path to `ExecStart` — both come from
+  `/etc/default/masterbus/config.ini`. `ReadWritePaths` extended to
+  include that directory.
 
 ## [0.3.1] - 2026-05-28
 

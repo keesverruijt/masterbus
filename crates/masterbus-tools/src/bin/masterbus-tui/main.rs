@@ -27,16 +27,12 @@ use masterbus::{Config, MasterBus};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: masterbus-tui [cache-dir]");
-        eprintln!("transport + heartbeat-master role come from the config file");
-        eprintln!("(see `masterbus::FileConfig` for the location and format)");
+        eprintln!("usage: masterbus-tui");
+        eprintln!("transport, heartbeat-master role, and schema cache come from");
+        eprintln!("the config file (see `masterbus::FileConfig`)");
         return Ok(());
     }
-    let config = Config {
-        cache_path: args.first().map(Into::into),
-        ..Default::default()
-    };
-    let bus = MasterBus::auto(config)?;
+    let bus = MasterBus::auto(Config::default())?;
     println!("connected; scanning the bus…");
     run_tui(bus)?;
     Ok(())

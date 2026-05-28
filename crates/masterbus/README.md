@@ -59,13 +59,18 @@ for device in bus.devices() {
 | Linux (user) / macOS / Windows | `$HOME/.local/masterbus/config.ini` |
 
 ```ini
-heartbeat_master = 000001       # 24-bit hex, or comment out to stay passive
-device_type      = can          # "usb" or "can"
-device_name      = can0         # CAN iface, or USB-link serial (blank = first)
+heartbeat_master = 000001               # 24-bit hex, or comment out to stay passive
+device_type      = can                  # "usb" or "can"
+device_name      = can0                 # CAN iface, or USB-link serial (blank = first)
+cache_dir        = /var/lib/masterbus   # schema cache; comment out to disable
 ```
 
 On creation, a Mastervolt USB link is preferred; otherwise the lone CAN
-interface is selected. The path and detected values are logged to stderr.
+interface is selected. `cache_dir` defaults to `/var/lib/masterbus` for the
+system file or `$HOME/.cache/masterbus` for the user file, and silently falls
+back to `$HOME/.cache/masterbus` at runtime when the requested path isn't
+writable by the running user. The path and detected values are logged to
+stderr on creation.
 
 See the [repository](https://github.com/keesverruijt/masterbus) for the full
 workspace (C ABI, TUI, Signal K sidecar, one-shot CLI writer) and

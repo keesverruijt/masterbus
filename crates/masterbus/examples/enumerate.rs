@@ -4,18 +4,14 @@
 //!
 //! Usage: `enumerate`
 //!
-//! Transport (USB / SocketCAN) and master role come from the per-host config
-//! file ([`masterbus::FileConfig`]); the file is created on first run.
-//! Env: `CACHE_DIR=<path>` for an on-disk schema cache (per device, by serial).
+//! Transport (USB / SocketCAN), master role, and the schema cache directory
+//! come from the per-host config file ([`masterbus::FileConfig`]); the file
+//! is created on first run.
 
 use masterbus::{Config, MasterBus, Menu};
 
 fn main() {
-    let config = Config {
-        cache_path: std::env::var_os("CACHE_DIR").map(Into::into),
-        ..Config::default()
-    };
-    let bus = MasterBus::auto(config).unwrap_or_else(|e| {
+    let bus = MasterBus::auto(Config::default()).unwrap_or_else(|e| {
         eprintln!("connect failed: {e}");
         std::process::exit(2)
     });

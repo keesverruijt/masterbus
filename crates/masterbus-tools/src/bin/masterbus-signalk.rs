@@ -6,11 +6,12 @@
 //! (data connection type: Signal K, over TCP).
 //!
 //! ```text
-//! masterbus-signalk [listen-addr] [cache-dir]
+//! masterbus-signalk [listen-addr]
 //! ```
 //!
-//! Transport (USB / SocketCAN) and master role come from the per-host config
-//! file (see `masterbus::FileConfig`); the file is created on first run.
+//! Transport (USB / SocketCAN), master role, and the schema cache directory
+//! all come from the per-host config file (see `masterbus::FileConfig`); the
+//! file is created on first run.
 //!
 //! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
 //! in [`map_field`]; it currently covers batteries and the CombiMaster and is
@@ -44,12 +45,10 @@ const MENU: &str = "monitoring";
 const RATE: Duration = Duration::from_millis(1000);
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let listen = args.next().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
-    let config = Config { cache_path: args.next().map(Into::into), ..Default::default() };
+    let listen = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 
-    let bus = match MasterBus::auto(config) {
+    let bus = match MasterBus::auto(Config::default()) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("masterbus-signalk: connect failed: {e}");
