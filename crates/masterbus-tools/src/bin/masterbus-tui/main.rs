@@ -146,6 +146,17 @@ fn spawn_key_reader() -> Receiver<KeyEvent> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // Read-only values modal absorbs any key and just closes.
+    if app.values_open() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::Char('q') => {
+                app.close_values();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.editing() {
         match key.code {
             KeyCode::Enter => app.commit_edit(),
@@ -209,6 +220,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::BackTab => app.prev_tab(),
                 KeyCode::Enter | KeyCode::Char('e') => app.begin_edit(),
                 KeyCode::Char('r') => app.reread_selected(),
+                KeyCode::Char('?') => app.open_values(),
                 KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => app.back_to_devices(),
                 _ => {}
             },

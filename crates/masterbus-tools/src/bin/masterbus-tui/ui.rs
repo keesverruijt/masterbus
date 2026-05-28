@@ -43,6 +43,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.editor.is_some() {
         draw_edit_modal(f, app, f.area());
     }
+    if app.values_modal.is_some() {
+        draw_values_modal(f, app, f.area());
+    }
 }
 
 fn draw_logs(f: &mut Frame, area: Rect) {
@@ -353,6 +356,51 @@ fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(hint, Style::new().fg(Color::DarkGray))),
     ];
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+}
+
+fn draw_values_modal(f: &mut Frame, app: &App, area: Rect) {
+    let Some(view) = &app.values_modal else { return };
+
+    // Width fits the widest "Label (index)" line plus a margin; height fits
+    // every option plus title + border.
+    let widest = view
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, s)| s.chars().count() + 1 + 1 + i.to_string().len() + 1)
+        .max()
+        .unwrap_or(20);
+    let w = (widest as u16 + 4).clamp(28, area.width.saturating_sub(2));
+    let h = (view.options.len() as u16 + 2).clamp(5, area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title(format!(" Values · {} ", view.field_name));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let lines: Vec<Line> = view
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let line = format!("{label} ({i})");
+            if Some(i as i32) == view.current {
+                Line::from(Span::styled(
+                    format!("» {line}"),
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::raw(format!("  {line}")))
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn bordered(title: String, focused: bool) -> Block<'static> {

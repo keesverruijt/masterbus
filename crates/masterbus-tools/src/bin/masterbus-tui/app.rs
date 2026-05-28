@@ -61,6 +61,17 @@ pub enum Row {
     Field(FieldInfo),
 }
 
+/// Snapshot of a list/eventable field used by the `?` "show all values"
+/// modal. Built from the selected field at open time so the modal renders
+/// without having to look anything up live.
+pub struct ValuesView {
+    pub field_name: String,
+    pub options: Vec<String>,
+    /// The index currently set on the device (if known), so it can be
+    /// highlighted in the option list.
+    pub current: Option<i32>,
+}
+
 /// Which pane has the keyboard focus.
 #[derive(PartialEq, Eq)]
 pub enum Focus {
@@ -152,6 +163,10 @@ pub struct App {
     pub values: HashMap<FieldId, Value>,
     pub sub: Option<Subscription>,
     pub editor: Option<Editor>,
+    /// Read-only modal that lists every option of a list/eventable field. `?`
+    /// opens it on the selected row; Esc/q closes. (Named `..._modal` to avoid
+    /// colliding with the `values:` field-value cache below.)
+    pub values_modal: Option<ValuesView>,
     pub login: Option<LoginPrompt>,
     pub pending: Option<Pending>,
     pub tick: usize,
@@ -188,6 +203,7 @@ impl App {
             values: HashMap::new(),
             sub: None,
             editor: None,
+            values_modal: None,
             login: None,
             pending: None,
             tick: 0,
@@ -423,7 +439,7 @@ impl App {
         self.row_sel = 0;
         self.select_first_field();
         self.status =
-            format!("{} / {} — Tab switch · Enter edit · Esc back", self.device_label(id), menu_label(menu));
+            format!("{} / {} — Tab switch · Enter edit · ? values · Esc back", self.device_label(id), menu_label(menu));
     }
 
     fn show_settings(&mut self, id: u32, fields: Vec<FieldInfo>) {
@@ -444,7 +460,7 @@ impl App {
         self.row_sel = 0;
         self.select_first_field();
         self.status = format!(
-            "{} / Settings ({} Btm3 fields) — Tab switch · Enter edit · Esc back",
+            "{} / Settings ({} Btm3 fields) — Tab switch · Enter edit · ? values · Esc back",
             self.device_label(id),
             fields.len()
         );
@@ -604,6 +620,34 @@ impl App {
     pub fn cancel_edit(&mut self) {
         self.editor = None;
         self.status = "edit cancelled".into();
+    }
+
+    /// Read-only "show all values" modal for the selected list/eventable
+    /// field. No-op on non-list fields. The current index (if cached) is
+    /// passed in so the modal can highlight it.
+    pub fn open_values(&mut self) {
+        let Some(info) = self.selected_field().cloned() else { return };
+        if info.options.is_empty() {
+            self.status = format!("{}: no list values to show", info.name);
+            return;
+        }
+        let current = match self.values.get(&info.index) {
+            Some(Value::List { index, .. }) | Some(Value::Eventable { index, .. }) => Some(*index),
+            _ => None,
+        };
+        self.values_modal = Some(ValuesView {
+            field_name: info.name,
+            options: info.options,
+            current,
+        });
+    }
+
+    pub fn close_values(&mut self) {
+        self.values_modal = None;
+    }
+
+    pub fn values_open(&self) -> bool {
+        self.values_modal.is_some()
     }
 
     pub fn commit_edit(&mut self) {
