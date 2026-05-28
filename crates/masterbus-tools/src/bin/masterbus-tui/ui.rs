@@ -17,17 +17,50 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 const VALUE_COL: usize = 21;
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(f.area());
+    let outer = if app.show_logs {
+        // Main pane shrinks; 8-line log pane above the footer.
+        Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(8),
+            Constraint::Length(1),
+        ])
+        .split(f.area())
+    } else {
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(f.area())
+    };
     let panes = Layout::horizontal([Constraint::Length(34), Constraint::Min(0)]).split(outer[0]);
     draw_devices(f, app, panes[0]);
     draw_fields(f, app, panes[1]);
-    draw_footer(f, app, outer[1]);
+    if app.show_logs {
+        draw_logs(f, outer[1]);
+        draw_footer(f, app, outer[2]);
+    } else {
+        draw_footer(f, app, outer[1]);
+    }
     if app.login.is_some() {
         draw_login(f, app, f.area());
     }
     if app.editor.is_some() {
         draw_edit_modal(f, app, f.area());
     }
+}
+
+fn draw_logs(f: &mut Frame, area: Rect) {
+    use tui_logger::{TuiLoggerLevelOutput, TuiLoggerWidget};
+    let widget = TuiLoggerWidget::default()
+        .block(Block::default().borders(Borders::ALL).title(" Logs (~ to hide) "))
+        .style_error(Style::default().fg(Color::Red))
+        .style_warn(Style::default().fg(Color::Yellow))
+        .style_info(Style::default().fg(Color::Green))
+        .style_debug(Style::default().fg(Color::Cyan))
+        .style_trace(Style::default().fg(Color::DarkGray))
+        .output_separator(' ')
+        .output_timestamp(None)
+        .output_level(Some(TuiLoggerLevelOutput::Abbreviated))
+        .output_target(true)
+        .output_file(false)
+        .output_line(false);
+    f.render_widget(widget, area);
 }
 
 fn draw_devices(f: &mut Frame, app: &App, area: Rect) {

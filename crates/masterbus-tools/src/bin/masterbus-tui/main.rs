@@ -25,46 +25,56 @@ use app::{App, Focus, Names};
 use masterbus::{Config, MasterBus};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logger();
+    let logging_in_tui = init_logger();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("usage: masterbus-tui");
         eprintln!("transport, heartbeat-master role, and schema cache come from");
         eprintln!("the config file (see `masterbus::FileConfig`)");
         eprintln!();
-        eprintln!("logs are written to $MASTERBUS_TUI_LOG (default: ./masterbus-tui.log)");
-        eprintln!("filter via RUST_LOG, e.g. RUST_LOG=masterbus=debug");
+        eprintln!("logs go to an in-TUI pane (toggle with `~`), level `info`.");
+        eprintln!("set MASTERBUS_TUI_LOG=<path> to redirect to a file instead.");
         return Ok(());
     }
     let bus = MasterBus::auto(Config::default())?;
     println!("connected; scanning the bus…");
-    run_tui(bus)?;
+    run_tui(bus, logging_in_tui)?;
     Ok(())
 }
 
-/// Send `log` output to a file so it doesn't corrupt the alt-screen TUI.
-/// Default level is `warn` — set `RUST_LOG=masterbus=debug` (etc.) to widen.
-fn init_logger() {
-    let path = std::env::var_os("MASTERBUS_TUI_LOG")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("masterbus-tui.log"));
-    let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
-        // Couldn't open the log file — silently disable logging rather than
-        // corrupting the UI; the TUI runs without any logs in that case.
-        return;
-    };
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .target(env_logger::Target::Pipe(Box::new(file)))
-        .try_init();
+/// Pick a destination for the `log` facade output:
+///
+/// - If `$MASTERBUS_TUI_LOG` is set, append to that file (silent on the UI).
+/// - Otherwise route through `tui-logger`, which the TUI displays in a
+///   toggleable bottom pane.
+///
+/// Returns whether logs land in the in-TUI pane (so the UI knows to render it).
+fn init_logger() -> bool {
+    if let Some(path) = std::env::var_os("MASTERBUS_TUI_LOG") {
+        if let Ok(file) =
+            std::fs::OpenOptions::new().create(true).append(true).open(std::path::PathBuf::from(path))
+        {
+            let _ = env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("warn"),
+            )
+            .target(env_logger::Target::Pipe(Box::new(file)))
+            .try_init();
+        }
+        return false;
+    }
+    // `init_logger` here is `tui_logger::init_logger`, not ours.
+    let _ = tui_logger::init_logger(log::LevelFilter::Trace);
+    tui_logger::set_default_level(log::LevelFilter::Info);
+    true
 }
 
-fn run_tui(bus: MasterBus) -> std::io::Result<()> {
+fn run_tui(bus: MasterBus, logs_in_tui: bool) -> std::io::Result<()> {
     let device_events = bus.device_events();
     let names: Names = Arc::new(Mutex::new(HashMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
     spawn_name_backfill(bus.clone(), names.clone(), stop.clone());
 
-    let mut app = App::new(bus, names);
+    let mut app = App::new(bus, names, logs_in_tui);
     let keys = spawn_key_reader();
 
     let mut terminal = ratatui::init();
@@ -184,6 +194,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.quit(),
         KeyCode::Char('l') | KeyCode::Char('L') => app.open_login(),
+        KeyCode::Char('~') => app.toggle_logs(),
         _ => match app.focus {
             Focus::Devices => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => app.move_device(-1),

@@ -157,12 +157,19 @@ pub struct App {
     pub tick: usize,
     pub status: String,
     pub should_quit: bool,
+    /// Whether the bottom log pane (fed by `tui-logger`) is visible. Toggled
+    /// with `~`. Only relevant when logging lands in the TUI (no
+    /// `MASTERBUS_TUI_LOG` redirect).
+    pub show_logs: bool,
+    /// Whether `tui-logger` is the active backend (and thus the pane is
+    /// useful at all). Drives the status hint and the `~` key handler.
+    pub logs_in_tui: bool,
 }
 
 impl App {
     /// Construct without blocking: seed from whatever devices have been heard so
     /// far; the rest arrive via `note_alive`, and names via the backfill thread.
-    pub fn new(bus: MasterBus, names: Names) -> App {
+    pub fn new(bus: MasterBus, names: Names, logs_in_tui: bool) -> App {
         let device_ids: Vec<u32> = bus.devices().iter().map(|d| d.id()).collect();
         App {
             bus,
@@ -184,8 +191,21 @@ impl App {
             login: None,
             pending: None,
             tick: 0,
-            status: "scanning bus… ↑/↓ select · Enter open · l login · q quit".into(),
+            status: if logs_in_tui {
+                "scanning bus… ↑/↓ select · Enter open · l login · ~ logs · q quit".into()
+            } else {
+                "scanning bus… ↑/↓ select · Enter open · l login · q quit".into()
+            },
             should_quit: false,
+            show_logs: false,
+            logs_in_tui,
+        }
+    }
+
+    /// Toggle the bottom log pane (no-op when logs aren't routed to the TUI).
+    pub fn toggle_logs(&mut self) {
+        if self.logs_in_tui {
+            self.show_logs = !self.show_logs;
         }
     }
 
