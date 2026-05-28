@@ -203,7 +203,7 @@ fn draw_login(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(8);
+    let mut lines: Vec<Line> = Vec::with_capacity(10);
     let current = prompt
         .current
         .map(|l| format!("currently: {}", level_label(l)))
@@ -214,20 +214,43 @@ fn draw_login(f: &mut Frame, app: &App, area: Rect) {
         Style::new().fg(Color::DarkGray),
     )));
     lines.push(Line::raw(""));
-    for (i, &level) in LOGIN_LEVELS.iter().enumerate() {
-        let marker = if i == prompt.sel { "› " } else { "  " };
-        let style = if i == prompt.sel {
-            Style::new().fg(Color::Black).bg(Color::Cyan)
-        } else {
-            Style::new()
-        };
-        lines.push(Line::from(Span::styled(format!("{marker}{}", level_label(level)), style)));
+
+    match &prompt.stage {
+        crate::app::LoginStage::PickLevel => {
+            for (i, &level) in LOGIN_LEVELS.iter().enumerate() {
+                let marker = if i == prompt.sel { "› " } else { "  " };
+                let style = if i == prompt.sel {
+                    Style::new().fg(Color::Black).bg(Color::Cyan)
+                } else {
+                    Style::new()
+                };
+                lines.push(Line::from(Span::styled(format!("{marker}{}", level_label(level)), style)));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "  ↑/↓ pick · Enter next · Esc cancel",
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
+        crate::app::LoginStage::EnterPassword { level, buf } => {
+            lines.push(Line::from(Span::styled(
+                format!("  log in as {}", level_label(*level)),
+                Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::raw(""));
+            // Mask the password chars with bullets.
+            let masked: String = "•".repeat(buf.chars().count());
+            lines.push(Line::from(Span::styled(
+                format!("  password: {masked}_"),
+                Style::new().fg(Color::White).bg(Color::DarkGray),
+            )));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "  type · Enter submit · Backspace · Esc cancel",
+                Style::new().fg(Color::DarkGray),
+            )));
+        }
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "  ↑/↓ pick · Enter login · Esc cancel",
-        Style::new().fg(Color::DarkGray),
-    )));
 
     f.render_widget(Paragraph::new(lines), inner);
 }

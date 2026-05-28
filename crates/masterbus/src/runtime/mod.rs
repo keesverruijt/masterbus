@@ -108,7 +108,14 @@ pub(crate) enum Command {
     Write { addr: DeviceId, field: FieldId, value: WriteValue, reply: Sender<Result<Value>> },
     WriteString { addr: DeviceId, str_id: u16, text: String, reply: Sender<Result<()>> },
     AccessLevelRead { addr: DeviceId, reply: Sender<Result<crate::model::AccessLevel>> },
-    AccessLevelSet { addr: DeviceId, level: crate::model::AccessLevel, reply: Sender<Result<crate::model::AccessLevel>> },
+    AccessLevelSet {
+        addr: DeviceId,
+        level: crate::model::AccessLevel,
+        /// `None` ⇒ logout (no code on the wire); `Some(f32)` ⇒ login with
+        /// the caller-supplied code.
+        code: Option<f32>,
+        reply: Sender<Result<crate::model::AccessLevel>>,
+    },
     Subscribe(SubSpec),
     Unsubscribe(u64),
     Shutdown,
@@ -255,14 +262,17 @@ impl Engine {
         self.call(|reply| Command::AccessLevelRead { addr, reply })?
     }
 
-    /// Log in (or log out, with [`AccessLevel::EndUser`]); returns the level the
-    /// device reports after the request.
+    /// Send a login request at `level` with the caller-supplied f32 `code`,
+    /// or — when `code` is `None` — a logout. Returns the level the device
+    /// reports after the request; compare to the prior level to detect a
+    /// wrong code (the device silently keeps you at your previous level).
     pub fn set_access_level(
         &self,
         addr: DeviceId,
         level: crate::model::AccessLevel,
+        code: Option<f32>,
     ) -> Result<crate::model::AccessLevel> {
-        self.call(|reply| Command::AccessLevelSet { addr, level, reply })?
+        self.call(|reply| Command::AccessLevelSet { addr, level, code, reply })?
     }
 
     /// Subscribe to live updates of `fields` at `interval`. Returns the

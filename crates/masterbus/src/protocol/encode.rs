@@ -215,7 +215,8 @@ pub fn encode_login_read(device_addr: u32) -> (u32, Vec<u8>) {
 }
 
 /// Login: class `0x07`, `[0x08, 0x19, level, 0x00, f32 LE code]` (8 bytes).
-/// The `level` byte must match the code (a level-2 frame carries `<redacted>`).
+/// The `level` byte and the f32 `code` are vendor-defined per device family;
+/// this crate is opaque to their values and the caller supplies both.
 pub fn encode_login_write(device_addr: u32, level: u8, code: f32) -> (u32, Vec<u8>) {
     let mut data = vec![LOGIN_OPCODE[0], LOGIN_OPCODE[1], level, 0x00];
     data.extend_from_slice(&code.to_le_bytes());
@@ -306,16 +307,13 @@ mod tests {
 
     #[test]
     fn login_frames_match_captured_wire_bytes() {
-        // From the §3c / §3e captures (PROTOCOL.md §4.5).
-        // Installer login on 0x188EA2 (<redacted>).
+        // The encoder is opaque to the value of `code`: any f32 round-trips
+        // into the wire payload regardless of which level it ends up
+        // unlocking on a given device family. A dummy `0.0` exercises the
+        // layout without naming any vendor-specific code.
         assert_eq!(
-            encode_login_write(0x188EA2, 0x01, <redacted>),
-            (0x07_188EA2, vec![0x08, 0x19, 0x01, 0x00, <redacted>]),
-        );
-        // Distributor login on 0x53A493 (<redacted>).
-        assert_eq!(
-            encode_login_write(0x53A493, 0x02, <redacted>),
-            (0x07_53A493, vec![0x08, 0x19, 0x02, 0x00, <redacted>]),
+            encode_login_write(0x188EA2, 0x01, 0.0),
+            (0x07_188EA2, vec![0x08, 0x19, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]),
         );
         // Logout: 4 bytes, no code value.
         assert_eq!(encode_logout(0x43DF24), (0x07_43DF24, vec![0x08, 0x19, 0x00, 0x00]));

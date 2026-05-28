@@ -107,8 +107,8 @@ impl Sched {
                     let r = self.do_access_level_read(addr);
                     let _ = reply.send(r);
                 }
-                Ok(Command::AccessLevelSet { addr, level, reply }) => {
-                    let r = self.do_access_level_set(addr, level);
+                Ok(Command::AccessLevelSet { addr, level, code, reply }) => {
+                    let r = self.do_access_level_set(addr, level, code);
                     let _ = reply.send(r);
                 }
                 Ok(Command::Subscribe(spec)) => self.add_sub(&mut subs, spec),
@@ -330,11 +330,16 @@ impl Sched {
         Ok(level)
     }
 
-    fn do_access_level_set(&mut self, addr: DeviceId, level: AccessLevel) -> Result<AccessLevel> {
+    fn do_access_level_set(
+        &mut self,
+        addr: DeviceId,
+        level: AccessLevel,
+        code: Option<f32>,
+    ) -> Result<AccessLevel> {
         let key = format!("p:{:06X}:08:19", addr);
         self.waiter.register(&key);
-        let frame = match level.code() {
-            Some(code) => encode_login_write(addr, level.level_byte(), code),
+        let frame = match code {
+            Some(c) => encode_login_write(addr, level.level_byte(), c),
             None => encode_logout(addr),
         };
         self.send(frame);

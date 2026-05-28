@@ -190,18 +190,22 @@ impl Device {
         self.engine.access_level(self.id)
     }
 
-    /// Log this device in at `level`. Returns the level the device reports
-    /// after the request (which on success equals `level`).
+    /// Attempt to log this device in at `level` using the f32 access `code`.
+    /// The code is vendor-defined per device family; this crate is opaque
+    /// to its value. The caller supplies whatever bytes they want sent.
     ///
-    /// `login(AccessLevel::EndUser)` is equivalent to [`Self::logout`].
-    pub fn login(&self, level: AccessLevel) -> Result<AccessLevel> {
-        self.engine.set_access_level(self.id, level)
+    /// Returns the level the device reports *after* the request. If the
+    /// code was wrong the device silently keeps the previous level — the
+    /// returned `AccessLevel` will not equal `level`. Compare the result
+    /// to the prior level to distinguish success from a rejected code.
+    pub fn login(&self, level: AccessLevel, code: f32) -> Result<AccessLevel> {
+        self.engine.set_access_level(self.id, level, Some(code))
     }
 
     /// Log out of the device (return to `AccessLevel::EndUser`). Wire form is
     /// a 4-byte request with no code payload (PROTOCOL.md §4.5).
     pub fn logout(&self) -> Result<AccessLevel> {
-        self.engine.set_access_level(self.id, AccessLevel::EndUser)
+        self.engine.set_access_level(self.id, AccessLevel::EndUser, None)
     }
 
     /// Write the device's editable string table at `str_id` (PROTOCOL.md

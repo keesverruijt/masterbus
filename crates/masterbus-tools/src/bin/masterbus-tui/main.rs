@@ -153,12 +153,22 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     // Login picker owns the keys when open.
     if app.login_modal() {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => app.login_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.login_move(1),
-            KeyCode::Enter => app.commit_login(),
-            KeyCode::Esc => app.cancel_login(),
-            _ => {}
+        if app.login_at_password_stage() {
+            match key.code {
+                KeyCode::Enter => app.commit_login(),
+                KeyCode::Esc => app.cancel_login(),
+                KeyCode::Backspace => app.login_backspace(),
+                KeyCode::Char(c) => app.login_char(c),
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => app.login_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => app.login_move(1),
+                KeyCode::Enter => app.commit_login(),
+                KeyCode::Esc => app.cancel_login(),
+                _ => {}
+            }
         }
         return;
     }

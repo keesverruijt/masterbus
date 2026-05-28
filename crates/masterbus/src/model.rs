@@ -33,10 +33,12 @@ pub enum DeviceStatus {
 pub enum AccessLevel {
     /// Default / logged-out state. No code required (logout target).
     EndUser = 0,
-    /// `code = <redacted>`.
+    /// Installer.
     Installer = 1,
-    /// `code = <redacted>`.
+    /// Distributor.
     Distributor = 2,
+    /// MV Service.
+    MvService = 3,
 }
 
 impl AccessLevel {
@@ -45,22 +47,13 @@ impl AccessLevel {
         self as u8
     }
 
-    /// The IEEE-754 f32 access code that authenticates this level.
-    /// [`Self::EndUser`] has no code (it is reached via logout, not login).
-    pub fn code(self) -> Option<f32> {
-        match self {
-            AccessLevel::EndUser => None,
-            AccessLevel::Installer => Some(<redacted>),
-            AccessLevel::Distributor => Some(<redacted>),
-        }
-    }
-
     /// Map a level byte (from a response or a poll reply) to an [`AccessLevel`].
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             0 => Some(AccessLevel::EndUser),
             1 => Some(AccessLevel::Installer),
             2 => Some(AccessLevel::Distributor),
+            3 => Some(AccessLevel::MvService),
             _ => None,
         }
     }

@@ -87,12 +87,24 @@ pub enum EditKind {
     Text { str_id: u16, buf: String },
 }
 
-/// The fixed three access levels, in display order. Used by the login modal.
-pub const LOGIN_LEVELS: [AccessLevel; 3] = [
+/// The fixed four access levels, in display order. Used by the login modal.
+pub const LOGIN_LEVELS: [AccessLevel; 4] = [
     AccessLevel::EndUser,
     AccessLevel::Installer,
     AccessLevel::Distributor,
+    AccessLevel::MvService,
 ];
+
+/// What the login modal is currently doing.
+pub enum LoginStage {
+    /// Picking the target level from [`LOGIN_LEVELS`].
+    PickLevel,
+    /// Picking End User → confirmed; submit logout next.
+    /// Or: picked a non-EndUser level and now collecting a password
+    /// string. The library/UI does not validate the value; whatever the
+    /// user types is converted to `f32` and sent on the wire as-is.
+    EnterPassword { level: AccessLevel, buf: String },
+}
 
 /// A modal that picks an access level for the currently-selected device.
 pub struct LoginPrompt {
@@ -102,6 +114,8 @@ pub struct LoginPrompt {
     pub sel: usize,
     /// Level the device reports when the prompt opened (for display).
     pub current: Option<AccessLevel>,
+    /// Two-step UX: pick a level, then (for non-EndUser) enter a password.
+    pub stage: LoginStage,
 }
 
 /// A single-tab discovery running on a worker thread. Either a menu (groups)
@@ -651,6 +665,15 @@ impl App {
         self.login.is_some()
     }
 
+    /// True when the modal is collecting the password (rather than picking a
+    /// level) — the key handler routes printable chars / Backspace here.
+    pub fn login_at_password_stage(&self) -> bool {
+        matches!(
+            &self.login,
+            Some(LoginPrompt { stage: LoginStage::EnterPassword { .. }, .. })
+        )
+    }
+
     /// Open the login modal for the currently-targeted device. When focused on
     /// the device list this targets the highlighted device; when inside a
     /// device's tabs it targets that device.
@@ -665,14 +688,14 @@ impl App {
         let sel = current
             .and_then(|l| LOGIN_LEVELS.iter().position(|&x| x == l))
             .unwrap_or(0);
-        self.login = Some(LoginPrompt { device, sel, current });
-        self.status = "select access level — ↑/↓ pick · Enter login · Esc cancel".into();
+        self.login = Some(LoginPrompt { device, sel, current, stage: LoginStage::PickLevel });
+        self.status = "select access level — ↑/↓ pick · Enter next · Esc cancel".into();
     }
 
     pub fn login_move(&mut self, delta: i32) {
-        if let Some(p) = &mut self.login {
+        if let Some(LoginPrompt { stage: LoginStage::PickLevel, sel, .. }) = &mut self.login {
             let n = LOGIN_LEVELS.len() as i32;
-            p.sel = (((p.sel as i32 + delta) % n + n) % n) as usize;
+            *sel = (((*sel as i32 + delta) % n + n) % n) as usize;
         }
     }
 
@@ -681,20 +704,74 @@ impl App {
         self.status = "login cancelled".into();
     }
 
-    /// Apply the highlighted access level on the modal's target device.
-    /// On success the engine drops its cached schema (writability re-queries),
-    /// and we re-discover the currently-shown tab so the field list refreshes.
+    /// Append a printable char to the password buffer.
+    pub fn login_char(&mut self, c: char) {
+        if let Some(LoginPrompt { stage: LoginStage::EnterPassword { buf, .. }, .. }) =
+            &mut self.login
+            && c.is_ascii_graphic()
+        {
+            buf.push(c);
+        }
+    }
+
+    /// Pop the last char of the password buffer.
+    pub fn login_backspace(&mut self) {
+        if let Some(LoginPrompt { stage: LoginStage::EnterPassword { buf, .. }, .. }) =
+            &mut self.login
+        {
+            buf.pop();
+        }
+    }
+
+    /// Enter on the login modal. In `PickLevel`: End User submits a logout
+    /// straight away; any other level advances to the password-entry stage.
+    /// In `EnterPassword`: parse the buffer as `f32` silently and attempt the
+    /// login. If the device reports the same level it was at before, the
+    /// password was rejected.
     pub fn commit_login(&mut self) {
-        let Some(p) = self.login.take() else { return };
-        let level = LOGIN_LEVELS[p.sel];
-        let label = level_label(level);
-        match self.bus.device(p.device).login(level) {
+        let Some(mut p) = self.login.take() else { return };
+        match &p.stage {
+            LoginStage::PickLevel => {
+                let level = LOGIN_LEVELS[p.sel];
+                if level == AccessLevel::EndUser {
+                    let prev = p.current;
+                    self.apply_login_result(p.device, level, self.bus.device(p.device).logout(), prev);
+                } else {
+                    // Stay in the modal; collect a password.
+                    p.stage = LoginStage::EnterPassword { level, buf: String::new() };
+                    self.status =
+                        "enter password — type · Enter submit · Esc cancel".into();
+                    self.login = Some(p);
+                }
+            }
+            LoginStage::EnterPassword { level, buf } => {
+                let level = *level;
+                let prev = p.current;
+                // Silent parse — any non-numeric input becomes 0.0.
+                let code = buf.parse::<f32>().unwrap_or(0.0);
+                let r = self.bus.device(p.device).login(level, code);
+                self.apply_login_result(p.device, level, r, prev);
+            }
+        }
+    }
+
+    /// Common post-login wiring: status line, optional schema refresh, the
+    /// "that seems to be an incorrect password" branch.
+    fn apply_login_result(
+        &mut self,
+        device: u32,
+        attempted: AccessLevel,
+        reported: Result<AccessLevel, masterbus::Error>,
+        prev: Option<AccessLevel>,
+    ) {
+        match reported {
             Ok(reported) => {
-                self.status =
-                    format!("device 0x{:06X} → {} (reported: {})", p.device, label, level_label(reported));
-                // If we're currently inside this device, reload everything the
-                // UI was showing (schema attributes, identity, title).
-                if self.cur_device == Some(p.device) {
+                self.status = if Some(reported) == prev && attempted != AccessLevel::EndUser {
+                    "that seems to be an incorrect password".to_string()
+                } else {
+                    format!("device 0x{:06X} → {}", device, level_label(reported))
+                };
+                if self.cur_device == Some(device) {
                     self.cur_access_level = Some(reported);
                     self.loaded_menus.clear();
                     self.settings_loaded = false;
@@ -702,7 +779,7 @@ impl App {
                     self.sub = None;
                     match self.cur_tab {
                         TabKind::Summary => {
-                            self.cur_info = self.bus.device(p.device).identity().ok();
+                            self.cur_info = self.bus.device(device).identity().ok();
                         }
                         tab => {
                             self.rows.clear();
@@ -713,7 +790,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.status = format!("login({label}) on 0x{:06X} failed: {e}", p.device);
+                self.status = format!("login on 0x{device:06X} failed: {e}");
             }
         }
     }
@@ -745,5 +822,6 @@ pub fn level_label(level: AccessLevel) -> &'static str {
         AccessLevel::EndUser => "End User",
         AccessLevel::Installer => "Installer",
         AccessLevel::Distributor => "Distributor",
+        AccessLevel::MvService => "MV Service",
     }
 }

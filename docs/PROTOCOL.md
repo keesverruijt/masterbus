@@ -207,19 +207,24 @@ response; not observed (the MasterAdjust GUI rejects bad codes client-side).
 **Access levels and codes** (recovered live + by decompiling MasterAdjust;
 see FINDINGS §3c/3d):
 
-| Level byte | Name (MasterAdjust label) | f32 code     | Code bytes (LE) |
-|------------|---------------------------|--------------|-----------------|
-| `0x00`     | **End User**              | (no code; logout) | —          |
-| `0x01`     | **Installer**             | `<redacted>`      | `<redacted>`  |
-| `0x02`     | **Distributor**           | `<redacted>`    | `<redacted>`  |
+| Level byte | Name (MasterAdjust label) |
+|------------|---------------------------|
+| `0x00`     | **End User**              |
+| `0x01`     | **Installer**             |
+| `0x02`     | **Distributor**           |
+| `0x03`     | **MV Service**            |
 
-The codes are hard-coded in MasterAdjust and universal across devices — the
-GUI sends the same code regardless of device type. The level byte in the
-request must match the code (a level-2 frame must carry the f32 `<redacted>`).
+The f32 access codes for levels 1..3 are vendor-defined per device family
+and are **not** carried in this crate. The encoder takes whichever code the
+caller supplies and packs it onto the wire as-is; if the device doesn't
+accept the code it silently keeps the prior level (compare the new level
+to the previous one to detect a rejected attempt).
 
-The code is the integer's IEEE-754 float representation, not ASCII and not
-a packed integer (e.g. `498 → f32(<redacted>) = <redacted>`). This is the same
-"every value is a 4-byte float" rule as §7.3.
+The level byte in the request must match the code (each level has a
+distinct code; sending the wrong code for a level leaves the device at
+its previous level). The code is the integer's IEEE-754 float
+representation, not ASCII and not a packed integer — the same "every
+value is a 4-byte float" rule as §7.3.
 
 **Effect of a successful login:**
 
