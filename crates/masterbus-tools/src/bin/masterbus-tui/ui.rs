@@ -14,7 +14,7 @@ use crate::app::{level_label, tab_label, App, EditKind, Focus, Row, TabKind, LOG
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Width of the value column (fits "Nd HH:MM:SS" time values without overflow).
-const VALUE_COL: usize = 11;
+const VALUE_COL: usize = 21;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(f.area());
@@ -136,15 +136,14 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                     .map(|v| format_value_for(v, &field.options))
                     .unwrap_or_else(|| "…".into());
                 // Cap to the column width so a long value (e.g. a "0d HH:MM:SS"
-                // time) can't push the unit / rw column out of alignment.
+                // time) can't push the unit column out of alignment.
                 let val = truncate(&val, VALUE_COL);
                 let rw = if field.writeable { "rw" } else { "ro" };
                 ListItem::new(Line::raw(format!(
-                    "  {} {:<22} {val:>VALUE_COL$} {:<5} {}",
+                    "  {} {:<22} {rw} {val:>VALUE_COL$} {}",
                     field_id_tag(field.index),
                     truncate(&field.name, 22),
                     field.unit,
-                    rw
                 )))
             }
         })
@@ -347,9 +346,13 @@ fn status_style(status: DeviceStatus) -> (&'static str, Color) {
 /// Format a value, resolving a list/enum index to its label using the value's
 /// own option strings if present, else the field's schema options.
 fn format_value_for(v: &Value, schema_opts: &[String]) -> String {
+    // Append the raw integer index for list/eventable values so the underlying
+    // wire value is visible alongside the human label: `Stabilized(2)`.
     let label = |index: i32, value_opts: &[String]| -> String {
         let src = if value_opts.is_empty() { schema_opts } else { value_opts };
-        src.get(index as usize).cloned().unwrap_or_else(|| format!("[{index}]"))
+        let text = src.get(index as usize).cloned().unwrap_or_else(|| format!("[{index}]"));
+        let text = truncate(&text, 16);
+        format!("{text}({index})")
     };
     match v {
         Value::List { index, options } => label(*index, options),
