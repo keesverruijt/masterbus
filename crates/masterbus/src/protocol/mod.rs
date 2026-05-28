@@ -9,12 +9,12 @@ mod encode;
 pub use decode::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame};
 pub use encode::{
     btm1_meta_option_req_raw, btm1_meta_req_raw, btm3_meta_option_req_raw, btm3_meta_req_raw,
-    btm3_write_raw, encode_commit, encode_login_read, encode_login_write, encode_logout,
+    btm3_read_raw, btm3_write_raw, encode_commit, encode_login_read, encode_login_write, encode_logout,
     encode_set_boolean, encode_set_float, encode_set_list, fw_req_raw, group_count_req_raw,
     heartbeat_raw, monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_class_raw,
     schema_field_count_req_raw, schema_field_id_req_class_raw, schema_field_id_req_raw,
     schema_group_name_req_class_raw, schema_group_name_req_raw, string_chunk_req_raw,
-    LOGIN_OPCODE,
+    string_chunk_write_raw, LOGIN_OPCODE,
 };
 
 /// CAN class bytes (bits 28:24 of the 29-bit id).
@@ -146,6 +146,7 @@ pub fn viz_from_wire(code: u8) -> VisualizationType {
         0x03 => VisualizationType::DropDown,
         0x04 => VisualizationType::Eventable,
         0x05 => VisualizationType::CheckBox,
+        0x06 => VisualizationType::Text,
         0x07 => VisualizationType::Time,
         0x08 => VisualizationType::Date,
         _ => VisualizationType::Float,

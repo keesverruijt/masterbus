@@ -119,7 +119,22 @@ pub fn decode_value(raw: &[u8], viz: VisualizationType) -> Value {
         V::DeviceList => {
             Value::DeviceRef { index: raw.first().map(|&b| b as i32).unwrap_or(0), device_ids: Vec::new() }
         }
-        V::Text => Value::Text(String::from_utf8_lossy(raw).into_owned()),
+        V::Text => {
+            // For Text-VIZ fields the field's "value" is the editable string
+            // id (the Btm3 push carries it as f32; round to u16). The text
+            // content lives at that sid in the device's string table — the
+            // engine fills `text` via the chunk-read protocol before caching.
+            if raw.len() < 4 {
+                return Value::Text { sid: 0, text: String::new() };
+            }
+            let f = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            let sid = if f.is_finite() && f >= 0.0 && f <= u16::MAX as f32 {
+                f.round() as u16
+            } else {
+                0
+            };
+            Value::Text { sid, text: String::new() }
+        }
     }
 }
 
@@ -226,6 +241,26 @@ mod tests {
         // 54496 s -> 0 days, 15:08:16
         let raw = 54496.0f32.to_le_bytes();
         assert_eq!(decode_value(&raw, VisualizationType::Time), Value::Time(Time { sec: 16, min: 8, hour: 15, days: 0 }));
+    }
+
+    #[test]
+    fn text_decodes_f32_as_sid() {
+        // For Text-VIZ fields the field's value is f32(sid). From the wire on
+        // the EasyView 5 (53A493) field 0x60 (Switch 1) the Btm3 push carried
+        // bytes `00 00 80 40` = f32(4.0) and we verified the editable string
+        // lives at sid 4. The decoder must round to u16 and leave text empty
+        // for the engine to fill via the chunk-read protocol.
+        let raw = 4.0f32.to_le_bytes();
+        assert_eq!(
+            decode_value(&raw, VisualizationType::Text),
+            Value::Text { sid: 4, text: String::new() }
+        );
+        // Nav Chg Device-name push was f32(1.0) → sid 1.
+        let raw = 1.0f32.to_le_bytes();
+        assert_eq!(
+            decode_value(&raw, VisualizationType::Text),
+            Value::Text { sid: 1, text: String::new() }
+        );
     }
 
     #[test]

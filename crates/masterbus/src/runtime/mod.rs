@@ -1,6 +1,7 @@
 //! Runtime engine: reader thread, single bus scheduler, shared state.
 
 mod discovery;
+mod framelog;
 mod reader;
 mod scheduler;
 mod state;
@@ -56,7 +57,7 @@ impl Default for Config {
         Config {
             max_age: Duration::from_millis(1500),
             liveness: Duration::from_secs(5),
-            min_send_interval: Duration::from_millis(3),
+            min_send_interval: Duration::from_millis(1),
             discovery_timeout: Duration::from_millis(150),
             discovery_retries: 3,
             connect_timeout: Duration::from_secs(15),
@@ -105,6 +106,7 @@ pub(crate) enum Command {
     DiscoverAllFields { addr: DeviceId, reply: Sender<Result<()>> },
     Read { addr: DeviceId, field: FieldId, max_age: Duration, reply: Sender<Result<Value>> },
     Write { addr: DeviceId, field: FieldId, value: WriteValue, reply: Sender<Result<Value>> },
+    WriteString { addr: DeviceId, str_id: u16, text: String, reply: Sender<Result<()>> },
     AccessLevelRead { addr: DeviceId, reply: Sender<Result<crate::model::AccessLevel>> },
     AccessLevelSet { addr: DeviceId, level: crate::model::AccessLevel, reply: Sender<Result<crate::model::AccessLevel>> },
     Subscribe(SubSpec),
@@ -202,13 +204,17 @@ impl Engine {
         self.call(|reply| Command::DiscoverMenu { addr, menu, reply })?
     }
 
-    /// Ensure a specific field is discovered (full discovery fallback if its menu
-    /// isn't known yet).
+    /// Ensure a specific field is discovered. For Btm1 fields this falls back
+    /// to a full per-menu discovery; for Btm3 fields it falls back to the flat
+    /// `all_fields` probe (Btm3 fields don't live in `schema.groups`).
     pub fn ensure_field(&self, addr: DeviceId, field: FieldId) -> Result<()> {
         if self.state.has_field(addr, field) {
             return Ok(());
         }
-        self.call(|reply| Command::Discover { addr, reply })?
+        match crate::model::field_id::channel(field) {
+            crate::model::Channel::Btm1 => self.call(|reply| Command::Discover { addr, reply })?,
+            crate::model::Channel::Btm3 => self.ensure_all_fields(addr),
+        }
     }
 
     /// Ensure the flat field enumeration (selector `0x01` probe of every index)
@@ -229,6 +235,19 @@ impl Engine {
     /// Write a field value; returns the resulting value observed afterwards.
     pub fn write(&self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
         self.call(|reply| Command::Write { addr, field, value, reply })?
+    }
+
+    /// Write a string to a device's string table at the given id (PROTOCOL.md
+    /// §4.4). Used for editable Text-viz fields (Device name etc.); the caller
+    /// supplies the string id directly because the metadata path that maps a
+    /// Text field to its writable sid isn't yet characterised.
+    pub fn write_string(&self, addr: DeviceId, str_id: u16, text: &str) -> Result<()> {
+        self.call(|reply| Command::WriteString {
+            addr,
+            str_id,
+            text: text.to_string(),
+            reply,
+        })?
     }
 
     /// Read the device's current access level (PROTOCOL.md §4.5).

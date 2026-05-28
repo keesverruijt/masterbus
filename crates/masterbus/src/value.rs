@@ -20,8 +20,16 @@ pub enum Value {
         /// Option labels (may be empty until resolved).
         options: Vec<String>,
     },
-    /// Free text.
-    Text(String),
+    /// Free text — the editable string at `sid` in the device's string table.
+    /// Reading resolves `text` via the chunk protocol (PROTOCOL.md §4.4); writing
+    /// chunks the new value back to the same `sid`. For Btm3 Text-VIZ fields the
+    /// `sid` is the field's "value" (the periodic Btm3 push carries it as `f32`).
+    Text {
+        /// String-table id of the editable content.
+        sid: u16,
+        /// Decoded chunks (UTF-8 lossy), NUL stripped.
+        text: String,
+    },
     /// Device reference list selection.
     DeviceRef {
         /// Selected index.
@@ -120,7 +128,7 @@ mod tests {
 }
 
 /// A write request, dispatched by [`crate`] from a typed [`Value`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WriteValue {
     /// Boolean write (`[field, tab, 0|1]`).
     Bool(bool),
@@ -128,4 +136,6 @@ pub enum WriteValue {
     Float(f32),
     /// List/enum index write (`[field, tab, index]`).
     ListIndex(i32),
+    /// Text write: chunked update of the string table at `sid` (PROTOCOL.md §4.4).
+    Text { sid: u16, text: String },
 }

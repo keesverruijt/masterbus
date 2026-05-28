@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossbeam_channel::Sender;
 
+use super::framelog::frame_log;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
@@ -71,6 +72,12 @@ fn reader_loop(
 
 fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
     let frame = frame_from_raw(raw_id, data);
+    frame_log("Up", frame.can_class, frame.device_addr, data);
+
+    // Every frame from a device counts as a sign of life — register the
+    // address even before any class-0x04 broadcast lands. Mask the Btm1-meta
+    // shadow flag so 0xBA3B4B and 0x3A3B4B share one entry.
+    state.touch(frame.device_addr & !BTM1_META_ADDR_FLAG);
 
     // Discovery responses (property / schema / per-field metadata) → matching waiter.
     if let Some(key) = waiter_key_for_frame(frame.can_class, frame.device_addr, data) {
@@ -90,12 +97,9 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             state.touch(device_addr);
             // Wake any pending on-demand read/poll for this field.
             waiter.deliver(&value_key(device_addr, field), raw.clone());
-            // Cache the decoded value if we know the field's type.
-            if let Some(schema) = state.schema(device_addr)
-                && let Some(f) = schema.field(field)
-            {
-                // Carry the schema's option labels so callers get both the
-                // numeric index and its meaning.
+            // Cache the decoded value if we know the field's type — look in
+            // both the menu-grouped schema and the flat Btm3 list.
+            if let Some(f) = state.field_info(device_addr, field) {
                 let v = decode_value(&raw, f.viz_type).with_options(&f.options);
                 state.put_value(device_addr, field, v);
             }
@@ -119,9 +123,7 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
                 let raw_value = data[2..6].to_vec();
                 state.touch(real);
                 waiter.deliver(&value_key(real, field), raw_value.clone());
-                if let Some(schema) = state.schema(real)
-                    && let Some(f) = schema.field(field)
-                {
+                if let Some(f) = state.field_info(real, field) {
                     let v = decode_value(&raw_value, f.viz_type).with_options(&f.options);
                     state.put_value(real, field, v);
                 }

@@ -203,6 +203,16 @@ impl Device {
     pub fn logout(&self) -> Result<AccessLevel> {
         self.engine.set_access_level(self.id, AccessLevel::EndUser)
     }
+
+    /// Write the device's editable string table at `str_id` (PROTOCOL.md
+    /// §4.4 write direction). Used for editable Text-viz fields such as
+    /// "Device name". The string id is supplied explicitly: a Text field's
+    /// writable sid isn't yet derivable from metadata, so the caller picks
+    /// the slot from out-of-band knowledge (e.g. captured traffic) until
+    /// the discovery path is wired up.
+    pub fn write_string(&self, str_id: u16, text: &str) -> Result<()> {
+        self.engine.write_string(self.id, str_id, text)
+    }
 }
 
 /// A group of fields within a device.
@@ -265,8 +275,7 @@ impl Field {
         self.engine.ensure_field(self.device, self.index)?;
         self.engine
             .state
-            .schema(self.device)
-            .and_then(|s| s.field(self.index).cloned())
+            .field_info(self.device, self.index)
             .ok_or(Error::FieldNotAvailable(self.index as i32))
     }
 
@@ -343,8 +352,12 @@ fn write_value_for(viz: VisualizationType, value: Value) -> Result<WriteValue> {
             Value::DeviceRef { index, .. } => Ok(WriteValue::ListIndex(index)),
             _ => wrong("DeviceRef"),
         },
-        // Greyed (read-only display) and Date/Time/Text have no write encoding.
-        V::GrayVisualization | V::Date | V::Time | V::Text => wrong("a writable type"),
+        V::Text => match value {
+            Value::Text { sid, text } => Ok(WriteValue::Text { sid, text }),
+            _ => wrong("Text"),
+        },
+        // Greyed (read-only display) and Date/Time have no write encoding.
+        V::GrayVisualization | V::Date | V::Time => wrong("a writable type"),
     }
 }
 

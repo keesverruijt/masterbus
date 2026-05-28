@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::Frame;
 
-use masterbus::{DeviceStatus, Value};
+use masterbus::{field_id, Channel, DeviceStatus, FieldId, Value};
 
 use crate::app::{level_label, tab_label, App, EditKind, Focus, Row, TabKind, LOGIN_LEVELS, TABS};
 
@@ -128,7 +128,8 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                 let val = truncate(&val, VALUE_COL);
                 let rw = if field.writeable { "rw" } else { "ro" };
                 ListItem::new(Line::raw(format!(
-                    "  {:<22} {val:>VALUE_COL$} {:<4} {}",
+                    "  {} {:<22} {val:>VALUE_COL$} {:<4} {}",
+                    field_id_tag(field.index),
                     truncate(&field.name, 22),
                     field.unit,
                     rw
@@ -240,6 +241,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     ed.name,
                     options.get(*sel).map(String::as_str).unwrap_or("?")
                 ),
+                EditKind::Text { str_id, buf } => format!(
+                    " edit {} (sid 0x{:04X}) = \"{}_\"   (Enter ok · Esc cancel)",
+                    ed.name, str_id, buf
+                ),
             };
             (body, Style::new().fg(Color::Black).bg(Color::Cyan))
         }
@@ -296,7 +301,7 @@ pub fn format_value(v: &Value) -> String {
         Value::List { index, options } => {
             options.get(*index as usize).cloned().unwrap_or_else(|| format!("[{index}]"))
         }
-        Value::Text(s) => s.clone(),
+        Value::Text { text, .. } => text.clone(),
         Value::DeviceRef { index, device_ids } => {
             format!("->{}", device_ids.get(*index as usize).copied().unwrap_or(0))
         }
@@ -305,6 +310,16 @@ pub fn format_value(v: &Value) -> String {
         }
         Value::Invalid => "invalid".into(),
     }
+}
+
+/// Render a channel-aware [`FieldId`] as `B1.XX` (Btm1) or `B3.XX` (Btm3),
+/// where `XX` is the 8-bit wire index in uppercase hex. Five chars wide.
+fn field_id_tag(id: FieldId) -> String {
+    let ch = match field_id::channel(id) {
+        Channel::Btm1 => "B1",
+        Channel::Btm3 => "B3",
+    };
+    format!("{ch}.{:02X}", field_id::wire_index(id))
 }
 
 fn truncate(s: &str, max: usize) -> String {

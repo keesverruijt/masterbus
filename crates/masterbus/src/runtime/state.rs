@@ -88,12 +88,17 @@ impl State {
         e.fw_hint = fw_hint;
     }
 
-    /// Touch last-seen for any frame from a device (without identity hints).
+    /// Touch last-seen for any frame from a device, creating a minimal entry
+    /// on first sight. Lets the engine discover devices that don't emit the
+    /// class-`0x04` broadcast in our liveness window — e.g. an EasyView that's
+    /// currently being polled by another master — but are otherwise active on
+    /// the bus. The `type_code` / `fw_hint` stay zero until a real broadcast
+    /// arrives; UI code should treat them as "unknown" placeholders.
     pub fn touch(&self, addr: u32) {
         let now = Instant::now();
-        if let Some(e) = self.devices.lock().unwrap().get_mut(&addr) {
-            e.last_seen = now;
-        }
+        let mut map = self.devices.lock().unwrap();
+        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        e.last_seen = now;
     }
 
     /// Record a freshly-observed value.
@@ -193,11 +198,25 @@ impl State {
 
     /// Whether a particular field has been discovered for a device.
     pub fn has_field(&self, addr: u32, field: FieldId) -> bool {
+        self.field_info(addr, field).is_some()
+    }
+
+    /// Look up a field's info from either the menu-grouped schema (Btm1
+    /// discovery) or the flat Btm3 probe list (`all_fields`). Used by the
+    /// reader to decode incoming Btm3 value pushes, whose fields live in
+    /// `all_fields` rather than `schema.groups`.
+    pub fn field_info(&self, addr: u32, field: FieldId) -> Option<FieldInfo> {
         let map = self.devices.lock().unwrap();
-        map.get(&addr)
-            .and_then(|e| e.schema.as_ref())
-            .map(|s| s.field(field).is_some())
-            .unwrap_or(false)
+        let e = map.get(&addr)?;
+        if let Some(s) = e.schema.as_ref()
+            && let Some(f) = s.field(field)
+        {
+            return Some(f.clone());
+        }
+        if let Some(all) = e.all_fields.as_ref() {
+            return all.iter().find(|f| f.index == field).cloned();
+        }
+        None
     }
 
     /// Clone a device's schema-so-far (groups of all discovered menus).

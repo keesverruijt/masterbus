@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::discovery::{discover_menu, enumerate_all_fields, fetch_identity, Disc, MENUS};
+use super::framelog::frame_log;
 use crate::model::{DeviceIdentity, Menu};
 use super::reader::value_key;
 use super::state::State;
@@ -18,9 +19,9 @@ use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
 use crate::model::{field_id, AccessLevel, Channel, DeviceId, FieldId};
 use crate::protocol::{
-    btm3_write_raw, decode_value, encode_commit, encode_login_read, encode_login_write,
-    encode_logout, encode_set_boolean, encode_set_float, encode_set_list, heartbeat_raw,
-    monitoring_req_raw, TAB_DEFAULT, VisualizationType,
+    btm3_read_raw, btm3_write_raw, decode_value, encode_commit, encode_login_read,
+    encode_login_write, encode_logout, encode_set_boolean, encode_set_float, encode_set_list,
+    heartbeat_raw, monitoring_req_raw, string_chunk_write_raw, TAB_DEFAULT, VisualizationType,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
@@ -98,6 +99,10 @@ impl Sched {
                     let r = self.do_write(addr, field, value);
                     let _ = reply.send(r);
                 }
+                Ok(Command::WriteString { addr, str_id, text, reply }) => {
+                    let r = self.do_write_string(addr, str_id, &text);
+                    let _ = reply.send(r);
+                }
                 Ok(Command::AccessLevelRead { addr, reply }) => {
                     let r = self.do_access_level_read(addr);
                     let _ = reply.send(r);
@@ -149,6 +154,9 @@ impl Sched {
 
     fn send(&mut self, frame: (u32, Vec<u8>)) {
         self.pace();
+        let can_class = ((frame.0 >> 24) & 0x1F) as u8;
+        let addr = frame.0 & 0x00FF_FFFF;
+        frame_log("Dn", can_class, addr, &frame.1);
         let _ = self.tx.send(frame.0, &frame.1);
     }
 
@@ -225,29 +233,41 @@ impl Sched {
     }
 
     fn viz_of(&mut self, addr: DeviceId, field: FieldId) -> Result<VisualizationType> {
-        // If the field isn't known yet, fall back to a full discovery (we don't
-        // know which menu it belongs to).
-        if !self.state.has_field(addr, field) {
-            self.do_discover_all(addr);
+        // Look in both the menu-grouped schema (Btm1) and the flat probe list
+        // (Btm3). Without the all_fields path, Btm3-channel fields always
+        // returned `FieldNotAvailable` here, which silently skipped the
+        // value-read in `poll_value` — that's why Btm3 fields never showed a
+        // value even after a Settings-tab probe.
+        if let Some(f) = self.state.field_info(addr, field) {
+            return Ok(f.viz_type);
+        }
+        // Field still unknown: trigger the right discovery for its channel.
+        match field_id::channel(field) {
+            Channel::Btm1 => self.do_discover_all(addr),
+            Channel::Btm3 => self.do_discover_all_fields(addr),
         }
         self.state
-            .schema(addr)
-            .and_then(|s| s.field(field).map(|f| f.viz_type))
+            .field_info(addr, field)
+            .map(|f| f.viz_type)
             .ok_or(Error::FieldNotAvailable(field as i32))
     }
 
     fn poll_value(&mut self, addr: DeviceId, field: FieldId, viz: VisualizationType) -> Result<Value> {
         let key = value_key(addr, field);
         self.waiter.register(&key);
-        // Btm1: actively request the value. Btm3: passive — the next push or
-        // write-ack on class `0x0B` delivers via the reader, no request to
-        // send (see PROTOCOL.md §6 / FINDINGS §3e).
+        // Both channels require an active read request. Btm3 value pushes are
+        // NOT autonomous — the device only emits a class-`0x0B` frame in
+        // response to an explicit class-`0x1B` read; on a quiet bus (no other
+        // master polling) we'd never see anything otherwise.
         let timeout = match field_id::channel(field) {
             Channel::Btm1 => {
                 self.send(monitoring_req_raw(addr, field_id::wire_index(field), TAB_DEFAULT));
                 VALUE_READ_TIMEOUT_BTM1
             }
-            Channel::Btm3 => VALUE_READ_TIMEOUT_BTM3,
+            Channel::Btm3 => {
+                self.send(btm3_read_raw(addr, field_id::wire_index(field)));
+                VALUE_READ_TIMEOUT_BTM3
+            }
         };
         match self.waiter.wait(&key, timeout) {
             Some(raw) => {
@@ -256,7 +276,12 @@ impl Sched {
                     .schema(addr)
                     .and_then(|s| s.field(field).map(|f| f.options.clone()))
                     .unwrap_or_default();
-                let v = decode_value(&raw, viz).with_options(&opts);
+                let mut v = decode_value(&raw, viz).with_options(&opts);
+                // For Text-VIZ fields the value is the *sid* of the editable
+                // content; fetch the actual chars from the string table.
+                if let Value::Text { sid, ref mut text } = v {
+                    *text = self.with_disc(addr, |disc| disc.fetch_str(addr, sid));
+                }
                 self.state.put_value(addr, field, v.clone());
                 Ok(v)
             }
@@ -325,6 +350,15 @@ impl Sched {
     }
 
     fn do_write(&mut self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
+        // Text fields write via the string-chunk protocol (PROTOCOL.md §4.4),
+        // not the numeric-write path: the field's "value" is the sid, the
+        // editable content lives at that sid in the string table.
+        if let WriteValue::Text { sid, text } = value {
+            self.do_write_string(addr, sid, &text)?;
+            let v = Value::Text { sid, text };
+            self.state.put_value(addr, field, v.clone());
+            return Ok(v);
+        }
         let wire = field_id::wire_index(field);
         match field_id::channel(field) {
             Channel::Btm1 => {
@@ -332,6 +366,7 @@ impl Sched {
                     WriteValue::Bool(b) => encode_set_boolean(addr, wire, b),
                     WriteValue::Float(f) => encode_set_float(addr, wire, f),
                     WriteValue::ListIndex(i) => encode_set_list(addr, wire, i),
+                    WriteValue::Text { .. } => unreachable!("handled above"),
                 };
                 self.send(frame);
                 // Relay-style boolean controls (e.g. the CombiMaster inverter
@@ -362,6 +397,7 @@ impl Sched {
                     WriteValue::Bool(false) => 0.0,
                     WriteValue::Float(f) => f,
                     WriteValue::ListIndex(i) => i as f32,
+                    WriteValue::Text { .. } => unreachable!("handled above"),
                 };
                 self.send(btm3_write_raw(addr, wire, v));
             }
@@ -372,6 +408,36 @@ impl Sched {
         // within ~10 ms.
         let viz = self.viz_of(addr, field)?;
         self.poll_value(addr, field, viz)
+    }
+
+    /// Write the device's string table at `str_id` (PROTOCOL.md §4.4 write
+    /// direction): send up-to-4-char chunks `[0x30, sid_lo, sid_hi, seq, c0..]`
+    /// on class `0x07`, wait for each class-`0x06` echo, then a NUL-terminator
+    /// chunk. Even when the string is exactly N×4 chars MasterAdjust emits an
+    /// explicit `[0x30, sid_lo, sid_hi, N, 0x00]` terminator, so we do too.
+    fn do_write_string(&mut self, addr: DeviceId, str_id: u16, text: &str) -> Result<()> {
+        let bytes = text.as_bytes();
+        for (seq, chunk) in bytes.chunks(4).enumerate() {
+            self.send_string_chunk(addr, str_id, seq as u8, chunk)?;
+        }
+        // Explicit terminator chunk — sequence number is the chunk *after* the
+        // last full chunk, payload is a single 0x00.
+        let term_seq = bytes.len().div_ceil(4) as u8;
+        self.send_string_chunk(addr, str_id, term_seq, &[0x00])?;
+        Ok(())
+    }
+
+    /// Send one chunk and wait for the device's echo ack on class `0x06`.
+    /// The echo arrives via the existing `str:<addr>:<sid>:<seq>` waiter key
+    /// (see `protocol::decode::waiter_key_for_frame`).
+    fn send_string_chunk(&mut self, addr: DeviceId, str_id: u16, seq: u8, chars: &[u8]) -> Result<()> {
+        let key = format!("str:{:06X}:{:04X}:{}", addr, str_id, seq);
+        self.waiter.register(&key);
+        self.send(string_chunk_write_raw(addr, str_id, seq, chars));
+        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_BTM1) {
+            Some(_) => Ok(()),
+            None => Err(Error::Timeout),
+        }
     }
 
     // ── subscriptions ───────────────────────────────────────────────────────

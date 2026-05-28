@@ -80,6 +80,11 @@ pub enum EditKind {
     Number(String),
     /// Pick one of a fixed set of options.
     Choice { options: Vec<String>, sel: usize },
+    /// Free-text string entry; written via the string-table chunk protocol
+    /// (`MasterBus::Device::write_string`) at `str_id`. Until we figure out
+    /// how Text-field metadata exposes the writable sid, the caller picks
+    /// it (see `begin_edit` for the hardcoded family-specific mapping).
+    Text { str_id: u16, buf: String },
 }
 
 /// The fixed four access levels, in display order. Used by the login modal.
@@ -373,10 +378,11 @@ impl App {
     fn show_groups(&mut self, id: u32, menu: Menu, groups: Vec<GroupInfo>) {
         self.build_rows(&groups);
         self.values.clear();
-        // Monitoring fields get live updates; other tabs are read lazily on
-        // selection (they're mostly static settings).
+        // Subscribe on every tab — Configuration / Service have editable
+        // Text/DropDown fields whose current values (including Btm3 sids for
+        // Text VIZ) must be cached before the user can edit them.
         let fields: Vec<FieldId> = groups.iter().flat_map(|g| g.fields.iter().map(|f| f.index)).collect();
-        self.sub = if menu == Menu::Monitoring && !fields.is_empty() {
+        self.sub = if !fields.is_empty() {
             Some(self.bus.subscribe(id, fields, POLL_INTERVAL, false))
         } else {
             None
@@ -541,6 +547,23 @@ impl App {
                     kind: EditKind::Choice { options, sel },
                 });
             }
+            V::Text => {
+                // The cached value carries (sid, current text); pre-fill the
+                // buffer so the user edits the existing name rather than
+                // typing from scratch.
+                let (str_id, buf) = match self.values.get(&info.index) {
+                    Some(Value::Text { sid, text }) => (*sid, text.clone()),
+                    _ => {
+                        self.status = format!("{}: value not loaded yet", info.name);
+                        return;
+                    }
+                };
+                self.editor = Some(Editor {
+                    field: info.index,
+                    name: info.name.clone(),
+                    kind: EditKind::Text { str_id, buf },
+                });
+            }
             _ => self.status = format!("{}: not editable in this demo", info.name),
         }
     }
@@ -560,20 +583,37 @@ impl App {
             EditKind::Choice { options, sel } => {
                 self.write(ed.field, Value::List { index: sel as i32, options });
             }
+            EditKind::Text { str_id, buf } => {
+                self.write(ed.field, Value::Text { sid: str_id, text: buf });
+            }
         }
     }
 
     pub fn editor_char(&mut self, c: char) {
-        if let Some(Editor { kind: EditKind::Number(buf), .. }) = &mut self.editor
-            && (c.is_ascii_digit() || c == '.' || c == '-')
-        {
-            buf.push(c);
+        match &mut self.editor {
+            Some(Editor { kind: EditKind::Number(buf), .. })
+                if c.is_ascii_digit() || c == '.' || c == '-' =>
+            {
+                buf.push(c);
+            }
+            Some(Editor { kind: EditKind::Text { buf, .. }, .. })
+                if c.is_ascii_graphic() || c == ' ' =>
+            {
+                buf.push(c);
+            }
+            _ => {}
         }
     }
 
     pub fn editor_backspace(&mut self) {
-        if let Some(Editor { kind: EditKind::Number(buf), .. }) = &mut self.editor {
-            buf.pop();
+        match &mut self.editor {
+            Some(Editor { kind: EditKind::Number(buf), .. }) => {
+                buf.pop();
+            }
+            Some(Editor { kind: EditKind::Text { buf, .. }, .. }) => {
+                buf.pop();
+            }
+            _ => {}
         }
     }
 

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::framelog::frame_log;
 use super::waiter::Waiter;
 use super::Config;
 use crate::model::{
@@ -44,6 +45,7 @@ impl Disc<'_> {
     fn req(&mut self, key: &str, frame: (u32, Vec<u8>), retries: usize) -> Option<Vec<u8>> {
         for _ in 0..retries {
             self.waiter.register(key);
+            frame_log("Dn", ((frame.0 >> 24) & 0x1F) as u8, frame.0 & 0x00FF_FFFF, &frame.1);
             let _ = self.tx.send(frame.0, &frame.1);
             if let Some(r) = self.waiter.wait(key, self.cfg.discovery_timeout) {
                 return Some(r);
@@ -58,7 +60,7 @@ impl Disc<'_> {
     }
 
     /// Fetch a string by id via chunked reads.
-    fn fetch_str(&mut self, addr: DeviceId, str_id: u16) -> String {
+    pub(super) fn fetch_str(&mut self, addr: DeviceId, str_id: u16) -> String {
         let mut s = String::new();
         let mut seq: u8 = 0;
         loop {
@@ -113,6 +115,7 @@ impl Disc<'_> {
         }
         for &op in ops {
             let frame = encode(addr, op, wire as u16);
+            frame_log("Dn", ((frame.0 >> 24) & 0x1F) as u8, frame.0 & 0x00FF_FFFF, &frame.1);
             let _ = self.tx.send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
@@ -124,6 +127,55 @@ impl Disc<'_> {
             }
         }
         out
+    }
+
+    /// Pipelined existence probe: which wire indices on this channel have any
+    /// field at all? We send a single VIZ query per index in chunks of
+    /// [`PROBE_CHUNK`], wait one shared timeout window per chunk, and collect
+    /// the indices that responded. Used as the cheap first phase of
+    /// [`enumerate_all_fields`] — replaces the previous serial-with-miss-streak
+    /// loop, which was paying ~1 timeout per missing index and was tuned too
+    /// tightly to bridge the EasyView's `0x42`-index gap between header fields
+    /// and the Switch / Message blocks.
+    fn probe_existence(&mut self, addr: DeviceId, channel: Channel, max: u16) -> Vec<u8> {
+        use crate::protocol::meta_op as op;
+        let (prefix, encode): (&str, MetaEncode) = match channel {
+            Channel::Btm1 => ("btm1_meta", btm1_meta_req_raw),
+            Channel::Btm3 => ("btm3_meta", btm3_meta_req_raw),
+        };
+        let key = |wire: u16| format!("{}:{:06X}:{:02X}:{}", prefix, addr, op::VIZ, wire);
+
+        let mut existing = Vec::new();
+        let mut wire: u16 = 0;
+        while wire < max {
+            let end = (wire + PROBE_CHUNK).min(max);
+            for w in wire..end {
+                self.waiter.register(&key(w));
+            }
+            for w in wire..end {
+                let frame = encode(addr, op::VIZ, w);
+                frame_log("Dn", ((frame.0 >> 24) & 0x1F) as u8, frame.0 & 0x00FF_FFFF, &frame.1);
+                let _ = self.tx.send(frame.0, &frame.1);
+                // Respect the bus budget so the kernel TX queue can drain at
+                // wire rate; a tight burst of 64 frames in 2 ms (the rate
+                // without pacing) loses responses on the round trip even on
+                // a 250 kbit/s bus.
+                std::thread::sleep(self.cfg.min_send_interval);
+            }
+            let deadline = Instant::now() + self.cfg.discovery_timeout;
+            for w in wire..end {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if self
+                    .waiter
+                    .wait(&key(w), remaining.max(Duration::from_millis(1)))
+                    .is_some()
+                {
+                    existing.push(w as u8);
+                }
+            }
+            wire = end;
+        }
+        existing
     }
 
     /// Per-channel option-string query. Used during list/enum field discovery
@@ -345,57 +397,45 @@ fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option
 /// (`TDevice_MacMagic` etc. inside `MasterAdjust.exe`); the wire protocol
 /// only exposes a flat per-channel field-index space.
 pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<FieldInfo> {
-    let n = disc.group_count(addr, 0x01);
-    if n == 0 {
-        return Vec::new();
-    }
-    let upper = n.min(256) as u8;
-    let mut out = Vec::with_capacity(upper as usize * 2);
-    probe_channel(disc, addr, upper, Channel::Btm1, &mut out);
-    probe_channel(disc, addr, upper, Channel::Btm3, &mut out);
+    // Two-phase: first an existence sweep (one VIZ query per wire index,
+    // pipelined in chunks) over the full 8-bit space, then a full metadata
+    // batch only for indices that responded. The previous miss-streak loop
+    // was too narrow to bridge multi-index gaps (the EasyView 5 has a
+    // ~0x42-index hole between Btm3 header fields and the Switch block).
+    let mut out = Vec::with_capacity(64);
+    probe_channel(disc, addr, Channel::Btm1, &mut out);
+    probe_channel(disc, addr, Channel::Btm3, &mut out);
     out
 }
 
-/// Per-channel flat probe with miss-streak termination.
+/// Per-channel flat probe.
 ///
-/// We iterate wire indices `0..upper` on the channel, calling
-/// [`enumerate_field`] on each. After [`PROBE_MISS_STREAK`] consecutive
-/// indices with no response we conclude the channel is exhausted (or absent
-/// — a Btm1-only device gives us a clean fast-fail on Btm3, and vice
-/// versa). Successful indices accumulate into `out` with the channel bit
-/// set appropriately.
-fn probe_channel(
-    disc: &mut Disc,
-    addr: DeviceId,
-    upper: u8,
-    channel: Channel,
-    out: &mut Vec<FieldInfo>,
-) {
-    let mut misses: u8 = 0;
-    for wire in 0..upper {
+/// Phase 1: pipelined existence sweep ([`Disc::probe_existence`]) identifies
+/// which wire indices have any field at all — one VIZ query per index, sent
+/// in chunks of [`PROBE_CHUNK`] with one shared timeout per chunk.
+///
+/// Phase 2: full metadata batch ([`enumerate_field`], which itself pipelines
+/// 5 opcodes per field) only for the indices that responded in phase 1. No
+/// miss-streak — gaps are free.
+fn probe_channel(disc: &mut Disc, addr: DeviceId, channel: Channel, out: &mut Vec<FieldInfo>) {
+    let wires = disc.probe_existence(addr, channel, 256);
+    for wire in wires {
         let fid = match channel {
             Channel::Btm1 => field_id::btm1(wire),
             Channel::Btm3 => field_id::btm3(wire),
         };
-        match enumerate_field(disc, addr, fid) {
-            Some(f) => {
-                out.push(f);
-                misses = 0;
-            }
-            None => {
-                misses = misses.saturating_add(1);
-                if misses >= PROBE_MISS_STREAK {
-                    break;
-                }
-            }
+        if let Some(f) = enumerate_field(disc, addr, fid) {
+            out.push(f);
         }
     }
 }
 
-/// How many consecutive index-misses end the per-channel flat probe. Tuned
-/// for the observed CombiMaster / Nav Chg gap patterns (no observed gap
-/// longer than 1 within a channel's used range), with margin.
-const PROBE_MISS_STREAK: u8 = 8;
+/// How many existence-probe requests to pipeline before waiting on their
+/// shared timeout. 64 keeps the response burst short enough that the
+/// device's transmit queue doesn't lag behind, while still amortising the
+/// per-chunk timeout (typically ~150 ms) over a meaningful slice of the
+/// 256-index space.
+const PROBE_CHUNK: u16 = 64;
 
 fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<FieldInfo> {
     use crate::protocol::meta_op as op;

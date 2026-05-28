@@ -375,7 +375,7 @@ pub extern "C" fn mb_value_type(v: *const MbValue) -> MbValueType {
         Some(Value::Time(_)) => MbValueType::Time,
         Some(Value::Boolean(_)) => MbValueType::Boolean,
         Some(Value::List { .. }) => MbValueType::List,
-        Some(Value::Text(_)) => MbValueType::Text,
+        Some(Value::Text { .. }) => MbValueType::Text,
         Some(Value::DeviceRef { .. }) => MbValueType::DeviceRef,
         Some(Value::Eventable { .. }) => MbValueType::Eventable,
         _ => MbValueType::Invalid,
@@ -419,7 +419,7 @@ pub extern "C" fn mb_value_time(v: *const MbValue) -> MbTime {
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_value_text(v: *const MbValue) -> *mut c_char {
     match value_ref(v) {
-        Some(Value::Text(s)) => to_cstr(s.clone()),
+        Some(Value::Text { text, .. }) => to_cstr(text.clone()),
         _ => ptr::null_mut(),
     }
 }

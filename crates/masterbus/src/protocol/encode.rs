@@ -48,6 +48,19 @@ pub fn string_chunk_req_raw(device_addr: u32, str_id: u16, seq: u8) -> (u32, Vec
     (id(can_class::PROPERTY_REQ, device_addr), vec![0x30, lo, hi, seq])
 }
 
+/// String-chunk write: class `0x07`, `[0x30, id_lo, id_hi, seq, c0..]` —
+/// same opcode as [`string_chunk_req_raw`], but with up to 4 chars of payload
+/// (`Dn` direction). A full 4-char chunk is 8 bytes; the terminator chunk
+/// carries a single `0x00` (5 bytes) — even when the string is exactly N×4
+/// chars, MasterAdjust emits an explicit NUL-terminator chunk.
+pub fn string_chunk_write_raw(device_addr: u32, str_id: u16, seq: u8, chars: &[u8]) -> (u32, Vec<u8>) {
+    debug_assert!(chars.len() <= 4, "string chunk carries at most 4 chars");
+    let [lo, hi] = str_id.to_le_bytes();
+    let mut data = vec![0x30, lo, hi, seq];
+    data.extend_from_slice(chars);
+    (id(can_class::PROPERTY_REQ, device_addr), data)
+}
+
 /// Schema group-name query: class `0x19`, `[0x28, group_id, 0x00]`.
 pub fn schema_group_name_req_raw(device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
     (id(can_class::SCHEMA_REQ, device_addr), vec![0x28, group_id, 0x00])
@@ -96,6 +109,20 @@ pub fn btm3_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> 
     (
         id(can_class::BTM3_META_REQ, device_addr),
         vec![meta_op::OPTION, field_id, 0x00, opt_idx],
+    )
+}
+
+/// Btm3 value read: class `0x1B` to the alternative address
+/// (`real | 0x800000`), headerless 2-byte payload `[fid_lo, fid_hi]`. The
+/// device replies on class `0x0B` at the same address with the current
+/// 4-byte value. Btm3 value pushes are NOT autonomous on a quiet bus —
+/// without an active read request the device never emits the value, so the
+/// crate must drive each value-fetch itself.
+pub fn btm3_read_raw(device_addr: u32, wire_idx: u8) -> (u32, Vec<u8>) {
+    let [fid_lo, fid_hi] = (wire_idx as u16).to_le_bytes();
+    (
+        id(can_class::SCHEMA_REQ_HISTORY, btm1_meta_addr(device_addr)),
+        vec![fid_lo, fid_hi],
     )
 }
 
@@ -255,6 +282,25 @@ mod tests {
         assert_eq!(
             btm3_write_raw(0x3A3B4B, 0x2C, 2.0),
             (0x1B_BA3B4B, vec![0x2C, 0x00, 0x00, 0x00, 0x00, 0x40]),
+        );
+    }
+
+    #[test]
+    fn string_chunk_write_matches_captured_wire_bytes() {
+        // From the Nav Chg (0x3A3B4B) Device-name edit at 2026-05-27T20:18:29,
+        // changing the editable string at sid 0x0001 from "Nav Chg" to
+        // "NavigationCh":
+        //   Dn 07 3A3B4B [8]  30 01 00 00  4E 61 76 69    "Navi"
+        //   Dn 07 3A3B4B [8]  30 01 00 01  67 61 74 69    "gati"
+        //   Dn 07 3A3B4B [8]  30 01 00 02  6F 6E 43 68    "onCh"
+        //   Dn 07 3A3B4B [5]  30 01 00 03  00             NUL terminator
+        assert_eq!(
+            string_chunk_write_raw(0x3A3B4B, 0x0001, 0, b"Navi"),
+            (0x07_3A3B4B, vec![0x30, 0x01, 0x00, 0x00, 0x4E, 0x61, 0x76, 0x69]),
+        );
+        assert_eq!(
+            string_chunk_write_raw(0x3A3B4B, 0x0001, 3, &[0x00]),
+            (0x07_3A3B4B, vec![0x30, 0x01, 0x00, 0x03, 0x00]),
         );
     }
 
