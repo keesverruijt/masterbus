@@ -6,6 +6,42 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-28
+
+First tagged release on the 0.3 line (0.3.0 was bumped in source but
+never released).
+
+### Added
+- `Device::cached_access_level() -> Option<AccessLevel>` — non-blocking
+  read of the engine-cached access level, safe to call from a render
+  loop. The existing `Device::access_level()` still does a wire
+  round-trip.
+
+### Changed
+- **Login is now password-based**; the library is value-opaque.
+  `Device::login(level, code: f32)` takes whatever f32 the caller
+  hands in; the crate packs it onto the wire as-is. `AccessLevel::code()`
+  removed (the vendor-defined codes are no longer baked into the
+  library or its tests). PROTOCOL.md §4.5 reduced to (level byte,
+  label) — codes are noted as vendor-defined and out of scope. The
+  TUI login modal is now two-stage: pick a level, then enter a
+  password (chars rendered as `•`); the buffer is silently parsed
+  as `f32` and submitted. If the device reports the same level it
+  was at, the status line says *"that seems to be an incorrect
+  password"*.
+- TUI device list: a logged-in device's row appends ` (<Level>)` to
+  its name (e.g. `Nav Chg (Installer)`) — read from the cached
+  access level.
+- TUI field rows: unit column widened from 4 → 5 chars (fits `°C`,
+  `kWh`, `Hz` and similar with a trailing space).
+- Reader: `State::touch` is now gated on the CAN class being
+  device-originated (broadcast / response / push / ack). Our own
+  loopback (`Dn 05/07/18/19/1A/1B/1C ...`) and any other master
+  polling the bus no longer create spurious entries in the device
+  list. Devices that don't broadcast `0x04` (e.g. an EasyView while
+  another master polls it) still appear via their reply / push
+  frames.
+
 ## [0.3.0] - 2026-05-28
 
 ### Added
@@ -169,7 +205,8 @@ Initial release.
 - CI building release binaries for `x86_64`, `armhf` and `aarch64`, attached to
   tagged releases.
 
-[Unreleased]: https://github.com/keesverruijt/masterbus/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/keesverruijt/masterbus/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/keesverruijt/masterbus/compare/v0.2.0...v0.3.1
 [0.3.0]: https://github.com/keesverruijt/masterbus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/keesverruijt/masterbus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/keesverruijt/masterbus/releases/tag/v0.1.0
