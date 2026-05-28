@@ -15,10 +15,12 @@ device, no vendor driver needed).
 All three tools share a small INI file describing the transport and the
 optional "act as bus master" role:
 
-| OS | Path |
-|----|------|
-| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) |
-| Linux (user) / macOS / Windows | `$HOME/.local/masterbus/config.ini` |
+| OS | Config path | Default cache dir |
+|----|------|------|
+| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) | `/var/lib/masterbus` |
+| Linux (user) | `$XDG_CONFIG_HOME/masterbus/config.ini` (default `~/.config/...`) | `$XDG_CACHE_HOME/masterbus` (default `~/.cache/...`) |
+| macOS | `~/Library/Application Support/masterbus/config.ini` | `~/Library/Caches/masterbus` |
+| Windows | `%APPDATA%\masterbus\config.ini` | `%LOCALAPPDATA%\masterbus\cache` |
 
 The file is **read on every start** and **auto-created on first run**
 with sensible defaults — a Mastervolt USB link if plugged in, otherwise
@@ -37,7 +39,7 @@ and pick one. To switch transports, change the master role, or relocate
 the cache, edit the file (or delete it to re-auto-detect). If the
 configured `cache_dir` isn't writable by the running user (e.g.
 `/var/lib/masterbus` for an unprivileged shell), the engine silently
-falls back to `$HOME/.cache/masterbus`.
+falls back to the OS-native per-user cache directory.
 
 ## `masterbus-tui`
 

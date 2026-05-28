@@ -53,10 +53,12 @@ for device in bus.devices() {
 
 `MasterBus::auto` reads (and on first run, creates) a small INI:
 
-| OS | Path |
-|----|------|
-| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) |
-| Linux (user) / macOS / Windows | `$HOME/.local/masterbus/config.ini` |
+| OS | Config path | Default cache dir |
+|----|------|------|
+| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) | `/var/lib/masterbus` |
+| Linux (user) | `$XDG_CONFIG_HOME/masterbus/config.ini` (default `~/.config/...`) | `$XDG_CACHE_HOME/masterbus` (default `~/.cache/...`) |
+| macOS | `~/Library/Application Support/masterbus/config.ini` | `~/Library/Caches/masterbus` |
+| Windows | `%APPDATA%\masterbus\config.ini` | `%LOCALAPPDATA%\masterbus\cache` |
 
 ```ini
 heartbeat_master = 000001               # 24-bit hex, or comment out to stay passive
@@ -66,11 +68,11 @@ cache_dir        = /var/lib/masterbus   # schema cache; comment out to disable
 ```
 
 On creation, a Mastervolt USB link is preferred; otherwise the lone CAN
-interface is selected. `cache_dir` defaults to `/var/lib/masterbus` for the
-system file or `$HOME/.cache/masterbus` for the user file, and silently falls
-back to `$HOME/.cache/masterbus` at runtime when the requested path isn't
-writable by the running user. The path and detected values are logged to
-stderr on creation.
+interface is selected. `cache_dir` defaults to the OS-native per-user cache
+(see the table above) — or `/var/lib/masterbus` when the file is created in
+`/etc/default/masterbus/` — and silently falls back to the per-user path at
+runtime when the requested path isn't writable by the running user. The
+chosen path and detected values are logged to stderr on creation.
 
 See the [repository](https://github.com/keesverruijt/masterbus) for the full
 workspace (C ABI, TUI, Signal K sidecar, one-shot CLI writer) and

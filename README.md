@@ -75,10 +75,12 @@ All tools share a small INI file describing the transport and the optional
 invocation. The file is **read on every start** and **auto-created on first
 run** with sensible defaults:
 
-| OS | Path |
-|----|------|
-| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) |
-| Linux (user) / macOS / Windows | `$HOME/.local/masterbus/config.ini` (`%USERPROFILE%\.local\masterbus\config.ini` on Windows) |
+| OS | Config path | Default cache dir |
+|----|------|------|
+| Linux (system) | `/etc/default/masterbus/config.ini` (if writable) | `/var/lib/masterbus` |
+| Linux (user) | `$XDG_CONFIG_HOME/masterbus/config.ini` (default `$HOME/.config/masterbus/config.ini`) | `$XDG_CACHE_HOME/masterbus` (default `$HOME/.cache/masterbus`) |
+| macOS | `$HOME/Library/Application Support/masterbus/config.ini` | `$HOME/Library/Caches/masterbus` |
+| Windows | `%APPDATA%\masterbus\config.ini` | `%LOCALAPPDATA%\masterbus\cache` |
 
 Auto-detection at creation time prefers a plugged-in **Mastervolt USB link**;
 otherwise the **lone CAN interface** (e.g. `can0`) is selected. Multiple CAN
@@ -100,11 +102,12 @@ device_type = can
 # (blank = first link found).
 device_name = can0
 
-# Where to persist discovered schemas (per device, by serial). The default is
-# /var/lib/masterbus for system installs and $HOME/.cache/masterbus for user
-# installs. A non-writable path silently falls back to $HOME/.cache/masterbus
-# at runtime, so root-owned daemons and user-run tools share schemas when
-# possible. Comment out to disable on-disk caching.
+# Where to persist discovered schemas (per device, by serial). Default is
+# /var/lib/masterbus for system installs and the OS-native per-user cache
+# directory otherwise (see the table above). A non-writable path silently
+# falls back to the per-user cache at runtime, so root-owned daemons and
+# user-run tools share schemas when possible. Comment out to disable
+# on-disk caching.
 cache_dir = /var/lib/masterbus
 ```
 

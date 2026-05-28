@@ -27,11 +27,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `<device_id> <field_id> <value>`; `masterbus-signalk` only
   `[listen-addr]`; `masterbus-tui` takes no arguments.
 - `FileConfig` gains `cache_dir: Option<PathBuf>`. On creation the key
-  defaults to `/var/lib/masterbus` for system installs and
-  `$HOME/.cache/masterbus` for user installs. At runtime, a non-writable
-  configured path silently falls back to `$HOME/.cache/masterbus`, so
-  root-owned daemons and user-run tools share schemas when possible.
-  Comment the key out to disable on-disk caching entirely.
+  defaults to `/var/lib/masterbus` for system installs and to the
+  OS-native per-user cache directory otherwise (XDG on Linux,
+  `~/Library/Caches/masterbus` on macOS, `%LOCALAPPDATA%\masterbus\cache`
+  on Windows). At runtime, a non-writable configured path silently
+  falls back to the per-user cache, so root-owned daemons and user-run
+  tools share schemas when possible. Comment the key out to disable
+  on-disk caching entirely.
+- Per-user config path is now OS-native: `$XDG_CONFIG_HOME/masterbus/`
+  on Linux (default `~/.config/masterbus/`), `~/Library/Application
+  Support/masterbus/` on macOS, `%APPDATA%\masterbus\` on Windows.
+  (Previous beta builds used `~/.local/masterbus/` everywhere — if you
+  have such a file, copy it to the new location or let the tools
+  re-create one.)
 - The bundled systemd unit no longer sets `CAN_IFACE` or passes the
   cache path to `ExecStart` — both come from
   `/etc/default/masterbus/config.ini`. `ReadWritePaths` extended to

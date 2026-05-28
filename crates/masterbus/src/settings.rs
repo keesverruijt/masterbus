@@ -5,10 +5,18 @@
 //! # Location
 //!
 //! - **Linux**: `/etc/default/masterbus/config.ini` if present (or creatable in
-//!   `/etc/default/masterbus/` / `/etc/default/`). Otherwise falls back to
-//!   `$HOME/.local/masterbus/config.ini`.
-//! - **macOS / Windows**: `$HOME/.local/masterbus/config.ini`
-//!   (resp. `%USERPROFILE%\.local\masterbus\config.ini`).
+//!   `/etc/default/masterbus/` / `/etc/default/`); otherwise
+//!   `$XDG_CONFIG_HOME/masterbus/config.ini`
+//!   (defaults to `$HOME/.config/masterbus/config.ini`).
+//! - **macOS**: `$HOME/Library/Application Support/masterbus/config.ini`.
+//! - **Windows**: `%APPDATA%\masterbus\config.ini`.
+//!
+//! The schema cache (`cache_dir`) follows the same convention:
+//!
+//! - **Linux**: `/var/lib/masterbus` (system) or `$XDG_CACHE_HOME/masterbus`
+//!   (per-user; defaults to `$HOME/.cache/masterbus`).
+//! - **macOS**: `$HOME/Library/Caches/masterbus`.
+//! - **Windows**: `%LOCALAPPDATA%\masterbus\cache`.
 //!
 //! # File format
 //!
@@ -110,13 +118,13 @@ fn default_cache_dir(config_path: &std::path::Path) -> Option<PathBuf> {
     if config_path.starts_with("/etc/") {
         Some(PathBuf::from("/var/lib/masterbus"))
     } else {
-        home_dir().map(|h| h.join(".cache").join("masterbus"))
+        user_cache_dir()
     }
 }
 
 /// Resolve the file's `cache_dir` to a usable directory: try the requested
-/// path first (creating it if needed); if it's not writable, fall back to
-/// `$HOME/.cache/masterbus`. Returns `None` only if both attempts fail.
+/// path first (creating it if needed); if it's not writable, fall back to the
+/// OS-native per-user cache. Returns `None` only if both attempts fail.
 ///
 /// `None` input means the user intentionally disabled caching (the key was
 /// commented out or absent), so the caller passes `None` straight through.
@@ -124,18 +132,18 @@ pub(crate) fn resolve_cache_dir(requested: &std::path::Path) -> Option<PathBuf> 
     if try_use_dir(requested) {
         return Some(requested.to_path_buf());
     }
-    let home_cache = home_dir()?.join(".cache").join("masterbus");
-    if requested == home_cache {
+    let user_cache = user_cache_dir()?;
+    if requested == user_cache {
         // We already tried that.
         return None;
     }
-    if try_use_dir(&home_cache) {
+    if try_use_dir(&user_cache) {
         eprintln!(
             "masterbus: {} not writable, falling back to {}",
             requested.display(),
-            home_cache.display()
+            user_cache.display()
         );
-        return Some(home_cache);
+        return Some(user_cache);
     }
     None
 }
@@ -157,7 +165,7 @@ fn try_use_dir(dir: &std::path::Path) -> bool {
 
 /// Resolve the path the config file should live at. Prefers a system-wide
 /// location on Linux when one is readable or writable; otherwise the
-/// home-directory fallback.
+/// OS-native per-user path.
 fn resolve_path() -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -176,9 +184,9 @@ fn resolve_path() -> Result<PathBuf> {
             return Ok(sys_path);
         }
     }
-    let home = home_dir()
-        .ok_or_else(|| Error::Connection("no home directory (HOME unset)".into()))?;
-    Ok(home.join(".local").join("masterbus").join("config.ini"))
+    user_config_path().ok_or_else(|| {
+        Error::Connection("could not determine the per-user config path (no HOME?)".into())
+    })
 }
 
 #[cfg(unix)]
@@ -189,6 +197,72 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(windows)]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").map(PathBuf::from)
+}
+
+/// OS-native per-user path for `config.ini`:
+///
+/// - **Linux**: `$XDG_CONFIG_HOME/masterbus/config.ini`
+///   (default `$HOME/.config/masterbus/config.ini`)
+/// - **macOS**: `$HOME/Library/Application Support/masterbus/config.ini`
+/// - **Windows**: `%APPDATA%\masterbus\config.ini`
+fn user_config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join(".config")))?;
+        Some(base.join("masterbus").join("config.ini"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|h| {
+            h.join("Library")
+                .join("Application Support")
+                .join("masterbus")
+                .join("config.ini")
+        })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join("AppData").join("Roaming")))
+            .map(|d| d.join("masterbus").join("config.ini"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        home_dir().map(|h| h.join(".config").join("masterbus").join("config.ini"))
+    }
+}
+
+/// OS-native per-user schema-cache directory:
+///
+/// - **Linux**: `$XDG_CACHE_HOME/masterbus` (default `$HOME/.cache/masterbus`)
+/// - **macOS**: `$HOME/Library/Caches/masterbus`
+/// - **Windows**: `%LOCALAPPDATA%\masterbus\cache`
+fn user_cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join(".cache")))?;
+        Some(base.join("masterbus"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|h| h.join("Library").join("Caches").join("masterbus"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join("AppData").join("Local")))
+            .map(|d| d.join("masterbus").join("cache"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        home_dir().map(|h| h.join(".cache").join("masterbus"))
+    }
 }
 
 /// Best-effort writability check: try to create+delete a temp file in `dir`.
@@ -460,5 +534,32 @@ mod tests {
     fn default_cache_for_system_path() {
         let sys = default_cache_dir(std::path::Path::new("/etc/default/masterbus/config.ini"));
         assert_eq!(sys, Some(PathBuf::from("/var/lib/masterbus")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_paths_follow_xdg() {
+        let cfg = user_config_path().expect("HOME set in tests");
+        assert!(
+            cfg.ends_with(".config/masterbus/config.ini")
+                || cfg.ends_with("masterbus/config.ini"), // XDG_CONFIG_HOME set
+            "unexpected linux user config: {}",
+            cfg.display()
+        );
+        let cache = user_cache_dir().expect("HOME set in tests");
+        assert!(
+            cache.ends_with(".cache/masterbus") || cache.ends_with("masterbus"),
+            "unexpected linux user cache: {}",
+            cache.display()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn user_paths_follow_macos_layout() {
+        let cfg = user_config_path().expect("HOME set in tests");
+        assert!(cfg.ends_with("Library/Application Support/masterbus/config.ini"));
+        let cache = user_cache_dir().expect("HOME set in tests");
+        assert!(cache.ends_with("Library/Caches/masterbus"));
     }
 }
