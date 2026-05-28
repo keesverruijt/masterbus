@@ -6,6 +6,85 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-28
+
+### Added
+- **Two-channel field model**: `Channel::Btm1` / `Btm3` exposed through a
+  `FieldId = u16` (bit 8 = channel, bits 0..8 = wire index). The crate now
+  speaks both the legacy Btm1 metadata path and the newer Btm3 path
+  end-to-end. Visible in the TUI as the three-digit hex tag (`0x004`,
+  `0x10E`, …) next to each editable row.
+- **Active Btm3 value reads**: `btm3_read_raw` + an active read in
+  `poll_value`. On a quiet bus (no other master polling), Btm3 fields
+  used to never deliver a value because the device only pushes in
+  response to a read; the crate now issues that read itself.
+- **Editable string round-trip**: `Value::Text { sid, text }` carries the
+  string id of the editable slot; `Field::set(Value::Text { … })` writes
+  via the class-`0x07` chunk protocol (PROTOCOL.md §4.4). A wire-level
+  16-byte printable-ASCII cap (`MAX_EDITABLE_TEXT_BYTES`) is validated
+  at the API boundary and enforced in the TUI editor.
+- **Per-device access-level login** (`Field::set_access_level` /
+  `Device::login` / `Device::logout`, opcode `0x08 0x19` on class
+  `0x07`). The schema cache is keyed by access level so writability
+  flips on level change don't poison the cache.
+- **`masterbus-tools` crate** that ships three binaries — `masterbus-tui`,
+  `masterbus-signalk`, `masterbus-set-field` — via one
+  `cargo install masterbus-tools`. The library crate `masterbus` stays
+  lean; library consumers (`cargo add masterbus`) don't pull in
+  `ratatui` / `serde_json`.
+- **`masterbus-set-field`** binary: one-shot CLI write for shell
+  scripts (`masterbus-set-field <transport> <device_id> <field_id> <value>`,
+  values parsed against the field's discovered visualization).
+- **Optional CAN frame log** via `MASTERBUS_LOG=<path>` (Tx + Rx, one
+  frame per line, vmware.log-compatible decoded form). Cheap when
+  disabled.
+- **TUI tab redesign**: Summary / Monitoring / Configuration / Service /
+  Settings. Every tab subscribes so values stream in; the Settings tab
+  enumerates the Btm3 flat field list and presents per-field metadata
+  not otherwise reachable from the per-menu Btm1 schema.
+- **TUI edit modal**: editing moved out of the bottom status line into
+  a centred 60×9 popup (mirroring the login modal). Text edits pre-fill
+  with the current string and show a live char counter against the
+  16-byte cap.
+- **Touch-creates-device** in `State::touch`: any inbound frame from a
+  device registers it. Silent-but-polled devices (e.g. an EasyView
+  responding to another master's queries without emitting class-`0x04`
+  broadcasts) now appear in the device list.
+- `Disc::probe_existence`: pipelined existence sweep in 64-frame chunks
+  paced by `min_send_interval` (default 1 ms). Bridges multi-index
+  gaps in the Btm3 field-id space (the EasyView has a 66-index gap
+  between header fields and the Switch block) that the previous
+  miss-streak loop skipped, finishing a 256-index sweep in ~1 s per
+  channel.
+
+### Changed
+- **Renamed "shadow" → "Btm1/Btm3 metadata"** throughout the wire
+  abstraction. The shadow concept (`addr | 0x800000`) is now an
+  internal address detail of the Btm1 metadata path; no public symbol
+  named "shadow" remains.
+- `State::has_field` / `viz_of` / `Field::info` / `Engine::ensure_field`
+  consult both `schema.groups` (Btm1 menu walk) and `all_fields` (Btm3
+  flat probe). Previously every Btm3 field returned `FieldNotAvailable`
+  to `Field::set`.
+- `Config::min_send_interval` default `3 ms → 1 ms`, safe at 250 kbit/s
+  with the chunked probe.
+
+### Fixed
+- TUI Configuration tab now subscribes to its fields (was: lazy-on-
+  click) so values are present when the user clicks "edit".
+- Reader caches Btm3 value pushes via the unified `state.field_info`,
+  not the old menu-groups-only lookup. Btm3 values stopped getting
+  silently dropped.
+- TUI device list now masks the Btm1-shadow flag (`0x800000`) on
+  inbound traffic so `0xBA3B4B` and `0x3A3B4B` don't create two
+  entries.
+
+### Removed
+- The standalone `masterbus-tui`, `masterbus-signalk`, and
+  `masterbus-set-field` workspace crates — their binaries now live
+  under `masterbus-tools`. The published `masterbus-tui` crate (and
+  any siblings) will be yanked from crates.io.
+
 ## [0.2.0] - 2026-05-25
 
 ### Added
@@ -90,6 +169,7 @@ Initial release.
 - CI building release binaries for `x86_64`, `armhf` and `aarch64`, attached to
   tagged releases.
 
-[Unreleased]: https://github.com/keesverruijt/masterbus/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/keesverruijt/masterbus/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/keesverruijt/masterbus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/keesverruijt/masterbus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/keesverruijt/masterbus/releases/tag/v0.1.0

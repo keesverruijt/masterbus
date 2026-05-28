@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "hidapi",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cbindgen",
  "masterbus",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "masterbus",
