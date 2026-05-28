@@ -137,5 +137,10 @@ pub enum WriteValue {
     /// List/enum index write (`[field, tab, index]`).
     ListIndex(i32),
     /// Text write: chunked update of the string table at `sid` (PROTOCOL.md §4.4).
-    Text { sid: u16, text: String },
+    Text {
+        /// String-table id of the editable slot to overwrite.
+        sid: u16,
+        /// New string content; will be chunked on the wire, NUL-terminated.
+        text: String,
+    },
 }

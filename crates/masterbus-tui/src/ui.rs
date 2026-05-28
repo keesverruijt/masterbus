@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::Frame;
 
-use masterbus::{field_id, Channel, DeviceStatus, FieldId, Value};
+use masterbus::{DeviceStatus, FieldId, Value};
 
 use crate::app::{level_label, tab_label, App, EditKind, Focus, Row, TabKind, LOGIN_LEVELS, TABS};
 
@@ -24,6 +24,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_footer(f, app, outer[1]);
     if app.login.is_some() {
         draw_login(f, app, f.area());
+    }
+    if app.editor.is_some() {
+        draw_edit_modal(f, app, f.area());
     }
 }
 
@@ -230,27 +233,62 @@ fn draw_login(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let (text, style) = match &app.editor {
-        Some(ed) => {
-            let body = match &ed.kind {
-                EditKind::Number(buf) => {
-                    format!(" edit {} = {}_   (Enter ok · Esc cancel)", ed.name, buf)
-                }
-                EditKind::Choice { options, sel } => format!(
-                    " edit {} ‹ {} ›   (←/→ change · Enter ok · Esc cancel)",
-                    ed.name,
-                    options.get(*sel).map(String::as_str).unwrap_or("?")
-                ),
-                EditKind::Text { str_id, buf } => format!(
-                    " edit {} (sid 0x{:04X}) = \"{}_\"   (Enter ok · Esc cancel)",
-                    ed.name, str_id, buf
-                ),
-            };
-            (body, Style::new().fg(Color::Black).bg(Color::Cyan))
-        }
-        None => (format!(" {}", app.status), Style::new().fg(Color::Gray)),
+    // The status line; the in-progress edit moves to a centred modal
+    // (see [`draw_edit_modal`]).
+    let style = Style::new().fg(Color::Gray);
+    f.render_widget(Paragraph::new(format!(" {}", app.status)).style(style), area);
+}
+
+fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
+    let Some(ed) = &app.editor else { return };
+    // 60×9 centred (clamped to terminal size). Wide enough for a 22-char
+    // field name + the 16-char text limit + a margin.
+    let w = 60u16.min(area.width.saturating_sub(2));
+    let h = 9u16.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    f.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title(format!(" Edit · {} ", ed.name));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let (body, hint) = match &ed.kind {
+        EditKind::Number(buf) => (
+            format!(" {buf}_ "),
+            "Enter ok  ·  Esc cancel".to_string(),
+        ),
+        EditKind::Choice { options, sel } => (
+            format!(
+                " ‹ {} ›   ({}/{}) ",
+                options.get(*sel).map(String::as_str).unwrap_or("?"),
+                sel + 1,
+                options.len()
+            ),
+            "←/→ change  ·  Enter ok  ·  Esc cancel".to_string(),
+        ),
+        EditKind::Text { str_id, buf } => (
+            format!(" \"{buf}_\" "),
+            format!(
+                "sid 0x{:04X}  ·  {}/{} chars  ·  Enter ok  ·  Esc cancel",
+                str_id,
+                buf.len(),
+                masterbus::MAX_EDITABLE_TEXT_BYTES
+            ),
+        ),
     };
-    f.render_widget(Paragraph::new(text).style(style), area);
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(body, Style::new().fg(Color::White).add_modifier(Modifier::BOLD))),
+        Line::raw(""),
+        Line::from(Span::styled(hint, Style::new().fg(Color::DarkGray))),
+    ];
+    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 fn bordered(title: String, focused: bool) -> Block<'static> {
@@ -312,14 +350,12 @@ pub fn format_value(v: &Value) -> String {
     }
 }
 
-/// Render a channel-aware [`FieldId`] as `B1.XX` (Btm1) or `B3.XX` (Btm3),
-/// where `XX` is the 8-bit wire index in uppercase hex. Five chars wide.
+/// Render a channel-aware [`FieldId`] as `0x000`..`0x1FF` — three hex digits
+/// of the full `u16` id, where bit 8 encodes the channel (`0x000`..`0x0FF` =
+/// Btm1, `0x100`..`0x1FF` = Btm3). Five chars wide, matches the encoding the
+/// `masterbus-set-field` CLI takes as its `<field_id>` argument.
 fn field_id_tag(id: FieldId) -> String {
-    let ch = match field_id::channel(id) {
-        Channel::Btm1 => "B1",
-        Channel::Btm3 => "B3",
-    };
-    format!("{ch}.{:02X}", field_id::wire_index(id))
+    format!("0x{id:03X}")
 }
 
 fn truncate(s: &str, max: usize) -> String {

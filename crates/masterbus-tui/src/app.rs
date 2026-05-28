@@ -596,8 +596,11 @@ impl App {
             {
                 buf.push(c);
             }
+            // Text fields are constrained on the wire: printable ASCII only,
+            // ≤16 bytes. Enforce here so the user can't even type past it.
             Some(Editor { kind: EditKind::Text { buf, .. }, .. })
-                if c.is_ascii_graphic() || c == ' ' =>
+                if (c.is_ascii_graphic() || c == ' ')
+                    && buf.len() < masterbus::MAX_EDITABLE_TEXT_BYTES =>
             {
                 buf.push(c);
             }

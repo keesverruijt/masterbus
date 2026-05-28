@@ -41,6 +41,17 @@ pub enum Error {
     #[error("field is read-only")]
     ReadOnly,
 
+    /// A string-write payload violated the device-side constraint: editable
+    /// strings on MasterBus are limited to 16 bytes of printable ASCII (no
+    /// embedded NUL — the NUL is the on-wire terminator).
+    #[error("string must be ≤ 16 printable-ASCII chars (got {got} chars; first invalid: {issue})")]
+    InvalidText {
+        /// Length of the offending string.
+        got: usize,
+        /// What was wrong: `"too long"` or a description of the bad byte.
+        issue: String,
+    },
+
     /// A malformed or unexpected protocol frame.
     #[error("protocol error: {0}")]
     Protocol(String),

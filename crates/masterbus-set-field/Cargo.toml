@@ -1,0 +1,18 @@
+[package]
+name = "masterbus-set-field"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line one-shot writer for Mastervolt MasterBus field values"
+readme = "../../README.md"
+keywords = ["mastervolt", "masterbus", "canbus", "marine"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[[bin]]
+name = "masterbus-set-field"
+path = "src/main.rs"
+
+[dependencies]
+masterbus.workspace = true

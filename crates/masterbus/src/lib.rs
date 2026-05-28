@@ -103,7 +103,7 @@ mod runtime;
 pub mod transport;
 pub mod value;
 
-pub use api::{Device, Field, Group, MasterBus, Subscription};
+pub use api::{Device, Field, Group, MasterBus, Subscription, MAX_EDITABLE_TEXT_BYTES};
 pub use error::{Error, Result};
 pub use model::{
     field_id, AccessLevel, Channel, DeviceId, DeviceIdentity, DeviceSchema, DeviceStatus, FieldId,

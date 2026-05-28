@@ -745,6 +745,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "masterbus-set-field"
+version = "0.2.0"
+dependencies = [
+ "masterbus",
+]
+
+[[package]]
 name = "masterbus-signalk"
 version = "0.2.0"
 dependencies = [

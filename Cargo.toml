@@ -5,6 +5,7 @@ members = [
     "crates/masterbus-ffi",
     "crates/masterbus-tui",
     "crates/masterbus-signalk",
+    "crates/masterbus-set-field",
 ]
 
 [workspace.package]

@@ -316,6 +316,9 @@ impl Field {
             return Err(Error::ReadOnly);
         }
         let wv = write_value_for(info.viz_type, value)?;
+        if let WriteValue::Text { text, .. } = &wv {
+            validate_editable_text(text)?;
+        }
         self.engine.write(self.device, self.index, wv)
     }
 
@@ -324,6 +327,37 @@ impl Field {
         let (id, rx) = self.engine.subscribe(self.device, vec![self.index], interval, change_only);
         Subscription { engine: self.engine.clone(), id, rx }
     }
+}
+
+/// Maximum byte length of an editable MasterBus string. The wire protocol
+/// (PROTOCOL.md §4.4) chunks strings in 4-byte groups and NUL-terminates them;
+/// every observed device caps editable slots at 16 characters of printable
+/// ASCII (the limit MasterAdjust enforces on its input widgets).
+pub const MAX_EDITABLE_TEXT_BYTES: usize = 16;
+
+/// Validate a candidate string-write payload against the wire constraints.
+fn validate_editable_text(s: &str) -> Result<()> {
+    if s.len() > MAX_EDITABLE_TEXT_BYTES {
+        return Err(Error::InvalidText {
+            got: s.len(),
+            issue: format!("too long (max {MAX_EDITABLE_TEXT_BYTES})"),
+        });
+    }
+    for (i, b) in s.bytes().enumerate() {
+        if b == 0 {
+            return Err(Error::InvalidText {
+                got: s.len(),
+                issue: format!("embedded NUL at byte {i}"),
+            });
+        }
+        if !(0x20..=0x7E).contains(&b) {
+            return Err(Error::InvalidText {
+                got: s.len(),
+                issue: format!("non-printable byte 0x{b:02X} at byte {i}"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Validate a [`Value`] against the field's [`VisualizationType`] and convert it
@@ -422,6 +456,11 @@ mod tests {
             write_value_for(VisualizationType::CheckBox, Value::Float(1.0)),
             Err(Error::WrongType { .. })
         ));
+        // Editable-text validator: 16-byte printable-ASCII cap, no NULs.
+        assert!(validate_editable_text("Nav Chg").is_ok());
+        assert!(validate_editable_text("01234567890123456").is_err()); // 17 chars
+        assert!(validate_editable_text("hi\0there").is_err());          // embedded NUL
+        assert!(validate_editable_text("hé").is_err());                  // non-ASCII
         // Non-writable field types are rejected.
         assert!(matches!(
             write_value_for(VisualizationType::Date, Value::Date(Date { day: 1, mon: 1, year: 2026 })),
