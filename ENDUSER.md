@@ -74,12 +74,14 @@ shell script or cron), the API is exposed through the
 [`masterbus`](crates/masterbus) Rust crate. A few lines of Rust:
 
 ```rust
-use masterbus::{MasterBus, Transport, Value};
+use masterbus::{Config, MasterBus, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let bus = MasterBus::connect(Transport::socketcan("can0")?, Default::default())?;
+    // Linux/SocketCAN: MasterBus::socketcan("can0", config).
+    // macOS / Windows or USB-link on Linux: MasterBus::usb(None, config).
+    let bus = MasterBus::socketcan("can0", Config::default())?;
     let device = bus.device(0x188EA2);          // your device id
-    let field  = device.field(0x0013);          // your field id
+    let field  = device.field(0x0013);          // your field id (three-digit hex from the TUI)
     field.set(Value::Boolean(true))?;            // turn it on
     Ok(())
 }

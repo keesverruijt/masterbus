@@ -61,6 +61,13 @@ cargo test  --workspace                 # unit tests
 cargo build --release --target aarch64-unknown-linux-gnu   # cross-compile for a Pi
 ```
 
+Or install the three command-line tools (`masterbus-tui`,
+`masterbus-signalk`, `masterbus-set-field`) directly:
+
+```sh
+cargo install masterbus-tools
+```
+
 ### TUI
 
 ```sh
@@ -72,10 +79,12 @@ masterbus-tui usb  [serial] [cache-dir]      # over the Mastervolt USB link
 masterbus-tui
 ```
 
-Browse devices on the left; the selected device's groups/fields are on the right.
-`Tab` switches between the Monitoring / Config / Service tabs (each discovered on
-demand). Writable fields are editable: booleans toggle, numbers open an editor,
-lists cycle with the arrow keys.
+Browse devices on the left; the selected device's tabs are on the right —
+`Summary` / `Monitoring` / `Configuration` / `Service` / `Settings`, each
+discovered on demand. `Tab` / `Shift-Tab` switch tabs, `Enter` edits a writable
+field (booleans toggle, numbers / lists / text open a centred edit modal),
+`l` opens the access-level (login) modal — higher levels unlock more fields,
+`q` quits.
 
 ### Signal K sidecar
 
@@ -109,11 +118,12 @@ been exercised against a live bus.
 
 ## TODO
 
-- [ ] **Dealer access level** — installer/service fields are viewable but
-  write-gated at the CAN level until a dealer-login frame is sent; capturing that
-  frame is deferred, so for now only already-writable fields can be set.
-- [ ] **Alarms and Events** — the per-device Alarm tab and event streams are not
-  yet exposed by the API.
+- [ ] **Alarms tab / event streams** — `Menu::Alarm` and `Menu::History` are
+  defined and discoverable, but the TUI tabs for them were removed during the
+  channel-aware redesign and not yet restored. The crate also doesn't surface
+  alarm broadcasts as events to API consumers.
+- [ ] **`masterbus-set-field` Date / Time writes** — currently rejected; not a
+  common need but the CLI advertises the omission.
 
 ## License
 
