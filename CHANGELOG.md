@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-28
+
 ### Added
 - **Logging via the `log` facade.** The library emits `info`/`warn`/`error`/
   `debug`/`trace` on these targets: `masterbus` (default, connect /
@@ -16,8 +18,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `trace`). No runtime cost when no backend is installed.
 - The bundled binaries pull in `env_logger`. `masterbus-signalk` defaults
   to `info`; `masterbus-set-field` defaults to `warn`; `masterbus-tui`
-  defaults to `warn` and writes to `masterbus-tui.log` (or
-  `$MASTERBUS_TUI_LOG`) so the alt-screen stays clean.
+  routes its logs to an in-app pane (toggle with `~`) via `tui-logger`,
+  defaulting to `info`. Set `MASTERBUS_TUI_LOG=<path>` to redirect to a
+  file instead.
+- `masterbus::frame` trace lines carry a trailing semantic tag —
+  `read-btm1`, `write-btm1`, `read-btm3`, `write-btm3`, `push-btm1`,
+  `ack`, `poll`, `broadcast`, `schema-req`, `meta-btm3-req`, etc. —
+  so reads, writes, pushes, and discovery requests are visually
+  distinct without decoding the class byte by hand.
+- TUI: press `?` on a list / eventable field to see all option labels
+  with their underlying integer indices, current value highlighted.
 - `MasterBus::auto(Config)` — one-call constructor that reads (and on
   first run creates) a per-host config file, then picks the right
   transport. The file lives at `/etc/default/masterbus/config.ini` on
@@ -63,6 +73,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache path to `ExecStart` — both come from
   `/etc/default/masterbus/config.ini`. `ReadWritePaths` extended to
   include that directory.
+- TUI right-pane field rows reordered to `tag · name · rw|ro · value · unit`
+  with a 21-char value column; list values render as `Label(index)` so
+  the raw wire value is visible alongside the human label.
 
 ## [0.3.1] - 2026-05-28
 
