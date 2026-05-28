@@ -111,8 +111,11 @@ fn connect(args: &mut Vec<String>, config: Config) -> MasterBus {
             MasterBus::usb(serial.as_deref(), config)
         }
         Some(iface) => {
+            // Clone the iface before mutating `args` so we don't hold an
+            // immutable borrow into the same Vec across `remove`.
+            let iface = iface.to_string();
             args.remove(0);
-            MasterBus::socketcan(iface, config)
+            MasterBus::socketcan(&iface, config)
         }
         None => {
             eprintln!("usage: login <can-iface> <device-hex> [level] [field-hex]");

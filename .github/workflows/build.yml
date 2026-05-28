@@ -61,10 +61,12 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
-      # Shippable artifacts: the TUI executable, the FFI library + header, and
-      # (Linux only) the Signal K sidecar + its systemd unit. The `masterbus`
-      # core crate is an rlib (consumed via crates.io) and has no standalone
-      # binary; it is still built/checked as part of the workspace above.
+      # Shippable artifacts: the three `masterbus-tools` binaries (TUI
+      # + set-field everywhere, signalk on Linux only), the FFI library
+      # + header, and (Linux only) the signalk systemd unit. The
+      # `masterbus` core crate is an rlib (consumed via crates.io) and
+      # has no standalone binary; it is still built / checked as part
+      # of the workspace above.
       - name: Stage artifacts
         shell: bash
         run: |
@@ -72,8 +74,10 @@ jobs:
           dist="masterbus-${{ matrix.target }}"
           mkdir -p "$dist"
           cp crates/masterbus-ffi/include/masterbus.h "$dist/"
-          # TUI (with or without .exe)
-          if [ -f "$out/masterbus-tui.exe" ]; then cp "$out/masterbus-tui.exe" "$dist/"; else cp "$out/masterbus-tui" "$dist/"; fi
+          # Cross-platform tools (with or without .exe)
+          for b in masterbus-tui masterbus-set-field; do
+            if [ -f "$out/$b.exe" ]; then cp "$out/$b.exe" "$dist/"; else cp "$out/$b" "$dist/"; fi
+          done
           # FFI library + static lib (whichever names this platform produced)
           for f in libmasterbus_ffi.so libmasterbus_ffi.dylib libmasterbus_ffi.a \
                    masterbus_ffi.dll masterbus_ffi.dll.lib masterbus_ffi.lib; do
@@ -83,7 +87,7 @@ jobs:
           case "${{ matrix.target }}" in
             *linux*)
               cp "$out/masterbus-signalk" "$dist/"
-              cp crates/masterbus-signalk/masterbus-signalk.service "$dist/"
+              cp crates/masterbus-tools/etc/masterbus-signalk.service "$dist/"
               ;;
           esac
           echo "DIST=$dist" >> "$GITHUB_ENV"

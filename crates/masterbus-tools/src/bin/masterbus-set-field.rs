@@ -168,8 +168,8 @@ fn build_value(
             };
             Ok(Value::Text { sid, text: arg.to_string() })
         }
-        V::Date | V::Time => Err(format!("Date / Time fields aren't writable from this CLI")),
-        V::DeviceList => Err(format!("DeviceRef fields aren't writable from this CLI")),
+        V::Date | V::Time => Err("Date / Time fields aren't writable from this CLI".to_string()),
+        V::DeviceList => Err("DeviceRef fields aren't writable from this CLI".to_string()),
     }
 }
 
