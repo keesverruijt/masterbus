@@ -59,7 +59,7 @@ impl Disc<'_> {
                 self.cfg.discovery_timeout, attempt + 1
             );
         }
-        log::warn!(
+        log::debug!(
             target: "masterbus::discovery",
             "{key}: giving up after {retries} attempt(s)"
         );
@@ -325,7 +325,7 @@ pub(super) fn discover_menu(
     let started = std::time::Instant::now();
     log::debug!(target: "masterbus::discovery", "0x{addr:06X} {menu:?}: enumerating");
     let g = enumerate_menu(disc, addr, menu);
-    log::info!(
+    log::debug!(
         target: "masterbus::discovery",
         "0x{addr:06X} {menu:?}: discovered {} groups in {:?}",
         g.len(),

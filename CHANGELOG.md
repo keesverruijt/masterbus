@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `masterbus::discovery`: the per-menu "discovered N groups" log demoted from
+  `info` to `debug`, and the per-attempt "giving up after N attempts" demoted
+  from `warn` to `debug`. Neither is actionable during normal startup.
+
 ## [0.3.2] - 2026-05-28
 
 ### Added
