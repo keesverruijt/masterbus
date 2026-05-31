@@ -29,17 +29,27 @@ impl SocketCanTransport {
 
 impl Transport for SocketCanTransport {
     fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
-        (Box::new(Rx { sock: self.read }), Box::new(Tx { sock: self.write }))
+        (
+            Box::new(Rx { sock: self.read, cur_timeout: None }),
+            Box::new(Tx { sock: self.write }),
+        )
     }
 }
 
 struct Rx {
     sock: CanSocket,
+    cur_timeout: Option<Duration>,
 }
 
 impl TransportRx for Rx {
     fn recv(&mut self, timeout: Duration) -> Result<Option<(u32, Vec<u8>)>> {
-        self.sock.set_read_timeout(timeout).ok();
+        // `set_read_timeout` is a `setsockopt(SO_RCVTIMEO)` syscall; skip it
+        // when the timeout hasn't changed since the previous call. The reader
+        // loop uses a constant timeout, so this fires exactly once.
+        if self.cur_timeout != Some(timeout) {
+            self.sock.set_read_timeout(timeout).ok();
+            self.cur_timeout = Some(timeout);
+        }
         match self.sock.read_frame() {
             Ok(frame) => Ok(Some((frame.raw_id(), frame.data().to_vec()))),
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
