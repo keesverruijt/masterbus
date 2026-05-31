@@ -353,9 +353,9 @@ impl Sched {
     }
 
     fn do_write(&mut self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
-        log::debug!(
+        log::info!(
             target: "masterbus::write",
-            "0x{addr:06X} fid 0x{field:04X} = {value:?}",
+            "→ write 0x{addr:06X} field 0x{field:04X} = {value:?}",
         );
         // Text fields write via the string-chunk protocol (PROTOCOL.md §4.4),
         // not the numeric-write path: the field's "value" is the sid, the
@@ -369,6 +369,33 @@ impl Sched {
         let wire = field_id::wire_index(field);
         match field_id::channel(field) {
             Channel::Btm1 => {
+                // Relay-style boolean controls (e.g. the CombiMaster inverter
+                // / charger) only act when the value write is followed by a
+                // fixed "commit" token to the adjacent hidden command
+                // register at field+1. The CombiMaster reports that register
+                // in schema discovery as an unnamed FieldInfo (empty name,
+                // zero min/max/step, no options) — treat empty-name as
+                // hidden. If a *named* user-facing field is in the way,
+                // refuse the write rather than silently failing to actuate.
+                if matches!(value, WriteValue::Bool(_)) {
+                    let cmd = field + 1;
+                    let cmd_field = self.state.schema(addr).and_then(|s| s.field(cmd).cloned());
+                    if let Some(f) = &cmd_field {
+                        if !f.name.is_empty() {
+                            log::warn!(
+                                target: "masterbus::write",
+                                "  refusing boolean write: commit slot at fid 0x{cmd:04X} \
+                                 is occupied by named field \"{}\". schema entry: {f:?}",
+                                f.name,
+                            );
+                            return Err(Error::CommitFieldOccupied {
+                                field: field as i32,
+                                cmd_field: cmd as i32,
+                                cmd_field_name: f.name.clone(),
+                            });
+                        }
+                    }
+                }
                 let frame = match value {
                     WriteValue::Bool(b) => encode_set_boolean(addr, wire, b),
                     WriteValue::Float(f) => encode_set_float(addr, wire, f),
@@ -376,23 +403,13 @@ impl Sched {
                     WriteValue::Text { .. } => unreachable!("handled above"),
                 };
                 self.send(frame);
-                // Relay-style boolean controls (e.g. the CombiMaster inverter
-                // / charger) only act when the value write is followed by a
-                // fixed "commit" token to the adjacent hidden command
-                // register at field+1. Only emit it when that register is
-                // hidden (not a real schema field), so we never clobber a
-                // neighbouring setting on devices that don't use this
-                // pattern.
                 if matches!(value, WriteValue::Bool(_)) {
                     let cmd = field + 1;
-                    let cmd_hidden = self
-                        .state
-                        .schema(addr)
-                        .map(|s| s.field(cmd).is_none())
-                        .unwrap_or(true);
-                    if cmd_hidden {
-                        self.send(encode_commit(addr, field_id::wire_index(cmd)));
-                    }
+                    log::info!(
+                        target: "masterbus::write",
+                        "  emitting commit token at fid 0x{cmd:04X}",
+                    );
+                    self.send(encode_commit(addr, field_id::wire_index(cmd)));
                 }
             }
             Channel::Btm3 => {
@@ -414,7 +431,18 @@ impl Sched {
         // 0x08 lands within tens of ms; on Btm3 the ack on class 0x0B lands
         // within ~10 ms.
         let viz = self.viz_of(addr, field)?;
-        self.poll_value(addr, field, viz)
+        let result = self.poll_value(addr, field, viz);
+        match &result {
+            Ok(v) => log::info!(
+                target: "masterbus::write",
+                "← read-back 0x{addr:06X} field 0x{field:04X} = {v:?}",
+            ),
+            Err(e) => log::info!(
+                target: "masterbus::write",
+                "← read-back 0x{addr:06X} field 0x{field:04X} failed: {e}",
+            ),
+        }
+        result
     }
 
     /// Write the device's string table at `str_id` (PROTOCOL.md §4.4 write

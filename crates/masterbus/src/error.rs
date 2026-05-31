@@ -55,4 +55,21 @@ pub enum Error {
     /// A malformed or unexpected protocol frame.
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// A relay-style boolean write needs to follow up with a commit token at
+    /// the adjacent hidden register at field+1, but that register is occupied
+    /// by a named, user-facing field — sending the commit there would clobber
+    /// it. Refused rather than silently failing to actuate.
+    #[error(
+        "commit-token slot at field 0x{cmd_field:04X} is occupied by named field \"{cmd_field_name}\" \
+         — relay-style boolean write to field 0x{field:04X} would not actuate"
+    )]
+    CommitFieldOccupied {
+        /// The field the user tried to write.
+        field: i32,
+        /// The adjacent register where the commit token would have gone.
+        cmd_field: i32,
+        /// The user-facing name of the field that's in the way.
+        cmd_field_name: String,
+    },
 }

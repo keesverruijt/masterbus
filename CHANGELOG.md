@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `Error::CommitFieldOccupied { field, cmd_field, cmd_field_name }` — relay-
+  style boolean writes (CombiMaster inverter / charger) now hard-error when
+  the adjacent commit slot at `field+1` is occupied by a *named* user-facing
+  field, instead of silently failing to actuate. The value write is not
+  emitted in that case, so no half-state on the bus.
+
+### Fixed
+- Relay-commit heuristic recognises the CombiMaster's hidden register at
+  `field+1` even when the device reports it in schema discovery. On a
+  CombiMaster, discovering the menu containing field 19/21 (inverter / charger
+  toggles) populates the schema with an *unnamed* `FieldInfo` (empty name,
+  zero min/max/step, no options) at field 20/22 — the commit register itself.
+  Previously the heuristic treated that as a "real, in-the-way" field and
+  skipped the commit token, so boolean writes were silently ignored by the
+  device. Empty-name entries are now treated as hidden.
+
+### Changed
+- `masterbus::write` logging promoted from `debug` to `info` for the per-call
+  entry / read-back pair (`→ write 0x… field 0x… = …`, `← read-back …`), with
+  an additional info line noting whether the commit token was emitted or
+  refused. Per-write activity is rare enough that info-level is appropriate.
+
 ### Changed
 - `masterbus::discovery`: the per-menu "discovered N groups" log demoted from
   `info` to `debug`, and the per-attempt "giving up after N attempts" demoted
