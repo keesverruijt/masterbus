@@ -32,10 +32,10 @@ values. Writable fields can be edited inline.
 
     masterbus-tui
 
-The first run creates `/etc/default/masterbus/config.ini` (or
-`$HOME/.local/masterbus/config.ini` if `/etc` isn't writable) with the
-detected transport (USB link if present, otherwise the lone CAN
-interface). Edit that file to switch transports or enable bus-master
+The first run creates a config file with the detected transport (USB 
+link if present, otherwise the lone CAN interface) or fails with
+an error if there are multiple CAN devices. 
+Edit that file to switch transports or enable bus-master
 mode; see the **Configuration** section in the project README.
 
 You'll see a left pane with all alive devices and a right pane with
@@ -106,8 +106,8 @@ For shell-script / one-off writes there's also a dedicated CLI:
 Examples:
 
     masterbus-set-field 188EA2 0x013 on             # toggle a CombiMaster bool
-    masterbus-set-field 3A3B4B 0x104 "Nav Chg"      # rename Magic Nav Chg
-    masterbus-set-field 53A493 0x160 "Schakelaar"   # rename EasyView Switch 1
+    masterbus-set-field 3A3B4B 0x104 "Nav Chg"      # rename device name
+    masterbus-set-field 53A493 0x160 "New Name"     # rename EasyView Switch 1
 
 The TUI shows the *device id* (title bar, e.g. `[188EA2]`) and the
 *field id* on every editable row, so picking the right ids is a
