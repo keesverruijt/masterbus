@@ -14,8 +14,9 @@
 //! file is created on first run.
 //!
 //! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
-//! in [`map_field`]; it currently covers batteries and the CombiMaster and is
-//! easy to extend per device class.
+//! in [`map_field`]; it currently covers batteries, the CombiMaster, the MAC
+//! DC-DC charger, and the APR alternator regulator, and is easy to extend per
+//! device class.
 //!
 //! # Which fields are published
 //!
@@ -24,8 +25,12 @@
 //! the battery `cluster` group = on) and the file is rewritten; edit the
 //! `true`/`false` flags while the service is stopped. Without `MAPPING`, every
 //! mapped field is published.
+//!
+//! Besides live values, each published device also emits static `name` and
+//! `manufacturer` (name + article/model) metadata once per client connection —
+//! see [`static_meta_batch`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -71,6 +76,18 @@ struct FieldRec {
     group: String,
     name: String,
     unit: String,
+}
+
+/// Per-device identity captured at startup, used to publish the static Signal K
+/// `name` / `manufacturer` metadata for each device's node(s).
+struct DeviceMetaRec {
+    device: DeviceId,
+    class: String,
+    instance: String,
+    /// Human-readable device name (as configured on the Mastervolt system).
+    name: String,
+    /// Article number → Signal K `manufacturer.model`.
+    article: String,
 }
 
 /// Per-field metadata captured at startup so updates can be mapped cheaply.
@@ -147,13 +164,22 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     let listener = TcpListener::bind(listen)?;
     eprintln!("masterbus-signalk: listening on {} (Signal K delta, ndjson)", listener.local_addr()?);
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    // Static per-device metadata (name / manufacturer), rendered once discovery
+    // completes. Replayed to every client the moment it connects so late joiners
+    // still learn each device's identity without waiting for a value change.
+    let static_batch: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let clients = clients.clone();
+        let static_batch = static_batch.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                 eprintln!("masterbus-signalk: client connected: {:?}", stream.peer_addr().ok());
+                let sb = static_batch.lock().unwrap().clone();
+                if !sb.is_empty() {
+                    let _ = (&stream).write_all(&sb).and_then(|()| (&stream).flush());
+                }
                 clients.lock().unwrap().push(stream);
             }
         });
@@ -163,6 +189,7 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     // (sanitized) group so the mapping file can gate it.
     let devices = bus.devices_all();
     let mut fields: Vec<FieldRec> = Vec::new();
+    let mut device_metas: Vec<DeviceMetaRec> = Vec::new();
     let mut groups_by_instance: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for dev in &devices {
         let name = dev.name().unwrap_or_default();
@@ -177,6 +204,14 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         } else {
             dev.id().to_string()
         };
+
+        device_metas.push(DeviceMetaRec {
+            device: dev.id(),
+            class: class.clone(),
+            instance: instance.clone(),
+            name: name.clone(),
+            article: dev.article_number().unwrap_or_default(),
+        });
 
         let Ok(groups) = dev.tab(Menu::Monitoring) else { continue };
         for group in groups {
@@ -236,9 +271,21 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             per_device.entry(f.device).or_default().push(f.index);
         }
     }
+    // Devices with at least one published field carry SK nodes; those are the
+    // ones whose static name/manufacturer metadata is worth emitting.
+    let published: HashSet<DeviceId> = per_device.keys().copied().collect();
     let mut subs = Vec::new();
     for (device, indices) in per_device {
         subs.push(bus.subscribe(device, indices, RATE, false));
+    }
+
+    // Render the static metadata batch and hand it to the accept thread (for
+    // future clients) and to any client already connected during discovery.
+    let sb = static_meta_batch(&device_metas, &published);
+    *static_batch.lock().unwrap() = sb.clone();
+    if !sb.is_empty() {
+        let mut cs = clients.lock().unwrap();
+        cs.retain_mut(|c| c.write_all(&sb).and_then(|()| c.flush()).is_ok());
     }
 
     eprintln!(
@@ -249,11 +296,16 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         if gated { " (mapping-gated)" } else { "" },
     );
 
+    // Paths whose unit `meta` has already been published. Meta is emitted inline
+    // the first time a path is seen and also appended to `static_batch` so later
+    // clients receive it on connect.
+    let mut meta_sent: HashSet<String> = HashSet::new();
     loop {
         // Skip building deltas when nobody is listening (the channels are still
         // drained below so they don't grow unbounded).
         let have_clients = !clients.lock().unwrap().is_empty();
         let mut batch: Vec<u8> = Vec::new();
+        let mut new_meta: Vec<serde_json::Value> = Vec::new();
         for sub in &subs {
             // Coalesce to the latest value per path this cycle: a field can be
             // updated many times between polls (the boat's real masters poll some
@@ -268,6 +320,15 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                 }
             }
             if !latest.is_empty() {
+                // First sighting of a path → publish its unit metadata once.
+                for path in latest.keys() {
+                    if !meta_sent.contains(path)
+                        && let Some(units) = sk_units(path)
+                    {
+                        new_meta.push(json!({ "path": path, "value": { "units": units } }));
+                        meta_sent.insert(path.clone());
+                    }
+                }
                 let values: Vec<_> =
                     latest.into_iter().map(|(path, value)| json!({ "path": path, "value": value })).collect();
                 let delta = json!({
@@ -281,6 +342,18 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                 batch.push(b'\n');
             }
         }
+        // Prepend any new unit metadata (so units land before/with the values)
+        // and remember it for clients that connect later.
+        if !new_meta.is_empty() {
+            let delta = json!({
+                "updates": [{ "$source": "masterbus", "timestamp": now_rfc3339(), "meta": new_meta }]
+            });
+            let mut line = serde_json::to_string(&delta).unwrap().into_bytes();
+            line.push(b'\n');
+            static_batch.lock().unwrap().extend_from_slice(&line);
+            line.extend_from_slice(&batch);
+            batch = line;
+        }
         if !batch.is_empty() {
             let mut cs = clients.lock().unwrap();
             let before = cs.len();
@@ -292,6 +365,72 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// SI unit for a published Signal K path, keyed on its leaf segment. Signal K's
+/// own metadata already carries units for the standard leaves (`voltage`,
+/// `temperature`, …), but our non-standard nested leaves (`battery.temperature`,
+/// `field.current`, `input.voltage`, `voltageSense`, …) are unknown to the
+/// server, so it can't unit-convert them without a `meta` delta. We publish meta
+/// for *every* known leaf (re-affirming the standard ones is harmless); `None`
+/// leaves (`chargingMode`, `enabled`, `name`) carry no unit.
+fn sk_units(path: &str) -> Option<&'static str> {
+    Some(match path.rsplit('.').next().unwrap_or("") {
+        "stateOfCharge" => "ratio",
+        "timeRemaining" => "s",
+        "dischargeSinceFull" => "C",
+        "temperature" => "K",
+        "voltage" | "voltageSense" => "V",
+        "current" | "currentLimit" => "A",
+        "power" => "W",
+        "frequency" | "revolutions" => "Hz",
+        _ => return None,
+    })
+}
+
+/// Signal K base path(s) for a device class — the node(s) that carry this
+/// device's values, and thus its static `name` / `manufacturer` metadata. The
+/// CombiMaster spans two categories. Keep this in sync with [`map_field`]'s
+/// per-class path prefixes.
+fn sk_bases(class: &str, id: &str) -> Vec<String> {
+    match class {
+        "BAT" => vec![format!("electrical.batteries.{id}")],
+        "CMR" => vec![format!("electrical.inverters.{id}"), format!("electrical.chargers.{id}")],
+        "MAC" => vec![format!("electrical.chargers.{id}")],
+        "APR" => vec![format!("electrical.alternators.{id}")],
+        _ => vec![],
+    }
+}
+
+/// Build the one-shot Signal K metadata batch: for every published device with a
+/// mapped category, its `name` and `manufacturer` (name + model). Values are
+/// static, so this is emitted once per client rather than on the poll loop.
+fn static_meta_batch(devs: &[DeviceMetaRec], published: &HashSet<DeviceId>) -> Vec<u8> {
+    let mut batch = Vec::new();
+    for d in devs {
+        if !published.contains(&d.device) {
+            continue;
+        }
+        let mut values = Vec::new();
+        for base in sk_bases(&d.class, &d.instance) {
+            if !d.name.is_empty() {
+                values.push(json!({ "path": format!("{base}.name"), "value": d.name }));
+            }
+            values.push(json!({ "path": format!("{base}.manufacturer.name"), "value": "Mastervolt" }));
+            if !d.article.is_empty() {
+                values.push(json!({ "path": format!("{base}.manufacturer.model"), "value": d.article }));
+            }
+        }
+        if values.is_empty() {
+            continue;
+        }
+        let delta = json!({
+            "updates": [{ "$source": "masterbus", "timestamp": now_rfc3339(), "values": values }]
+        });
+        batch.extend_from_slice(serde_json::to_string(&delta).unwrap().as_bytes());
+        batch.push(b'\n');
+    }
+    batch
 }
 
 /// Map a (device-class, field) pair to a Signal K path and SI value.
@@ -321,7 +460,10 @@ fn map_field(
         }
         _ => None,
     };
+    // Selected label of a list/enum field (e.g. the charge-state name), lowercased.
+    let list_label = value.label().map(|s| s.to_ascii_lowercase());
     let num = |v: f64| serde_json::Value::from(v);
+    let text = |s: String| serde_json::Value::String(s);
 
     match class {
         // Battery monitors → electrical.batteries.<id>
@@ -354,6 +496,57 @@ fn map_field(
                 ("AC IN limit", "A") => float.map(|v| (format!("{chg}.acin.currentLimit"), num(v))),
                 ("Inverter", _) => boolean.map(|b| (format!("{inv}.enabled"), serde_json::Value::Bool(b))),
                 ("Charger", _) => boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(b))),
+                _ => None,
+            }
+        }
+        // MAC — DC-DC battery charger (e.g. "MAC Plus 12/24"): a DC source on the
+        // input steps up/down to charge the battery on the output. Canonical
+        // charger `voltage`/`current`/`temperature` describe the output (battery)
+        // side; the DC input side hangs off `.input.*`.
+        "MAC" => {
+            let chg = format!("electrical.chargers.{id}");
+            match (name, unit) {
+                ("Output voltage", "V") => float.map(|v| (format!("{chg}.voltage"), num(v))),
+                ("Output current", "A") => float.map(|v| (format!("{chg}.current"), num(v))),
+                ("Input voltage", "V") => float.map(|v| (format!("{chg}.input.voltage"), num(v))),
+                ("Input current", "A") => float.map(|v| (format!("{chg}.input.current"), num(v))),
+                ("Bat. volt sense", "V") => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
+                ("Device", "\u{b0}C") => celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15))),
+                ("Battery", "\u{b0}C") => celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15))),
+                // "Charge state" (Bulk/Absorption/Float/…) → chargingMode.
+                ("Charge state", _) => list_label.map(|s| (format!("{chg}.chargingMode"), text(s))),
+                // "Standby" off = charger active.
+                ("Standby", _) => boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(!b))),
+                _ => None,
+            }
+        }
+        // APR — Alpha Pro alternator regulator ("APR Alternator"): a
+        // mechanically-driven alternator plus an external shunt/battery monitor.
+        // Canonical alternator `voltage`/`temperature`/`revolutions` describe the
+        // alternator; the battery it charges (sensed both directly and via the
+        // shunt) hangs off `.battery.*`, the engine drive off `.engine.*`.
+        //
+        // Note: "Battery voltage"/"Battery temp." occur in both the Battery and
+        // Shunt groups (same name+unit, different field index); since `map_field`
+        // sees no group they share one path and coalesce to the last sample of
+        // the cycle — harmless, they read the same battery.
+        "APR" => {
+            let alt = format!("electrical.alternators.{id}");
+            match (name, unit) {
+                ("Alternator volt.", "V") => float.map(|v| (format!("{alt}.voltage"), num(v))),
+                ("Sense voltage", "V") => float.map(|v| (format!("{alt}.voltageSense"), num(v))),
+                ("Field current", "A") => float.map(|v| (format!("{alt}.field.current"), num(v))),
+                ("Alternator temp.", "\u{b0}C") => celsius.map(|c| (format!("{alt}.temperature"), num(c + 273.15))),
+                // Shaft speeds → revolutions (Signal K wants Hz, i.e. rpm / 60).
+                ("Alternator shaft", "rpm") => float.map(|r| (format!("{alt}.revolutions"), num(r / 60.0))),
+                ("Engine shaft", "rpm") => float.map(|r| (format!("{alt}.engine.revolutions"), num(r / 60.0))),
+                // "Charger state" (Off/Bulk/Absorption/Float/…) → chargingMode.
+                ("Charger state", _) => list_label.map(|s| (format!("{alt}.chargingMode"), text(s))),
+                // Battery being charged (direct sense + external shunt).
+                ("State of charge", "%") => float.map(|v| (format!("{alt}.battery.stateOfCharge"), num(v / 100.0))),
+                ("Battery voltage", "V") => float.map(|v| (format!("{alt}.battery.voltage"), num(v))),
+                ("Battery current", "A") => float.map(|v| (format!("{alt}.battery.current"), num(v))),
+                ("Battery temp.", "\u{b0}C") => celsius.map(|c| (format!("{alt}.battery.temperature"), num(c + 273.15))),
                 _ => None,
             }
         }
