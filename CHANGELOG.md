@@ -6,7 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-20
+
 ### Added
+- **`masterbus-signalk`: two more device classes.** MAC DC-DC chargers map to
+  `electrical.chargers.<id>` and APR alternator regulators to
+  `electrical.alternators.<id>` (input/output/battery voltages & currents,
+  temperatures, field current, shaft/engine RPM as Hz, and `chargingMode` from
+  the charge-state enum).
+- **`masterbus-signalk`: static device metadata.** Every published device now
+  emits `name` and `manufacturer` (name + article/model) once per client
+  connection.
+- **`masterbus-signalk`: unit metadata.** Each published path emits a `meta`
+  delta declaring its SI units, so Signal K can unit-convert the non-standard
+  nested leaves (`battery.temperature`, `field.current`, `input.voltage`, …).
+  Both metadata kinds are replayed to late-joining clients on connect.
 - `Error::CommitFieldOccupied { field, cmd_field, cmd_field_name }` — relay-
   style boolean writes (CombiMaster inverter / charger) now hard-error when
   the adjacent commit slot at `field+1` is occupied by a *named* user-facing
