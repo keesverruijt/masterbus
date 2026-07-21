@@ -511,13 +511,14 @@ fn map_field(
                 "Input voltage" =>  float.map(|v| (format!("{chg}.input.voltage"), num(v))),
                 "Input current" =>  float.map(|v| (format!("{chg}.input.current"), num(v))),
                 "Bat. volt sense" => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
+                "Remote input" => match value {Value::Eventable { index, .. } => Some((format!("{chg}.remoteEnabled"), serde_json::Value::Bool(*index != 0))), _ => None, },
                 "Device" => celsius.map(|c| (format!("{chg}.device.temperature"), num(c + 273.15))),
                 "Battery" => celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15))),
                 "Device state" => list_label.map(|s| (format!("{chg}.deviceMode"), text(s))),
                 "Charge state" => list_label.map(|s| (format!("{chg}.chargingMode"), text(s))),
                 "Standby" => boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(!b))),
                 _ => None,
-                }
+            }
         }
         // APR — Alpha Pro alternator regulator ("APR Alternator"): a
         // mechanically-driven alternator plus an external shunt/battery monitor.
