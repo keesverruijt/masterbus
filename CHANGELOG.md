@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-22
+
+### Added
+- **`masterbus-signalk mapping`: for MAC DC-DC chargers for "Device state" (Standby/Charging/...) → deviceMode.
+
+### Changed
+- `masterbus-signalk comment` for MAC DC-DC chargers comment "Charge state" (Off/Bulk/Absorption/Float/...) → chargingMode.
+
+### Changed
+- `masterbus-signalk units` for MAC DC-DC chargers "empty units" makes (name, unit) matching
+
+
 ## [0.3.3] - 2026-07-20
 
 ### Added
