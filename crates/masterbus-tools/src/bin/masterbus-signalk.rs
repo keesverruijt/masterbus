@@ -513,9 +513,9 @@ fn map_field(
                 ("Bat. volt sense", _) => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
                 ("Device", "\u{b0}C") => celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15))),
                 ("Battery", "\u{b0}C") => celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15))),
-                // "Device state" (Standby/Charging/…) → deviceMode.
+                // "Device state" (Standby/Charging/...) → deviceMode.
                 ("Device state", _) => list_label.map(|s| (format!("{chg}.deviceMode"), text(s))),
-                // "Charge state" (Off/Bulk/Absorption/Float/…) → chargingMode.
+                // "Charge state" (Off/Bulk/Absorption/Float/...) → chargingMode.
                 ("Charge state", _) => list_label.map(|s| (format!("{chg}.chargingMode"), text(s))),
                 // "Standby" off = charger active.
                 ("Standby", _) => boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(!b))),
