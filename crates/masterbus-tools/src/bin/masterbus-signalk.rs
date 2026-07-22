@@ -506,11 +506,11 @@ fn map_field(
         "MAC" => {
             let chg = format!("electrical.chargers.{id}");
             match (name, unit) {
-                ("Output voltage", "V") => float.map(|v| (format!("{chg}.voltage"), num(v))),
+                ("Output voltage", _) => float.map(|v| (format!("{chg}.voltage"), num(v))),
                 ("Output current", "A") => float.map(|v| (format!("{chg}.current"), num(v))),
                 ("Input voltage", "V") => float.map(|v| (format!("{chg}.input.voltage"), num(v))),
-                ("Input current", "A") => float.map(|v| (format!("{chg}.input.current"), num(v))),
-                ("Bat. volt sense", "V") => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
+                ("Input current", _) => float.map(|v| (format!("{chg}.input.current"), num(v))),
+                ("Bat. volt sense", _) => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
                 ("Device", "\u{b0}C") => celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15))),
                 ("Battery", "\u{b0}C") => celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15))),
                 // "Charge state" (Bulk/Absorption/Float/…) → chargingMode.
