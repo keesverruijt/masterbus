@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`masterbus-signalk`: MAC monitoring values were silently dropped.** The MAC
+  schema reports an empty unit on several monitoring fields, so the strict
+  (name, unit) match never fired and `voltage`, `current`, `input.current` and
+  `voltageSense` were missing from the deltas even though `masterbus-tui`
+  showed them. Those fields now also accept a missing unit; the temperature
+  fields keep the strict match, since `Device` / `Battery` are told apart by
+  their unit alone. Reported by @EdKok (#2).
+
+### Added
+- **`masterbus-signalk`: MAC `deviceMode`.** The MAC "Device state" enum
+  (Standby/Charging/…) is published as `electrical.chargers.<id>.deviceMode`,
+  alongside the existing charge-stage `chargingMode`.
+- Unit tests for `map_field`, pinning the published MAC paths and the
+  name/unit matching rules.
+
 ## [0.3.3] - 2026-07-20
 
 ### Added

@@ -373,7 +373,7 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
 /// `field.current`, `input.voltage`, `voltageSense`, …) are unknown to the
 /// server, so it can't unit-convert them without a `meta` delta. We publish meta
 /// for *every* known leaf (re-affirming the standard ones is harmless); `None`
-/// leaves (`chargingMode`, `enabled`, `name`) carry no unit.
+/// leaves (`chargingMode`, `deviceMode`, `enabled`, `name`) carry no unit.
 fn sk_units(path: &str) -> Option<&'static str> {
     Some(match path.rsplit('.').next().unwrap_or("") {
         "stateOfCharge" => "ratio",
@@ -503,16 +503,27 @@ fn map_field(
         // input steps up/down to charge the battery on the output. Canonical
         // charger `voltage`/`current`/`temperature` describe the output (battery)
         // side; the DC input side hangs off `.input.*`.
+        //
+        // Unlike the other classes, the MAC schema leaves the unit empty on some
+        // monitoring fields (observed on MAC Plus 12/24: output voltage, output
+        // current, input current, battery voltage sense), so a strict (name,
+        // unit) match drops them silently. Those arms accept the unit *or* the
+        // empty string. The rest keep the strict match on purpose: "Device" and
+        // "Battery" are generic names that only °C tells apart, and wildcarding
+        // them would publish any same-named float as a kelvin temperature.
         "MAC" => {
             let chg = format!("electrical.chargers.{id}");
-            match (name, unit) {
-                ("Output voltage", "V") => float.map(|v| (format!("{chg}.voltage"), num(v))),
-                ("Output current", "A") => float.map(|v| (format!("{chg}.current"), num(v))),
-                ("Input voltage", "V") => float.map(|v| (format!("{chg}.input.voltage"), num(v))),
-                ("Input current", "A") => float.map(|v| (format!("{chg}.input.current"), num(v))),
-                ("Bat. volt sense", "V") => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
+            match (name, unit.trim()) {
+                ("Output voltage", "V" | "") => float.map(|v| (format!("{chg}.voltage"), num(v))),
+                ("Output current", "A" | "") => float.map(|v| (format!("{chg}.current"), num(v))),
+                ("Input voltage", "V" | "") => float.map(|v| (format!("{chg}.input.voltage"), num(v))),
+                ("Input current", "A" | "") => float.map(|v| (format!("{chg}.input.current"), num(v))),
+                ("Bat. volt sense", "V" | "") => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
                 ("Device", "\u{b0}C") => celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15))),
                 ("Battery", "\u{b0}C") => celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15))),
+                // "Device state" (Standby/Charging/Fault/…) → deviceMode: the
+                // device-level state, orthogonal to the charge stage below.
+                ("Device state", _) => list_label.map(|s| (format!("{chg}.deviceMode"), text(s))),
                 // "Charge state" (Bulk/Absorption/Float/…) → chargingMode.
                 ("Charge state", _) => list_label.map(|s| (format!("{chg}.chargingMode"), text(s))),
                 // "Standby" off = charger active.
@@ -586,4 +597,115 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { y + 1 } else { y }, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `map_field` for a float monitoring value.
+    fn f(class: &str, name: &str, unit: &str, v: f32) -> Option<(String, serde_json::Value)> {
+        map_field(class, "1", name, unit, &Value::Float(v))
+    }
+
+    /// The path `map_field` produced, for assertions that only care about routing.
+    fn path(r: Option<(String, serde_json::Value)>) -> Option<String> {
+        r.map(|(p, _)| p)
+    }
+
+    /// The MAC schema reports an empty unit on several monitoring fields; they
+    /// must still map, onto the same paths as when the unit is present.
+    #[test]
+    fn mac_maps_fields_with_a_missing_unit() {
+        for (name, unit) in
+            [("Output voltage", "V"), ("Output current", "A"), ("Input current", "A"), ("Bat. volt sense", "V")]
+        {
+            assert_eq!(path(f("MAC", name, unit, 1.0)), path(f("MAC", name, "", 1.0)), "{name}");
+            assert!(path(f("MAC", name, "", 1.0)).is_some(), "{name} dropped with an empty unit");
+        }
+    }
+
+    /// The MAC output is the battery side, and lands on the canonical Signal K
+    /// charger leaves — not on nested `output.*` / `device.*` ones the server
+    /// has no metadata for.
+    #[test]
+    fn mac_publishes_canonical_charger_paths() {
+        assert_eq!(path(f("MAC", "Output voltage", "", 27.4)).as_deref(), Some("electrical.chargers.1.voltage"));
+        assert_eq!(path(f("MAC", "Output current", "", 42.0)).as_deref(), Some("electrical.chargers.1.current"));
+        assert_eq!(
+            path(f("MAC", "Device", "\u{b0}C", 20.0)).as_deref(),
+            Some("electrical.chargers.1.temperature")
+        );
+    }
+
+    /// Relaxing the unit match must not leak to the temperature fields: "Device"
+    /// and "Battery" are generic names that only °C tells apart, so a same-named
+    /// field in another unit must not be published as a kelvin temperature.
+    #[test]
+    fn mac_temperatures_still_require_degrees_celsius() {
+        assert_eq!(f("MAC", "Device", "", 20.0), None);
+        assert_eq!(f("MAC", "Battery", "V", 12.8), None);
+        assert_eq!(f("MAC", "Battery", "A", 3.0), None);
+    }
+
+    /// Celsius → kelvin on the way out.
+    #[test]
+    fn mac_temperature_is_converted_to_kelvin() {
+        let (_, v) = f("MAC", "Battery", "\u{b0}C", 25.0).unwrap();
+        assert_eq!(v.as_f64().unwrap(), 298.15);
+    }
+
+    /// "Standby" is the inverse of Signal K's `enabled`.
+    #[test]
+    fn mac_standby_inverts_into_enabled() {
+        let on = map_field("MAC", "1", "Standby", "", &Value::Boolean(false));
+        assert_eq!(on, Some(("electrical.chargers.1.enabled".into(), serde_json::Value::Bool(true))));
+        let off = map_field("MAC", "1", "Standby", "", &Value::Boolean(true));
+        assert_eq!(off, Some(("electrical.chargers.1.enabled".into(), serde_json::Value::Bool(false))));
+    }
+
+    /// Enum fields publish their lowercased label.
+    #[test]
+    fn mac_enum_states_publish_their_label() {
+        let list = |i: i32| Value::List { index: i, options: vec!["Off".into(), "Bulk".into()] };
+        assert_eq!(
+            map_field("MAC", "1", "Charge state", "", &list(1)),
+            Some(("electrical.chargers.1.chargingMode".into(), serde_json::Value::String("bulk".into())))
+        );
+        assert_eq!(
+            path(map_field("MAC", "1", "Device state", "", &list(0))).as_deref(),
+            Some("electrical.chargers.1.deviceMode")
+        );
+    }
+
+    /// The other classes keep the strict (name, unit) match — BAT reports three
+    /// different quantities all named "Battery", told apart only by their unit.
+    #[test]
+    fn other_classes_still_disambiguate_on_unit() {
+        assert_eq!(path(f("BAT", "Battery", "V", 12.8)).as_deref(), Some("electrical.batteries.1.voltage"));
+        assert_eq!(path(f("BAT", "Battery", "A", -5.0)).as_deref(), Some("electrical.batteries.1.current"));
+        assert_eq!(
+            path(f("BAT", "Battery", "\u{b0}C", 20.0)).as_deref(),
+            Some("electrical.batteries.1.temperature")
+        );
+        assert_eq!(f("BAT", "Battery", "", 12.8), None);
+    }
+
+    /// Every leaf MAC publishes a number on must carry unit metadata, or Signal
+    /// K cannot unit-convert it.
+    #[test]
+    fn mac_numeric_leaves_have_unit_metadata() {
+        for (name, unit) in [
+            ("Output voltage", ""),
+            ("Output current", ""),
+            ("Input voltage", "V"),
+            ("Input current", ""),
+            ("Bat. volt sense", ""),
+            ("Device", "\u{b0}C"),
+            ("Battery", "\u{b0}C"),
+        ] {
+            let p = path(f("MAC", name, unit, 1.0)).unwrap();
+            assert!(sk_units(&p).is_some(), "{p} has no unit metadata");
+        }
+    }
 }
