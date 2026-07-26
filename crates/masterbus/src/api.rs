@@ -11,8 +11,8 @@ use crate::model::{
     AccessLevel, DeviceId, DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo,
     GroupInfo, Menu,
 };
-use crate::runtime::{Config, DeviceEvent, Engine, ValueUpdate};
 use crate::protocol::VisualizationType;
+use crate::runtime::{Config, DeviceEvent, Engine, ValueUpdate};
 use crate::settings::{DeviceType, FileConfig};
 use crate::transport::Transport;
 use crate::value::{Value, WriteValue};
@@ -39,7 +39,9 @@ impl MasterBus {
 
     /// Connect over any [`Transport`].
     pub fn with_transport(transport: Box<dyn Transport>, config: Config) -> Result<Self> {
-        Ok(MasterBus { engine: Engine::connect(transport, config)? })
+        Ok(MasterBus {
+            engine: Engine::connect(transport, config)?,
+        })
     }
 
     /// Connect using the standard per-host config file (see [`FileConfig`]).
@@ -64,7 +66,11 @@ impl MasterBus {
                 config.cache_path = crate::settings::resolve_cache_dir(requested);
             }
         }
-        let name = if file.device_name.is_empty() { None } else { Some(file.device_name.as_str()) };
+        let name = if file.device_name.is_empty() {
+            None
+        } else {
+            Some(file.device_name.as_str())
+        };
         match file.device_type {
             DeviceType::Usb => Self::usb(name, config),
             #[cfg(target_os = "linux")]
@@ -85,7 +91,10 @@ impl MasterBus {
         self.engine
             .device_ids()
             .into_iter()
-            .map(|id| Device { engine: self.engine.clone(), id })
+            .map(|id| Device {
+                engine: self.engine.clone(),
+                id,
+            })
             .collect()
     }
 
@@ -95,13 +104,19 @@ impl MasterBus {
         self.engine
             .device_ids_all()
             .into_iter()
-            .map(|id| Device { engine: self.engine.clone(), id })
+            .map(|id| Device {
+                engine: self.engine.clone(),
+                id,
+            })
             .collect()
     }
 
     /// A handle to a specific device id (does not check presence).
     pub fn device(&self, id: DeviceId) -> Device {
-        Device { engine: self.engine.clone(), id }
+        Device {
+            engine: self.engine.clone(),
+            id,
+        }
     }
 
     /// Stream of device presence (alive/offline) events.
@@ -118,8 +133,13 @@ impl MasterBus {
         change_only: bool,
     ) -> Subscription {
         let (id, rx) =
-            self.engine.subscribe(device, fields.into_iter().collect(), interval, change_only);
-        Subscription { engine: self.engine.clone(), id, rx }
+            self.engine
+                .subscribe(device, fields.into_iter().collect(), interval, change_only);
+        Subscription {
+            engine: self.engine.clone(),
+            id,
+            rx,
+        }
     }
 }
 
@@ -170,7 +190,9 @@ impl Device {
 
     /// Liveness-derived status.
     pub fn status(&self) -> DeviceStatus {
-        self.engine.state.status(self.id, self.engine.config.liveness)
+        self.engine
+            .state
+            .status(self.id, self.engine.config.liveness)
     }
 
     /// All groups (across menus).
@@ -179,7 +201,11 @@ impl Device {
         Ok(schema
             .groups
             .iter()
-            .map(|g| Group { engine: self.engine.clone(), device: self.id, group_id: g.id })
+            .map(|g| Group {
+                engine: self.engine.clone(),
+                device: self.id,
+                group_id: g.id,
+            })
             .collect())
     }
 
@@ -192,7 +218,11 @@ impl Device {
             .groups
             .iter()
             .filter(|g| g.menu == menu)
-            .map(|g| Group { engine: self.engine.clone(), device: self.id, group_id: g.id })
+            .map(|g| Group {
+                engine: self.engine.clone(),
+                device: self.id,
+                group_id: g.id,
+            })
             .collect())
     }
 
@@ -202,12 +232,20 @@ impl Device {
     pub fn tab_info(&self, menu: Menu) -> Result<Vec<GroupInfo>> {
         self.engine.ensure_menu(self.id, menu)?;
         let schema = self.engine.state.schema(self.id).ok_or(Error::NotReady)?;
-        Ok(schema.groups.into_iter().filter(|g| g.menu == menu).collect())
+        Ok(schema
+            .groups
+            .into_iter()
+            .filter(|g| g.menu == menu)
+            .collect())
     }
 
     /// A handle to a field by its channel-aware id.
     pub fn field(&self, index: FieldId) -> Field {
-        Field { engine: self.engine.clone(), device: self.id, index }
+        Field {
+            engine: self.engine.clone(),
+            device: self.id,
+            index,
+        }
     }
 
     /// Flat probe of the device's entire field-index space, ignoring the
@@ -253,7 +291,8 @@ impl Device {
     /// Log out of the device (return to `AccessLevel::EndUser`). Wire form is
     /// a 4-byte request with no code payload (PROTOCOL.md §4.5).
     pub fn logout(&self) -> Result<AccessLevel> {
-        self.engine.set_access_level(self.id, AccessLevel::EndUser, None)
+        self.engine
+            .set_access_level(self.id, AccessLevel::EndUser, None)
     }
 
     /// Write the device's editable string table at `str_id` (PROTOCOL.md
@@ -306,7 +345,11 @@ impl Group {
             .info()?
             .fields
             .iter()
-            .map(|f| Field { engine: self.engine.clone(), device: self.device, index: f.index })
+            .map(|f| Field {
+                engine: self.engine.clone(),
+                device: self.device,
+                index: f.index,
+            })
             .collect())
     }
 }
@@ -354,7 +397,8 @@ impl Field {
 
     /// Read the current value (cache if fresh, else poll).
     pub fn value(&self) -> Result<Value> {
-        self.engine.read(self.device, self.index, self.engine.config.max_age)
+        self.engine
+            .read(self.device, self.index, self.engine.config.max_age)
     }
 
     /// Write a value; returns the value observed after the write.
@@ -376,8 +420,14 @@ impl Field {
 
     /// Subscribe to live updates of just this field.
     pub fn subscribe(&self, interval: Duration, change_only: bool) -> Subscription {
-        let (id, rx) = self.engine.subscribe(self.device, vec![self.index], interval, change_only);
-        Subscription { engine: self.engine.clone(), id, rx }
+        let (id, rx) = self
+            .engine
+            .subscribe(self.device, vec![self.index], interval, change_only);
+        Subscription {
+            engine: self.engine.clone(),
+            id,
+            rx,
+        }
     }
 }
 
@@ -492,7 +542,13 @@ mod tests {
             Ok(WriteValue::Bool(true))
         ));
         assert!(matches!(
-            write_value_for(VisualizationType::DropDown, Value::List { index: 2, options: vec![] }),
+            write_value_for(
+                VisualizationType::DropDown,
+                Value::List {
+                    index: 2,
+                    options: vec![]
+                }
+            ),
             Ok(WriteValue::ListIndex(2))
         ));
     }
@@ -511,11 +567,18 @@ mod tests {
         // Editable-text validator: 16-byte printable-ASCII cap, no NULs.
         assert!(validate_editable_text("Nav Chg").is_ok());
         assert!(validate_editable_text("01234567890123456").is_err()); // 17 chars
-        assert!(validate_editable_text("hi\0there").is_err());          // embedded NUL
-        assert!(validate_editable_text("hé").is_err());                  // non-ASCII
+        assert!(validate_editable_text("hi\0there").is_err()); // embedded NUL
+        assert!(validate_editable_text("hé").is_err()); // non-ASCII
         // Non-writable field types are rejected.
         assert!(matches!(
-            write_value_for(VisualizationType::Date, Value::Date(Date { day: 1, mon: 1, year: 2026 })),
+            write_value_for(
+                VisualizationType::Date,
+                Value::Date(Date {
+                    day: 1,
+                    mon: 1,
+                    year: 2026
+                })
+            ),
             Err(Error::WrongType { .. })
         ));
     }

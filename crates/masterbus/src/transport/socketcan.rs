@@ -30,7 +30,10 @@ impl SocketCanTransport {
 impl Transport for SocketCanTransport {
     fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
         (
-            Box::new(Rx { sock: self.read, cur_timeout: None }),
+            Box::new(Rx {
+                sock: self.read,
+                cur_timeout: None,
+            }),
             Box::new(Tx { sock: self.write }),
         )
     }
@@ -52,7 +55,12 @@ impl TransportRx for Rx {
         }
         match self.sock.read_frame() {
             Ok(frame) => Ok(Some((frame.raw_id(), frame.data().to_vec()))),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
                 Ok(None)
             }
             Err(e) => Err(Error::Connection(e.to_string())),
@@ -66,9 +74,13 @@ struct Tx {
 
 impl TransportTx for Tx {
     fn send(&mut self, can_id: u32, data: &[u8]) -> Result<()> {
-        let eid = ExtendedId::new(can_id).ok_or_else(|| Error::Protocol("invalid CAN id".into()))?;
-        let frame = CanFrame::new(eid, data).ok_or_else(|| Error::Protocol("invalid frame".into()))?;
-        self.sock.write_frame(&frame).map_err(|e| Error::Connection(e.to_string()))?;
+        let eid =
+            ExtendedId::new(can_id).ok_or_else(|| Error::Protocol("invalid CAN id".into()))?;
+        let frame =
+            CanFrame::new(eid, data).ok_or_else(|| Error::Protocol("invalid frame".into()))?;
+        self.sock
+            .write_frame(&frame)
+            .map_err(|e| Error::Connection(e.to_string()))?;
         Ok(())
     }
 }

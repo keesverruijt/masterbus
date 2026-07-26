@@ -24,15 +24,21 @@ pub struct Waiter {
 impl Waiter {
     /// Create an empty waiter.
     pub fn new() -> Self {
-        Waiter { inner: Mutex::new(HashMap::new()), cv: Condvar::new() }
+        Waiter {
+            inner: Mutex::new(HashMap::new()),
+            cv: Condvar::new(),
+        }
     }
 
     /// Register interest in `key` **before** sending the request.
     pub fn register(&self, key: &str) {
-        self.inner
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), Slot { data: None, cancelled: false });
+        self.inner.lock().unwrap().insert(
+            key.to_string(),
+            Slot {
+                data: None,
+                cancelled: false,
+            },
+        );
     }
 
     /// Deliver a response payload to a waiter registered for `key`. No-op if no
@@ -52,11 +58,14 @@ impl Waiter {
         let (m, _) = self
             .cv
             .wait_timeout_while(map, timeout, |m| {
-                m.get(key).map(|s| s.data.is_none() && !s.cancelled).unwrap_or(false)
+                m.get(key)
+                    .map(|s| s.data.is_none() && !s.cancelled)
+                    .unwrap_or(false)
             })
             .unwrap();
         map = m;
-        map.remove(key).and_then(|s| if s.cancelled { None } else { s.data })
+        map.remove(key)
+            .and_then(|s| if s.cancelled { None } else { s.data })
     }
 
     /// Cancel all pending waits (on shutdown).

@@ -125,10 +125,7 @@ fn alloc_slice<T>(v: Vec<T>) -> (*mut T, i32) {
 ///
 /// `cache_dir` may be NULL (memory-only) or a directory for the schema cache.
 #[unsafe(no_mangle)]
-pub extern "C" fn mb_open_socketcan(
-    iface: *const c_char,
-    cache_dir: *const c_char,
-) -> *mut MbBus {
+pub extern "C" fn mb_open_socketcan(iface: *const c_char, cache_dir: *const c_char) -> *mut MbBus {
     let Some(iface) = opt_str(iface) else {
         return ptr::null_mut();
     };
@@ -233,7 +230,9 @@ pub extern "C" fn mb_device_firmware(bus: *mut MbBus, id: u32) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_device_status(bus: *mut MbBus, id: u32) -> MbStatus {
     use masterbus::DeviceStatus as S;
-    let Some(bus) = bus_ref(bus) else { return MbStatus::Unknown };
+    let Some(bus) = bus_ref(bus) else {
+        return MbStatus::Unknown;
+    };
     match bus.device(id).status() {
         S::Offline => MbStatus::Offline,
         S::Sleeping => MbStatus::Sleeping,
@@ -260,7 +259,9 @@ pub extern "C" fn mb_group_count(bus: *mut MbBus, id: u32) -> i32 {
 /// Name of the `group_index`-th monitoring group (NULL on error).
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_group_name(bus: *mut MbBus, id: u32, group_index: i32) -> *mut c_char {
-    let Some(bus) = bus_ref(bus) else { return ptr::null_mut() };
+    let Some(bus) = bus_ref(bus) else {
+        return ptr::null_mut();
+    };
     let Ok(groups) = bus.device(id).tab(Menu::Monitoring) else {
         return ptr::null_mut();
     };
@@ -289,7 +290,9 @@ pub extern "C" fn mb_group_fields(
     let Some(group) = groups.get(group_index as usize) else {
         return -1;
     };
-    let Ok(fields) = group.fields() else { return -1 };
+    let Ok(fields) = group.fields() else {
+        return -1;
+    };
     // The C ABI uses `i32` for field ids; channel-aware `FieldId` (u16)
     // fits losslessly.
     let idx: Vec<i32> = fields.iter().map(|f| f.index() as i32).collect();
@@ -348,7 +351,12 @@ pub extern "C" fn mb_field_value(bus: *mut MbBus, id: u32, field: i32) -> *mut M
 /// rejected write). Free with [`mb_free_value`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_set_bool(bus: *mut MbBus, id: u32, field: i32, value: bool) -> *mut MbValue {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).set(Value::Boolean(value)).ok()) {
+    match bus_ref(bus).and_then(|b| {
+        b.device(id)
+            .field(field as u16)
+            .set(Value::Boolean(value))
+            .ok()
+    }) {
         Some(v) => alloc_value(v),
         None => ptr::null_mut(),
     }
@@ -358,7 +366,12 @@ pub extern "C" fn mb_set_bool(bus: *mut MbBus, id: u32, field: i32, value: bool)
 /// rejected write). Free with [`mb_free_value`].
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_set_float(bus: *mut MbBus, id: u32, field: i32, value: f32) -> *mut MbValue {
-    match bus_ref(bus).and_then(|b| b.device(id).field(field as u16).set(Value::Float(value)).ok()) {
+    match bus_ref(bus).and_then(|b| {
+        b.device(id)
+            .field(field as u16)
+            .set(Value::Float(value))
+            .ok()
+    }) {
         Some(v) => alloc_value(v),
         None => ptr::null_mut(),
     }
@@ -401,8 +414,16 @@ pub extern "C" fn mb_value_bool(v: *const MbValue) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_value_date(v: *const MbValue) -> MbDate {
     match value_ref(v) {
-        Some(Value::Date(d)) => MbDate { day: d.day, mon: d.mon, year: d.year },
-        _ => MbDate { day: -1, mon: -1, year: -1 },
+        Some(Value::Date(d)) => MbDate {
+            day: d.day,
+            mon: d.mon,
+            year: d.year,
+        },
+        _ => MbDate {
+            day: -1,
+            mon: -1,
+            year: -1,
+        },
     }
 }
 
@@ -410,8 +431,18 @@ pub extern "C" fn mb_value_date(v: *const MbValue) -> MbDate {
 #[unsafe(no_mangle)]
 pub extern "C" fn mb_value_time(v: *const MbValue) -> MbTime {
     match value_ref(v) {
-        Some(Value::Time(t)) => MbTime { sec: t.sec, min: t.min, hour: t.hour, days: t.days },
-        _ => MbTime { sec: -1, min: -1, hour: -1, days: 0 },
+        Some(Value::Time(t)) => MbTime {
+            sec: t.sec,
+            min: t.min,
+            hour: t.hour,
+            days: t.days,
+        },
+        _ => MbTime {
+            sec: -1,
+            min: -1,
+            hour: -1,
+            days: 0,
+        },
     }
 }
 

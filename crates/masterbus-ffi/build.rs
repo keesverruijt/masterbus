@@ -7,7 +7,9 @@ fn main() {
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    let out = PathBuf::from(&crate_dir).join("include").join("masterbus.h");
+    let out = PathBuf::from(&crate_dir)
+        .join("include")
+        .join("masterbus.h");
 
     let config = cbindgen::Config::from_root_or_default(&crate_dir);
     match cbindgen::Builder::new()

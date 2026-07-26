@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, TryRecvError, bounded};
 use masterbus::{
-    field_id, AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus,
-    Menu, Subscription, Value, VisualizationType,
+    AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus, Menu,
+    Subscription, Value, VisualizationType, field_id,
 };
 
 /// Live-poll rate for the selected device's monitoring fields.
@@ -236,7 +236,12 @@ impl App {
     }
 
     pub fn device_label(&self, id: u32) -> String {
-        self.names.lock().unwrap().get(&id).cloned().unwrap_or_else(|| id.to_string())
+        self.names
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
     }
 
     pub fn note_alive(&mut self, id: u32) {
@@ -256,7 +261,9 @@ impl App {
     /// Drill into the selected device, landing on the Summary tab. The user
     /// can Tab into Monitoring / All Fields.
     pub fn open_device(&mut self) {
-        let Some(&id) = self.device_ids.get(self.dev_sel) else { return };
+        let Some(&id) = self.device_ids.get(self.dev_sel) else {
+            return;
+        };
         self.cur_device = Some(id);
         self.loaded_menus.clear();
         self.settings_loaded = false;
@@ -296,7 +303,10 @@ impl App {
         self.row_sel = 0;
         self.cur_info = self.bus.device(id).identity().ok();
         self.cur_access_level = self.bus.device(id).access_level().ok();
-        self.status = format!("{} / Summary — Tab switch · Esc back", self.device_label(id));
+        self.status = format!(
+            "{} / Summary — Tab switch · Esc back",
+            self.device_label(id)
+        );
     }
 
     fn switch_tab(&mut self, tab: TabKind) {
@@ -338,7 +348,13 @@ impl App {
                 let _ = tx.send(groups);
             }
         });
-        self.pending = Some(Pending { id, tab: TabKind::Menu(menu), name, started: Instant::now(), rx });
+        self.pending = Some(Pending {
+            id,
+            tab: TabKind::Menu(menu),
+            name,
+            started: Instant::now(),
+            rx,
+        });
     }
 
     /// Spawn a worker to probe the device's full field-index space and
@@ -369,7 +385,13 @@ impl App {
                 let _ = tx.send(vec![one]);
             }
         });
-        self.pending = Some(Pending { id, tab: TabKind::Settings, name, started: Instant::now(), rx });
+        self.pending = Some(Pending {
+            id,
+            tab: TabKind::Settings,
+            name,
+            started: Instant::now(),
+            rx,
+        });
     }
 
     /// Whether a tab discovery is in flight.
@@ -379,7 +401,9 @@ impl App {
 
     /// (name, tab, elapsed seconds) of the in-flight discovery, if any.
     pub fn pending_info(&self) -> Option<(&str, TabKind, u64)> {
-        self.pending.as_ref().map(|p| (p.name.as_str(), p.tab, p.started.elapsed().as_secs()))
+        self.pending
+            .as_ref()
+            .map(|p| (p.name.as_str(), p.tab, p.started.elapsed().as_secs()))
     }
 
     /// Check the discovery worker; when the result arrives, show it.
@@ -401,7 +425,11 @@ impl App {
                         self.settings_loaded = true;
                         // The worker packs the flat result into a single
                         // synthetic group; pull the fields back out.
-                        let fields = groups.into_iter().next().map(|g| g.fields).unwrap_or_default();
+                        let fields = groups
+                            .into_iter()
+                            .next()
+                            .map(|g| g.fields)
+                            .unwrap_or_default();
                         self.show_settings(id, fields);
                     }
                     TabKind::Summary => {} // never spawned
@@ -430,7 +458,10 @@ impl App {
         // Subscribe on every tab — Configuration / Service have editable
         // Text/DropDown fields whose current values (including Btm3 sids for
         // Text VIZ) must be cached before the user can edit them.
-        let fields: Vec<FieldId> = groups.iter().flat_map(|g| g.fields.iter().map(|f| f.index)).collect();
+        let fields: Vec<FieldId> = groups
+            .iter()
+            .flat_map(|g| g.fields.iter().map(|f| f.index))
+            .collect();
         self.sub = if !fields.is_empty() {
             Some(self.bus.subscribe(id, fields, POLL_INTERVAL, false))
         } else {
@@ -438,8 +469,11 @@ impl App {
         };
         self.row_sel = 0;
         self.select_first_field();
-        self.status =
-            format!("{} / {} — Tab switch · Enter edit · ? values · Esc back", self.device_label(id), menu_label(menu));
+        self.status = format!(
+            "{} / {} — Tab switch · Enter edit · ? values · Esc back",
+            self.device_label(id),
+            menu_label(menu)
+        );
     }
 
     fn show_settings(&mut self, id: u32, fields: Vec<FieldInfo>) {
@@ -527,7 +561,9 @@ impl App {
 
     /// Read the selected field once if we don't have a cached value yet.
     fn refresh_selected(&mut self) {
-        let Some(idx) = self.selected_field().map(|f| f.index) else { return };
+        let Some(idx) = self.selected_field().map(|f| f.index) else {
+            return;
+        };
         self.ensure_value(idx);
     }
 
@@ -564,7 +600,9 @@ impl App {
     // ---- editing ----------------------------------------------------------
 
     pub fn begin_edit(&mut self) {
-        let Some(info) = self.selected_field().cloned() else { return };
+        let Some(info) = self.selected_field().cloned() else {
+            return;
+        };
         if !info.writeable {
             self.status = format!("{} is read-only", info.name);
             return;
@@ -580,8 +618,11 @@ impl App {
                     Some(Value::Float(f)) if !f.is_nan() => format!("{f}"),
                     _ => String::new(),
                 };
-                self.editor =
-                    Some(Editor { field: info.index, name: info.name.clone(), kind: EditKind::Number(cur) });
+                self.editor = Some(Editor {
+                    field: info.index,
+                    name: info.name.clone(),
+                    kind: EditKind::Number(cur),
+                });
             }
             V::Radio | V::DropDown => {
                 let options = info.options.clone();
@@ -626,7 +667,9 @@ impl App {
     /// field. No-op on non-list fields. The current index (if cached) is
     /// passed in so the modal can highlight it.
     pub fn open_values(&mut self) {
-        let Some(info) = self.selected_field().cloned() else { return };
+        let Some(info) = self.selected_field().cloned() else {
+            return;
+        };
         if info.options.is_empty() {
             self.status = format!("{}: no list values to show", info.name);
             return;
@@ -658,26 +701,41 @@ impl App {
                 Err(_) => self.status = format!("'{buf}' is not a number"),
             },
             EditKind::Choice { options, sel } => {
-                self.write(ed.field, Value::List { index: sel as i32, options });
+                self.write(
+                    ed.field,
+                    Value::List {
+                        index: sel as i32,
+                        options,
+                    },
+                );
             }
             EditKind::Text { str_id, buf } => {
-                self.write(ed.field, Value::Text { sid: str_id, text: buf });
+                self.write(
+                    ed.field,
+                    Value::Text {
+                        sid: str_id,
+                        text: buf,
+                    },
+                );
             }
         }
     }
 
     pub fn editor_char(&mut self, c: char) {
         match &mut self.editor {
-            Some(Editor { kind: EditKind::Number(buf), .. })
-                if c.is_ascii_digit() || c == '.' || c == '-' =>
-            {
+            Some(Editor {
+                kind: EditKind::Number(buf),
+                ..
+            }) if c.is_ascii_digit() || c == '.' || c == '-' => {
                 buf.push(c);
             }
             // Text fields are constrained on the wire: printable ASCII only,
             // ≤16 bytes. Enforce here so the user can't even type past it.
-            Some(Editor { kind: EditKind::Text { buf, .. }, .. })
-                if (c.is_ascii_graphic() || c == ' ')
-                    && buf.len() < masterbus::MAX_EDITABLE_TEXT_BYTES =>
+            Some(Editor {
+                kind: EditKind::Text { buf, .. },
+                ..
+            }) if (c.is_ascii_graphic() || c == ' ')
+                && buf.len() < masterbus::MAX_EDITABLE_TEXT_BYTES =>
             {
                 buf.push(c);
             }
@@ -687,10 +745,16 @@ impl App {
 
     pub fn editor_backspace(&mut self) {
         match &mut self.editor {
-            Some(Editor { kind: EditKind::Number(buf), .. }) => {
+            Some(Editor {
+                kind: EditKind::Number(buf),
+                ..
+            }) => {
                 buf.pop();
             }
-            Some(Editor { kind: EditKind::Text { buf, .. }, .. }) => {
+            Some(Editor {
+                kind: EditKind::Text { buf, .. },
+                ..
+            }) => {
                 buf.pop();
             }
             _ => {}
@@ -698,7 +762,11 @@ impl App {
     }
 
     pub fn editor_choice_move(&mut self, delta: i32) {
-        if let Some(Editor { kind: EditKind::Choice { options, sel }, .. }) = &mut self.editor {
+        if let Some(Editor {
+            kind: EditKind::Choice { options, sel },
+            ..
+        }) = &mut self.editor
+        {
             if options.is_empty() {
                 return;
             }
@@ -734,7 +802,10 @@ impl App {
     pub fn login_at_password_stage(&self) -> bool {
         matches!(
             &self.login,
-            Some(LoginPrompt { stage: LoginStage::EnterPassword { .. }, .. })
+            Some(LoginPrompt {
+                stage: LoginStage::EnterPassword { .. },
+                ..
+            })
         )
     }
 
@@ -752,12 +823,22 @@ impl App {
         let sel = current
             .and_then(|l| LOGIN_LEVELS.iter().position(|&x| x == l))
             .unwrap_or(0);
-        self.login = Some(LoginPrompt { device, sel, current, stage: LoginStage::PickLevel });
+        self.login = Some(LoginPrompt {
+            device,
+            sel,
+            current,
+            stage: LoginStage::PickLevel,
+        });
         self.status = "select access level — ↑/↓ pick · Enter next · Esc cancel".into();
     }
 
     pub fn login_move(&mut self, delta: i32) {
-        if let Some(LoginPrompt { stage: LoginStage::PickLevel, sel, .. }) = &mut self.login {
+        if let Some(LoginPrompt {
+            stage: LoginStage::PickLevel,
+            sel,
+            ..
+        }) = &mut self.login
+        {
             let n = LOGIN_LEVELS.len() as i32;
             *sel = (((*sel as i32 + delta) % n + n) % n) as usize;
         }
@@ -770,8 +851,10 @@ impl App {
 
     /// Append a printable char to the password buffer.
     pub fn login_char(&mut self, c: char) {
-        if let Some(LoginPrompt { stage: LoginStage::EnterPassword { buf, .. }, .. }) =
-            &mut self.login
+        if let Some(LoginPrompt {
+            stage: LoginStage::EnterPassword { buf, .. },
+            ..
+        }) = &mut self.login
             && c.is_ascii_graphic()
         {
             buf.push(c);
@@ -780,8 +863,10 @@ impl App {
 
     /// Pop the last char of the password buffer.
     pub fn login_backspace(&mut self) {
-        if let Some(LoginPrompt { stage: LoginStage::EnterPassword { buf, .. }, .. }) =
-            &mut self.login
+        if let Some(LoginPrompt {
+            stage: LoginStage::EnterPassword { buf, .. },
+            ..
+        }) = &mut self.login
         {
             buf.pop();
         }
@@ -793,18 +878,27 @@ impl App {
     /// login. If the device reports the same level it was at before, the
     /// password was rejected.
     pub fn commit_login(&mut self) {
-        let Some(mut p) = self.login.take() else { return };
+        let Some(mut p) = self.login.take() else {
+            return;
+        };
         match &p.stage {
             LoginStage::PickLevel => {
                 let level = LOGIN_LEVELS[p.sel];
                 if level == AccessLevel::EndUser {
                     let prev = p.current;
-                    self.apply_login_result(p.device, level, self.bus.device(p.device).logout(), prev);
+                    self.apply_login_result(
+                        p.device,
+                        level,
+                        self.bus.device(p.device).logout(),
+                        prev,
+                    );
                 } else {
                     // Stay in the modal; collect a password.
-                    p.stage = LoginStage::EnterPassword { level, buf: String::new() };
-                    self.status =
-                        "enter password — type · Enter submit · Esc cancel".into();
+                    p.stage = LoginStage::EnterPassword {
+                        level,
+                        buf: String::new(),
+                    };
+                    self.status = "enter password — type · Enter submit · Esc cancel".into();
                     self.login = Some(p);
                 }
             }

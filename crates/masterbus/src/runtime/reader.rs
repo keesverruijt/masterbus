@@ -2,8 +2,8 @@
 //! waiter, caches values, and tracks device liveness.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -13,10 +13,10 @@ use super::framelog::frame_log;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
-use crate::model::{field_id, DeviceId, FieldId};
+use crate::model::{DeviceId, FieldId, field_id};
 use crate::protocol::{
-    can_class, decode_value, frame_from_raw, parse_frame, waiter_key_for_frame, MbMessage,
-    BTM1_META_ADDR_FLAG,
+    BTM1_META_ADDR_FLAG, MbMessage, can_class, decode_value, frame_from_raw, parse_frame,
+    waiter_key_for_frame,
 };
 use crate::transport::TransportRx;
 
@@ -96,12 +96,20 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
     }
 
     match parse_frame(&frame) {
-        MbMessage::DeviceBroadcast { device_addr, type_code, firmware_version, .. } => {
+        MbMessage::DeviceBroadcast {
+            device_addr,
+            type_code,
+            firmware_version,
+            ..
+        } => {
             state.mark_alive(device_addr, type_code, firmware_version);
         }
-        MbMessage::MonitoringData { device_addr, field_index, raw, .. }
-            if device_addr & BTM1_META_ADDR_FLAG == 0 =>
-        {
+        MbMessage::MonitoringData {
+            device_addr,
+            field_index,
+            raw,
+            ..
+        } if device_addr & BTM1_META_ADDR_FLAG == 0 => {
             // Monitoring data arrives on the Btm1 channel: build a Btm1
             // `FieldId` from the wire field index.
             let field = field_id::btm1(field_index);
@@ -160,6 +168,6 @@ fn is_device_originated(can_class: u8) -> bool {
         | can_class::BTM3_META_DATA           // 0x0C — Btm3 metadata reply
         | can_class::WRITE_ACK                // 0x10 — write/no-value ack
         | can_class::SCHEMA_DATA_NA           // 0x11 — short / "n/a" schema reply
-        | 0x14                                // metadata error reply (e.g. EasyView's 0x0C errors)
+        | 0x14 // metadata error reply (e.g. EasyView's 0x0C errors)
     )
 }

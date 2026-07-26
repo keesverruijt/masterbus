@@ -2,28 +2,28 @@
 //! rate-based subscription polling — paced to a bus budget, passive-first.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::discovery::{
-    discover_menu, enumerate_all_fields, fetch_identity, resolve_catalog, Disc, MENUS,
+    Disc, MENUS, discover_menu, enumerate_all_fields, fetch_identity, resolve_catalog,
 };
 use super::framelog::frame_log;
-use crate::model::{DeviceIdentity, Menu};
 use super::reader::value_key;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
-use crate::model::{field_id, AccessLevel, Channel, DeviceId, FieldId};
+use crate::model::{AccessLevel, Channel, DeviceId, FieldId, field_id};
+use crate::model::{DeviceIdentity, Menu};
 use crate::protocol::{
-    btm3_read_raw, btm3_write_raw, decode_value, encode_commit, encode_login_read,
-    encode_login_write, encode_logout, encode_set_boolean, encode_set_float, encode_set_list,
-    heartbeat_raw, monitoring_req_raw, string_chunk_write_raw, TAB_DEFAULT, VisualizationType,
+    TAB_DEFAULT, VisualizationType, btm3_read_raw, btm3_write_raw, decode_value, encode_commit,
+    encode_login_read, encode_login_write, encode_logout, encode_set_boolean, encode_set_float,
+    encode_set_list, heartbeat_raw, monitoring_req_raw, string_chunk_write_raw,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
@@ -56,8 +56,15 @@ pub(super) fn spawn(
             // Fire the first heartbeat immediately (if configured) to prompt
             // device announcements as soon as we connect.
             let next_heartbeat = config.heartbeat_master.map(|_| Instant::now());
-            Sched { tx, state, waiter, config, last_send: Instant::now(), next_heartbeat }
-                .run(cmd_rx, &shutdown)
+            Sched {
+                tx,
+                state,
+                waiter,
+                config,
+                last_send: Instant::now(),
+                next_heartbeat,
+            }
+            .run(cmd_rx, &shutdown)
         })
         .expect("spawn scheduler")
 }
@@ -93,15 +100,30 @@ impl Sched {
                     self.do_discover_all_fields(addr);
                     let _ = reply.send(Ok(()));
                 }
-                Ok(Command::Read { addr, field, max_age, reply }) => {
+                Ok(Command::Read {
+                    addr,
+                    field,
+                    max_age,
+                    reply,
+                }) => {
                     let r = self.do_read(addr, field, max_age);
                     let _ = reply.send(r);
                 }
-                Ok(Command::Write { addr, field, value, reply }) => {
+                Ok(Command::Write {
+                    addr,
+                    field,
+                    value,
+                    reply,
+                }) => {
                     let r = self.do_write(addr, field, value);
                     let _ = reply.send(r);
                 }
-                Ok(Command::WriteString { addr, str_id, text, reply }) => {
+                Ok(Command::WriteString {
+                    addr,
+                    str_id,
+                    text,
+                    reply,
+                }) => {
                     let r = self.do_write_string(addr, str_id, &text);
                     let _ = reply.send(r);
                 }
@@ -109,7 +131,12 @@ impl Sched {
                     let r = self.do_access_level_read(addr);
                     let _ = reply.send(r);
                 }
-                Ok(Command::AccessLevelSet { addr, level, code, reply }) => {
+                Ok(Command::AccessLevelSet {
+                    addr,
+                    level,
+                    code,
+                    reply,
+                }) => {
                     let r = self.do_access_level_set(addr, level, code);
                     let _ = reply.send(r);
                 }
@@ -137,7 +164,9 @@ impl Sched {
 
     /// Emit the bus-master heartbeat if it's due (no-op unless configured).
     fn maybe_heartbeat(&mut self) {
-        let Some(master) = self.config.heartbeat_master else { return };
+        let Some(master) = self.config.heartbeat_master else {
+            return;
+        };
         let now = Instant::now();
         if self.next_heartbeat.is_some_and(|t| now >= t) {
             self.send(heartbeat_raw(master));
@@ -236,7 +265,9 @@ impl Sched {
         let level = match self.state.access_level(addr) {
             Some(l) => l,
             None => {
-                let l = self.do_access_level_read(addr).unwrap_or(AccessLevel::EndUser);
+                let l = self
+                    .do_access_level_read(addr)
+                    .unwrap_or(AccessLevel::EndUser);
                 self.state.put_access_level(addr, l);
                 l
             }
@@ -246,7 +277,13 @@ impl Sched {
         // Inject the device's spot-checked string table (if resolved). `None`
         // until `ensure_catalog` has run, so identity discovery stays live.
         let catalog = self.state.catalog_table(addr);
-        let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg, level, catalog };
+        let mut disc = Disc {
+            tx: &mut *self.tx,
+            waiter: &waiter,
+            cfg: &cfg,
+            level,
+            catalog,
+        };
         f(&mut disc)
     }
 
@@ -270,7 +307,12 @@ impl Sched {
             .ok_or(Error::FieldNotAvailable(field as i32))
     }
 
-    fn poll_value(&mut self, addr: DeviceId, field: FieldId, viz: VisualizationType) -> Result<Value> {
+    fn poll_value(
+        &mut self,
+        addr: DeviceId,
+        field: FieldId,
+        viz: VisualizationType,
+    ) -> Result<Value> {
         let key = value_key(addr, field);
         self.waiter.register(&key);
         // Both channels require an active read request. Btm3 value pushes are
@@ -279,7 +321,11 @@ impl Sched {
         // master polling) we'd never see anything otherwise.
         let timeout = match field_id::channel(field) {
             Channel::Btm1 => {
-                self.send(monitoring_req_raw(addr, field_id::wire_index(field), TAB_DEFAULT));
+                self.send(monitoring_req_raw(
+                    addr,
+                    field_id::wire_index(field),
+                    TAB_DEFAULT,
+                ));
                 VALUE_READ_TIMEOUT_BTM1
             }
             Channel::Btm3 => {
@@ -329,11 +375,9 @@ impl Sched {
         // The login response shares timing with a Btm1 value-read echo —
         // both arrive in the tens of ms.
         match self.waiter.wait(&key, VALUE_READ_TIMEOUT_BTM1) {
-            Some(data) if data.len() >= 3 => {
-                AccessLevel::from_byte(data[2]).ok_or_else(|| {
-                    Error::Protocol(format!("unknown access level byte 0x{:02X}", data[2]))
-                })
-            }
+            Some(data) if data.len() >= 3 => AccessLevel::from_byte(data[2]).ok_or_else(|| {
+                Error::Protocol(format!("unknown access level byte 0x{:02X}", data[2]))
+            }),
             Some(_) => Err(Error::Protocol("short access-level response".into())),
             None => Err(Error::Timeout),
         }
@@ -485,7 +529,13 @@ impl Sched {
     /// Send one chunk and wait for the device's echo ack on class `0x06`.
     /// The echo arrives via the existing `str:<addr>:<sid>:<seq>` waiter key
     /// (see `protocol::decode::waiter_key_for_frame`).
-    fn send_string_chunk(&mut self, addr: DeviceId, str_id: u16, seq: u8, chars: &[u8]) -> Result<()> {
+    fn send_string_chunk(
+        &mut self,
+        addr: DeviceId,
+        str_id: u16,
+        seq: u8,
+        chars: &[u8],
+    ) -> Result<()> {
         let key = format!("str:{:06X}:{:04X}:{}", addr, str_id, seq);
         self.waiter.register(&key);
         self.send(string_chunk_write_raw(addr, str_id, seq, chars));
@@ -500,12 +550,20 @@ impl Sched {
     fn add_sub(&mut self, subs: &mut Vec<SubState>, spec: SubSpec) {
         // Ensure the subscribed fields' types are known. We don't know which menus
         // they live in, so discover the full schema (one-time; disk-cached).
-        if !spec.fields.iter().all(|&f| self.state.has_field(spec.device, f)) {
+        if !spec
+            .fields
+            .iter()
+            .all(|&f| self.state.has_field(spec.device, f))
+        {
             self.do_discover_all(spec.device);
         }
         let now = Instant::now();
         let next_due = spec.fields.iter().map(|&f| (f, now)).collect();
-        subs.push(SubState { spec, next_due, last_value: HashMap::new() });
+        subs.push(SubState {
+            spec,
+            next_due,
+            last_value: HashMap::new(),
+        });
     }
 
     fn next_due_in(&self, subs: &[SubState]) -> Option<Duration> {
@@ -546,7 +604,11 @@ impl Sched {
                 let changed = s.last_value.get(&field) != Some(&v);
                 if !change_only || changed {
                     s.last_value.insert(field, v.clone());
-                    let _ = s.spec.sender.send(ValueUpdate { device, field, value: v });
+                    let _ = s.spec.sender.send(ValueUpdate {
+                        device,
+                        field,
+                        value: v,
+                    });
                 }
             }
         }

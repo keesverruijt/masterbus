@@ -11,12 +11,12 @@ pub(crate) use state::State;
 pub(crate) use waiter::Waiter;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 use crate::error::{Error, Result};
 use crate::model::{DeviceId, FieldId};
@@ -100,14 +100,45 @@ pub(crate) struct SubSpec {
 
 /// Commands sent from the API to the scheduler thread.
 pub(crate) enum Command {
-    Identify { addr: DeviceId, reply: Sender<Result<()>> },
-    DiscoverMenu { addr: DeviceId, menu: crate::model::Menu, reply: Sender<Result<()>> },
-    Discover { addr: DeviceId, reply: Sender<Result<()>> },
-    DiscoverAllFields { addr: DeviceId, reply: Sender<Result<()>> },
-    Read { addr: DeviceId, field: FieldId, max_age: Duration, reply: Sender<Result<Value>> },
-    Write { addr: DeviceId, field: FieldId, value: WriteValue, reply: Sender<Result<Value>> },
-    WriteString { addr: DeviceId, str_id: u16, text: String, reply: Sender<Result<()>> },
-    AccessLevelRead { addr: DeviceId, reply: Sender<Result<crate::model::AccessLevel>> },
+    Identify {
+        addr: DeviceId,
+        reply: Sender<Result<()>>,
+    },
+    DiscoverMenu {
+        addr: DeviceId,
+        menu: crate::model::Menu,
+        reply: Sender<Result<()>>,
+    },
+    Discover {
+        addr: DeviceId,
+        reply: Sender<Result<()>>,
+    },
+    DiscoverAllFields {
+        addr: DeviceId,
+        reply: Sender<Result<()>>,
+    },
+    Read {
+        addr: DeviceId,
+        field: FieldId,
+        max_age: Duration,
+        reply: Sender<Result<Value>>,
+    },
+    Write {
+        addr: DeviceId,
+        field: FieldId,
+        value: WriteValue,
+        reply: Sender<Result<Value>>,
+    },
+    WriteString {
+        addr: DeviceId,
+        str_id: u16,
+        text: String,
+        reply: Sender<Result<()>>,
+    },
+    AccessLevelRead {
+        addr: DeviceId,
+        reply: Sender<Result<crate::model::AccessLevel>>,
+    },
     AccessLevelSet {
         addr: DeviceId,
         level: crate::model::AccessLevel,
@@ -149,15 +180,31 @@ impl Engine {
         let (cmd_tx, cmd_rx) = unbounded::<Command>();
         let (dev_tx, dev_rx) = unbounded::<DeviceEvent>();
 
-        let reader = reader::spawn(rx, state.clone(), waiter.clone(), dev_tx, shutdown.clone(), config.clone());
-        let scheduler =
-            scheduler::spawn(tx, state.clone(), waiter.clone(), cmd_rx, shutdown.clone(), config.clone());
+        let reader = reader::spawn(
+            rx,
+            state.clone(),
+            waiter.clone(),
+            dev_tx,
+            shutdown.clone(),
+            config.clone(),
+        );
+        let scheduler = scheduler::spawn(
+            tx,
+            state.clone(),
+            waiter.clone(),
+            cmd_rx,
+            shutdown.clone(),
+            config.clone(),
+        );
 
         // Quick init: wait only until at least one device has been heard.
         let deadline = Instant::now() + config.connect_timeout;
         while !state.any_device() {
             if Instant::now() >= deadline {
-                log::error!("no devices heard on the bus within {:?}", config.connect_timeout);
+                log::error!(
+                    "no devices heard on the bus within {:?}",
+                    config.connect_timeout
+                );
                 return Err(Error::Connection("no devices heard on the bus".into()));
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -183,8 +230,11 @@ impl Engine {
 
     fn call<T>(&self, make: impl FnOnce(Sender<T>) -> Command) -> Result<T> {
         let (tx, rx) = bounded::<T>(1);
-        self.cmd_tx.send(make(tx)).map_err(|_| Error::Connection("engine stopped".into()))?;
-        rx.recv().map_err(|_| Error::Connection("engine stopped".into()))
+        self.cmd_tx
+            .send(make(tx))
+            .map_err(|_| Error::Connection("engine stopped".into()))?;
+        rx.recv()
+            .map_err(|_| Error::Connection("engine stopped".into()))
     }
 
     /// Ensure a device's identity is known (cheap discovery; blocks until ready).
@@ -242,12 +292,22 @@ impl Engine {
 
     /// Read a field value (cache if fresh enough, else poll).
     pub fn read(&self, addr: DeviceId, field: FieldId, max_age: Duration) -> Result<Value> {
-        self.call(|reply| Command::Read { addr, field, max_age, reply })?
+        self.call(|reply| Command::Read {
+            addr,
+            field,
+            max_age,
+            reply,
+        })?
     }
 
     /// Write a field value; returns the resulting value observed afterwards.
     pub fn write(&self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
-        self.call(|reply| Command::Write { addr, field, value, reply })?
+        self.call(|reply| Command::Write {
+            addr,
+            field,
+            value,
+            reply,
+        })?
     }
 
     /// Write a string to a device's string table at the given id (PROTOCOL.md
@@ -278,7 +338,12 @@ impl Engine {
         level: crate::model::AccessLevel,
         code: Option<f32>,
     ) -> Result<crate::model::AccessLevel> {
-        self.call(|reply| Command::AccessLevelSet { addr, level, code, reply })?
+        self.call(|reply| Command::AccessLevelSet {
+            addr,
+            level,
+            code,
+            reply,
+        })?
     }
 
     /// Subscribe to live updates of `fields` at `interval`. Returns the
@@ -292,9 +357,14 @@ impl Engine {
     ) -> (u64, Receiver<ValueUpdate>) {
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = unbounded::<ValueUpdate>();
-        let _ = self
-            .cmd_tx
-            .send(Command::Subscribe(SubSpec { id, device, fields, interval, change_only, sender: tx }));
+        let _ = self.cmd_tx.send(Command::Subscribe(SubSpec {
+            id,
+            device,
+            fields,
+            interval,
+            change_only,
+            sender: tx,
+        }));
         (id, rx)
     }
 

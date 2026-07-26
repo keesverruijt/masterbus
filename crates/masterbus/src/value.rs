@@ -54,8 +54,14 @@ impl Value {
     /// value kinds.
     pub fn with_options(self, options: &[String]) -> Value {
         match self {
-            Value::List { index, .. } => Value::List { index, options: options.to_vec() },
-            Value::Eventable { index, .. } => Value::Eventable { index, labels: options.to_vec() },
+            Value::List { index, .. } => Value::List {
+                index,
+                options: options.to_vec(),
+            },
+            Value::Eventable { index, .. } => Value::Eventable {
+                index,
+                labels: options.to_vec(),
+            },
             other => other,
         }
     }
@@ -115,7 +121,11 @@ mod tests {
     #[test]
     fn list_carries_index_and_label() {
         let opts = vec!["Off".to_string(), "On".to_string(), "Auto".to_string()];
-        let v = Value::List { index: 2, options: vec![] }.with_options(&opts);
+        let v = Value::List {
+            index: 2,
+            options: vec![],
+        }
+        .with_options(&opts);
         assert_eq!(v.index(), Some(2));
         assert_eq!(v.label(), Some("Auto"));
     }

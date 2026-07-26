@@ -49,7 +49,9 @@ fn main() {
                 // subscribe to every field in it; updates stream in via the
                 // returned `Subscription`'s receiver.
                 let device = bus.device(id);
-                let Ok(groups) = device.tab(Menu::Monitoring) else { continue };
+                let Ok(groups) = device.tab(Menu::Monitoring) else {
+                    continue;
+                };
                 let mut fields = Vec::new();
                 for g in &groups {
                     if let Ok(fs) = g.fields() {

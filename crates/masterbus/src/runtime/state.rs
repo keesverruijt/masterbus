@@ -84,14 +84,18 @@ pub struct State {
 impl State {
     /// Create empty state.
     pub fn new() -> Self {
-        State { devices: Mutex::new(HashMap::new()) }
+        State {
+            devices: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Mark a device alive (from a broadcast), updating its identity hints.
     pub fn mark_alive(&self, addr: u32, type_code: u8, fw_hint: u16) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         e.last_seen = now;
         e.type_code = type_code;
         e.fw_hint = fw_hint;
@@ -106,7 +110,9 @@ impl State {
     pub fn touch(&self, addr: u32) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         e.last_seen = now;
     }
 
@@ -114,8 +120,17 @@ impl State {
     pub fn put_value(&self, addr: u32, field: FieldId, value: Value) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
-        e.values.insert(field, CachedValue { value, at: now, outdated: false });
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
+        e.values.insert(
+            field,
+            CachedValue {
+                value,
+                at: now,
+                outdated: false,
+            },
+        );
     }
 
     /// Mark a field's cached value outdated (e.g. after a write).
@@ -129,14 +144,20 @@ impl State {
 
     /// Get a cached value (clone) if present.
     pub fn get_value(&self, addr: u32, field: FieldId) -> Option<CachedValue> {
-        self.devices.lock().unwrap().get(&addr).and_then(|e| e.values.get(&field).cloned())
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .and_then(|e| e.values.get(&field).cloned())
     }
 
     /// Store a device's identity (cheap discovery result).
     pub fn put_identity(&self, addr: u32, identity: DeviceIdentity) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         e.identity = Some(identity);
     }
 
@@ -154,20 +175,32 @@ impl State {
     pub fn identity(&self, addr: u32) -> Option<DeviceIdentity> {
         let map = self.devices.lock().unwrap();
         let e = map.get(&addr)?;
-        e.schema.as_ref().map(|s| s.identity()).or_else(|| e.identity.clone())
+        e.schema
+            .as_ref()
+            .map(|s| s.identity())
+            .or_else(|| e.identity.clone())
     }
 
     /// Whether the offline string catalog has been resolved for this device
     /// (spot-checked once). Distinguishes "not attempted" from "attempted, no
     /// usable table".
     pub fn catalog_attempted(&self, addr: u32) -> bool {
-        self.devices.lock().unwrap().get(&addr).map(|e| e.catalog_attempted).unwrap_or(false)
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .map(|e| e.catalog_attempted)
+            .unwrap_or(false)
     }
 
     /// The spot-checked static string table for this device, if resolution
     /// found and confirmed one.
     pub fn catalog_table(&self, addr: u32) -> Option<&'static HashMap<u16, String>> {
-        self.devices.lock().unwrap().get(&addr).and_then(|e| e.catalog_table)
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .and_then(|e| e.catalog_table)
     }
 
     /// Record the result of a catalog resolution attempt (`Some(table)` on a
@@ -176,7 +209,9 @@ impl State {
     pub fn put_catalog(&self, addr: u32, table: Option<&'static HashMap<u16, String>>) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         e.catalog_attempted = true;
         e.catalog_table = table;
     }
@@ -184,7 +219,11 @@ impl State {
     /// Get the device's last-known access level. `None` until we've heard
     /// one (either via an explicit read or after a successful login/logout).
     pub fn access_level(&self, addr: u32) -> Option<AccessLevel> {
-        self.devices.lock().unwrap().get(&addr).and_then(|e| e.access_level)
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .and_then(|e| e.access_level)
     }
 
     /// Record the device's access level (after a successful read or
@@ -192,7 +231,9 @@ impl State {
     pub fn put_access_level(&self, addr: u32, level: AccessLevel) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         e.access_level = Some(level);
     }
 
@@ -201,7 +242,9 @@ impl State {
     pub fn put_menu(&self, addr: u32, menu: Menu, groups: Vec<GroupInfo>) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         let id = e.identity.clone().unwrap_or_else(|| DeviceIdentity {
             article: String::new(),
             serial: String::new(),
@@ -209,7 +252,9 @@ impl State {
             name: String::new(),
             firmware: String::new(),
         });
-        let schema = e.schema.get_or_insert_with(|| DeviceSchema::from_identity(id, Vec::new()));
+        let schema = e
+            .schema
+            .get_or_insert_with(|| DeviceSchema::from_identity(id, Vec::new()));
         schema.groups.retain(|g| g.menu != menu);
         schema.groups.extend(groups);
         e.menus.insert(menu);
@@ -217,7 +262,12 @@ impl State {
 
     /// Whether a specific menu has been discovered for a device.
     pub fn has_menu(&self, addr: u32, menu: Menu) -> bool {
-        self.devices.lock().unwrap().get(&addr).map(|e| e.menus.contains(&menu)).unwrap_or(false)
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .map(|e| e.menus.contains(&menu))
+            .unwrap_or(false)
     }
 
     /// Whether every menu in `menus` has been discovered for a device.
@@ -254,7 +304,11 @@ impl State {
 
     /// Clone a device's schema-so-far (groups of all discovered menus).
     pub fn schema(&self, addr: u32) -> Option<DeviceSchema> {
-        self.devices.lock().unwrap().get(&addr).and_then(|e| e.schema.clone())
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .and_then(|e| e.schema.clone())
     }
 
     /// Drop the cached schema (groups + discovered-menu set) for a device.
@@ -272,22 +326,31 @@ impl State {
 
     /// Whether the flat field enumeration has been populated for a device.
     pub fn has_all_fields(&self, addr: u32) -> bool {
-        self.devices.lock().unwrap().get(&addr).is_some_and(|e| e.all_fields.is_some())
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .is_some_and(|e| e.all_fields.is_some())
     }
 
     /// Clone the flat field enumeration for a device, if discovered.
     pub fn all_fields(&self, addr: u32) -> Option<Vec<FieldInfo>> {
-        self.devices.lock().unwrap().get(&addr).and_then(|e| e.all_fields.clone())
+        self.devices
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .and_then(|e| e.all_fields.clone())
     }
 
     /// Store the flat field enumeration for a device.
     pub fn put_all_fields(&self, addr: u32, fields: Vec<FieldInfo>) {
         let now = Instant::now();
         let mut map = self.devices.lock().unwrap();
-        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
         e.all_fields = Some(fields);
     }
-
 
     /// Device ids currently considered alive (seen within `liveness`).
     pub fn alive_ids(&self, liveness: std::time::Duration) -> Vec<u32> {

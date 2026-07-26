@@ -1,14 +1,14 @@
 //! Rendering of the [`App`] state with ratatui.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
-use ratatui::Frame;
 
 use masterbus::{DeviceStatus, FieldId, Value};
 
-use crate::app::{level_label, tab_label, App, EditKind, Focus, Row, TabKind, LOGIN_LEVELS, TABS};
+use crate::app::{App, EditKind, Focus, LOGIN_LEVELS, Row, TABS, TabKind, level_label, tab_label};
 
 /// Braille spinner frames.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -51,7 +51,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_logs(f: &mut Frame, area: Rect) {
     use tui_logger::{TuiLoggerLevelOutput, TuiLoggerWidget};
     let widget = TuiLoggerWidget::default()
-        .block(Block::default().borders(Borders::ALL).title(" Logs (~ to hide) "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Logs (~ to hide) "),
+        )
         .style_error(Style::default().fg(Color::Red))
         .style_warn(Style::default().fg(Color::Yellow))
         .style_info(Style::default().fg(Color::Green))
@@ -95,7 +99,10 @@ fn draw_devices(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let list = List::new(items)
-        .block(bordered(format!("Devices ({})", app.device_ids.len()), app.focus == Focus::Devices))
+        .block(bordered(
+            format!("Devices ({})", app.device_ids.len()),
+            app.focus == Focus::Devices,
+        ))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ");
     f.render_stateful_widget(list, area, &mut state);
@@ -123,9 +130,11 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
     let titles: Vec<Line> = TABS.iter().map(|&t| Line::raw(tab_label(t))).collect();
     let sel = TABS.iter().position(|&t| t == app.cur_tab).unwrap_or(0);
     f.render_widget(
-        Tabs::new(titles)
-            .select(sel)
-            .highlight_style(Style::new().fg(Color::Cyan).add_modifier(Modifier::REVERSED)),
+        Tabs::new(titles).select(sel).highlight_style(
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED),
+        ),
         parts[0],
     );
     let content = parts[1];
@@ -142,7 +151,10 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         let lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
-                format!("{spin}  Discovering {name} / {}…  ({secs}s)", tab_label(tab)),
+                format!(
+                    "{spin}  Discovering {name} / {}…  ({secs}s)",
+                    tab_label(tab)
+                ),
                 Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )),
             Line::raw(""),
@@ -151,7 +163,10 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                 Style::new().fg(Color::DarkGray),
             )),
             Line::raw(""),
-            Line::from(Span::styled("Esc to cancel", Style::new().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "Esc to cancel",
+                Style::new().fg(Color::DarkGray),
+            )),
         ];
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), content);
         return;
@@ -214,10 +229,17 @@ fn draw_info(f: &mut Frame, app: &App, id: u32, area: Rect) {
         let status = app.device_status(id);
         let (sym, color) = status_style(status);
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<11}", "Status"), Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {:<11}", "Status"),
+                Style::new().fg(Color::DarkGray),
+            ),
             Span::styled(format!("{sym} {status:?}"), Style::new().fg(color)),
         ]));
-        let access = app.cur_access_level.map(level_label).unwrap_or("—").to_string();
+        let access = app
+            .cur_access_level
+            .map(level_label)
+            .unwrap_or("—")
+            .to_string();
         lines.push(row("Access", access));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -268,7 +290,10 @@ fn draw_login(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::new()
                 };
-                lines.push(Line::from(Span::styled(format!("{marker}{}", level_label(level)), style)));
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}{}", level_label(level)),
+                    style,
+                )));
             }
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
@@ -303,7 +328,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     // The status line; the in-progress edit moves to a centred modal
     // (see [`draw_edit_modal`]).
     let style = Style::new().fg(Color::Gray);
-    f.render_widget(Paragraph::new(format!(" {}", app.status)).style(style), area);
+    f.render_widget(
+        Paragraph::new(format!(" {}", app.status)).style(style),
+        area,
+    );
 }
 
 fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
@@ -325,10 +353,7 @@ fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, popup);
 
     let (body, hint) = match &ed.kind {
-        EditKind::Number(buf) => (
-            format!(" {buf}_ "),
-            "Enter ok  ·  Esc cancel".to_string(),
-        ),
+        EditKind::Number(buf) => (format!(" {buf}_ "), "Enter ok  ·  Esc cancel".to_string()),
         EditKind::Choice { options, sel } => (
             format!(
                 " ‹ {} ›   ({}/{}) ",
@@ -351,7 +376,10 @@ fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
 
     let lines = vec![
         Line::raw(""),
-        Line::from(Span::styled(body, Style::new().fg(Color::White).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            body,
+            Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
         Line::raw(""),
         Line::from(Span::styled(hint, Style::new().fg(Color::DarkGray))),
     ];
@@ -359,7 +387,9 @@ fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_values_modal(f: &mut Frame, app: &App, area: Rect) {
-    let Some(view) = &app.values_modal else { return };
+    let Some(view) = &app.values_modal else {
+        return;
+    };
 
     // Width fits the widest "Label (index)" line plus a margin; height fits
     // every option plus title + border.
@@ -404,7 +434,11 @@ fn draw_values_modal(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn bordered(title: String, focused: bool) -> Block<'static> {
-    let color = if focused { Color::Cyan } else { Color::DarkGray };
+    let color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(color))
@@ -430,8 +464,15 @@ fn format_value_for(v: &Value, schema_opts: &[String]) -> String {
     // Append the raw integer index for list/eventable values so the underlying
     // wire value is visible alongside the human label: `Stabilized(2)`.
     let label = |index: i32, value_opts: &[String]| -> String {
-        let src = if value_opts.is_empty() { schema_opts } else { value_opts };
-        let text = src.get(index as usize).cloned().unwrap_or_else(|| format!("[{index}]"));
+        let src = if value_opts.is_empty() {
+            schema_opts
+        } else {
+            value_opts
+        };
+        let text = src
+            .get(index as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("[{index}]"));
         let text = truncate(&text, 16);
         format!("{text}({index})")
     };
@@ -452,16 +493,21 @@ pub fn format_value(v: &Value) -> String {
         Value::Date(d) => format!("{:04}-{:02}-{:02}", d.year, d.mon, d.day),
         Value::Time(t) if t.sec < 0 => "—".into(),
         Value::Time(t) => format!("{}d {:02}:{:02}:{:02}", t.days, t.hour, t.min, t.sec),
-        Value::List { index, options } => {
-            options.get(*index as usize).cloned().unwrap_or_else(|| format!("[{index}]"))
-        }
+        Value::List { index, options } => options
+            .get(*index as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("[{index}]")),
         Value::Text { text, .. } => text.clone(),
         Value::DeviceRef { index, device_ids } => {
-            format!("->{}", device_ids.get(*index as usize).copied().unwrap_or(0))
+            format!(
+                "->{}",
+                device_ids.get(*index as usize).copied().unwrap_or(0)
+            )
         }
-        Value::Eventable { index, labels } => {
-            labels.get(*index as usize).cloned().unwrap_or_else(|| format!("[{index}]"))
-        }
+        Value::Eventable { index, labels } => labels
+            .get(*index as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("[{index}]")),
         Value::Invalid => "invalid".into(),
     }
 }

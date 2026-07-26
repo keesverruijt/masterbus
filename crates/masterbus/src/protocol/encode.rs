@@ -1,6 +1,6 @@
 //! Encode requests/writes into raw `(can_id, data)` pairs for transmission.
 
-use super::{can_class, menu, meta_op, BTM1_META_ADDR_FLAG, TAB_DEFAULT};
+use super::{BTM1_META_ADDR_FLAG, TAB_DEFAULT, can_class, menu, meta_op};
 
 fn id(class: u8, device_addr: u32) -> u32 {
     ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF)
@@ -22,7 +22,10 @@ pub fn heartbeat_raw(master_addr: u32) -> (u32, Vec<u8>) {
 
 /// Read a monitoring field: class `0x18`, `[field, tab]`.
 pub fn monitoring_req_raw(device_addr: u32, field_index: u8, tab_index: u8) -> (u32, Vec<u8>) {
-    (id(can_class::MONITORING_REQ, device_addr), vec![field_index, tab_index])
+    (
+        id(can_class::MONITORING_REQ, device_addr),
+        vec![field_index, tab_index],
+    )
 }
 
 /// Firmware-version query: class `0x07`, `[0x82, n]`.
@@ -33,7 +36,10 @@ pub fn fw_req_raw(device_addr: u32, n: u8) -> (u32, Vec<u8>) {
 /// Group-count query for a menu selector: class `0x07`, `[0x08, selector]`.
 pub fn group_count_req_raw(device_addr: u32, selector: u8) -> (u32, Vec<u8>) {
     let _ = menu::MONITORING; // selectors documented in `menu`
-    (id(can_class::PROPERTY_REQ, device_addr), vec![0x08, selector])
+    (
+        id(can_class::PROPERTY_REQ, device_addr),
+        vec![0x08, selector],
+    )
 }
 
 /// Property string-id query: class `0x07`, `[0x09, n]`
@@ -45,7 +51,10 @@ pub fn prop_str_id_req_raw(device_addr: u32, n: u8) -> (u32, Vec<u8>) {
 /// String-chunk query: class `0x07`, `[0x30, id_lo, id_hi, seq]`.
 pub fn string_chunk_req_raw(device_addr: u32, str_id: u16, seq: u8) -> (u32, Vec<u8>) {
     let [lo, hi] = str_id.to_le_bytes();
-    (id(can_class::PROPERTY_REQ, device_addr), vec![0x30, lo, hi, seq])
+    (
+        id(can_class::PROPERTY_REQ, device_addr),
+        vec![0x30, lo, hi, seq],
+    )
 }
 
 /// String-chunk write: class `0x07`, `[0x30, id_lo, id_hi, seq, c0..]` —
@@ -53,7 +62,12 @@ pub fn string_chunk_req_raw(device_addr: u32, str_id: u16, seq: u8) -> (u32, Vec
 /// (`Dn` direction). A full 4-char chunk is 8 bytes; the terminator chunk
 /// carries a single `0x00` (5 bytes) — even when the string is exactly N×4
 /// chars, MasterAdjust emits an explicit NUL-terminator chunk.
-pub fn string_chunk_write_raw(device_addr: u32, str_id: u16, seq: u8, chars: &[u8]) -> (u32, Vec<u8>) {
+pub fn string_chunk_write_raw(
+    device_addr: u32,
+    str_id: u16,
+    seq: u8,
+    chars: &[u8],
+) -> (u32, Vec<u8>) {
     debug_assert!(chars.len() <= 4, "string chunk carries at most 4 chars");
     let [lo, hi] = str_id.to_le_bytes();
     let mut data = vec![0x30, lo, hi, seq];
@@ -63,17 +77,26 @@ pub fn string_chunk_write_raw(device_addr: u32, str_id: u16, seq: u8, chars: &[u
 
 /// Schema group-name query: class `0x19`, `[0x28, group_id, 0x00]`.
 pub fn schema_group_name_req_raw(device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
-    (id(can_class::SCHEMA_REQ, device_addr), vec![0x28, group_id, 0x00])
+    (
+        id(can_class::SCHEMA_REQ, device_addr),
+        vec![0x28, group_id, 0x00],
+    )
 }
 
 /// Schema field-count query: class `0x19`, `[0x07, group_id, 0x00]`.
 pub fn schema_field_count_req_raw(device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
-    (id(can_class::SCHEMA_REQ, device_addr), vec![0x07, group_id, 0x00])
+    (
+        id(can_class::SCHEMA_REQ, device_addr),
+        vec![0x07, group_id, 0x00],
+    )
 }
 
 /// Schema field-id query: class `0x19`, `[0x03, group_id, 0x00, idx]`.
 pub fn schema_field_id_req_raw(device_addr: u32, group_id: u8, idx: u8) -> (u32, Vec<u8>) {
-    (id(can_class::SCHEMA_REQ, device_addr), vec![0x03, group_id, 0x00, idx])
+    (
+        id(can_class::SCHEMA_REQ, device_addr),
+        vec![0x03, group_id, 0x00, idx],
+    )
 }
 
 /// Btm1 per-field metadata query: class `0x18` to the Btm1 metadata address
@@ -81,7 +104,10 @@ pub fn schema_field_id_req_raw(device_addr: u32, group_id: u8, idx: u8) -> (u32,
 /// replies on class `0x08` at the same address.
 pub fn btm1_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
     let [lo, hi] = field_id.to_le_bytes();
-    (id(can_class::MONITORING_REQ, btm1_meta_addr(device_addr)), vec![opcode, lo, hi])
+    (
+        id(can_class::MONITORING_REQ, btm1_meta_addr(device_addr)),
+        vec![opcode, lo, hi],
+    )
 }
 
 /// Btm1 option-string query: class `0x18` to the Btm1 metadata address,
@@ -100,7 +126,10 @@ pub fn btm1_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> 
 /// family) — see PROTOCOL.md §6.
 pub fn btm3_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
     let [lo, hi] = field_id.to_le_bytes();
-    (id(can_class::BTM3_META_REQ, device_addr), vec![opcode, lo, hi])
+    (
+        id(can_class::BTM3_META_REQ, device_addr),
+        vec![opcode, lo, hi],
+    )
 }
 
 /// Btm3 option-string query: class `0x1C` to the real address, payload
@@ -152,12 +181,20 @@ pub fn btm3_write_raw(device_addr: u32, wire_idx: u8, value: f32) -> (u32, Vec<u
 ///
 /// Payload is the same `[0x28, group_id, 0x00]` regardless of channel; the
 /// device replies on the matching response class (`0x09` / `0x0A` / `0x0B`).
-pub fn schema_group_name_req_class_raw(class: u8, device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
+pub fn schema_group_name_req_class_raw(
+    class: u8,
+    device_addr: u32,
+    group_id: u8,
+) -> (u32, Vec<u8>) {
     (id(class, device_addr), vec![0x28, group_id, 0x00])
 }
 
 /// Channel-specific schema field-count query (see [`schema_group_name_req_class_raw`]).
-pub fn schema_field_count_req_class_raw(class: u8, device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
+pub fn schema_field_count_req_class_raw(
+    class: u8,
+    device_addr: u32,
+    group_id: u8,
+) -> (u32, Vec<u8>) {
     (id(class, device_addr), vec![0x07, group_id, 0x00])
 }
 
@@ -211,7 +248,10 @@ pub const LOGIN_OPCODE: [u8; 2] = [0x08, 0x19];
 /// Read the current access level: class `0x07`, `[0x08, 0x19]` (2 bytes).
 /// The device replies with class `0x06`, `[0x08, 0x19, level, 0x00]`.
 pub fn encode_login_read(device_addr: u32) -> (u32, Vec<u8>) {
-    (id(can_class::PROPERTY_REQ, device_addr), LOGIN_OPCODE.to_vec())
+    (
+        id(can_class::PROPERTY_REQ, device_addr),
+        LOGIN_OPCODE.to_vec(),
+    )
 }
 
 /// Login: class `0x07`, `[0x08, 0x19, level, 0x00, f32 LE code]` (8 bytes).
@@ -226,7 +266,10 @@ pub fn encode_login_write(device_addr: u32, level: u8, code: f32) -> (u32, Vec<u
 /// Logout (return to End User): class `0x07`, `[0x08, 0x19, 0x00, 0x00]`
 /// (4 bytes — header only, no code value).
 pub fn encode_logout(device_addr: u32) -> (u32, Vec<u8>) {
-    (id(can_class::PROPERTY_REQ, device_addr), vec![LOGIN_OPCODE[0], LOGIN_OPCODE[1], 0x00, 0x00])
+    (
+        id(can_class::PROPERTY_REQ, device_addr),
+        vec![LOGIN_OPCODE[0], LOGIN_OPCODE[1], 0x00, 0x00],
+    )
 }
 
 #[cfg(test)]
@@ -242,21 +285,36 @@ mod tests {
     #[test]
     fn boolean_write_is_4byte_float() {
         // Matches MasterAdjust's inverter toggle: field, tab, float 1.0 / 0.0.
-        assert_eq!(encode_set_boolean(0x188EA2, 0x13, true).1, vec![0x13, 0x00, 0x00, 0x00, 0x80, 0x3f]);
-        assert_eq!(encode_set_boolean(0x188EA2, 0x13, false).1, vec![0x13, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            encode_set_boolean(0x188EA2, 0x13, true).1,
+            vec![0x13, 0x00, 0x00, 0x00, 0x80, 0x3f]
+        );
+        assert_eq!(
+            encode_set_boolean(0x188EA2, 0x13, false).1,
+            vec![0x13, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
     fn list_write_is_index_as_float() {
         // Matches MasterAdjust's dropdown write (Solar "Override" -> option 1 = 1.0).
-        assert_eq!(encode_set_list(0x387028, 0x01, 1).1, vec![0x01, 0x00, 0x00, 0x00, 0x80, 0x3f]);
-        assert_eq!(encode_set_list(0x188EA2, 0x05, 2).1, vec![0x05, 0x00, 0x00, 0x00, 0x00, 0x40]);
+        assert_eq!(
+            encode_set_list(0x387028, 0x01, 1).1,
+            vec![0x01, 0x00, 0x00, 0x00, 0x80, 0x3f]
+        );
+        assert_eq!(
+            encode_set_list(0x188EA2, 0x05, 2).1,
+            vec![0x05, 0x00, 0x00, 0x00, 0x00, 0x40]
+        );
     }
 
     #[test]
     fn commit_token_is_fixed() {
         // CombiMaster inverter commit: field 0x14, tab 0, then the constant token.
-        assert_eq!(encode_commit(0x188EA2, 0x14).1, vec![0x14, 0x00, 0x14, 0x9f, 0x3c, 0x02]);
+        assert_eq!(
+            encode_commit(0x188EA2, 0x14).1,
+            vec![0x14, 0x00, 0x14, 0x9f, 0x3c, 0x02]
+        );
     }
 
     #[test]
@@ -297,7 +355,10 @@ mod tests {
         //   Dn 07 3A3B4B [5]  30 01 00 03  00             NUL terminator
         assert_eq!(
             string_chunk_write_raw(0x3A3B4B, 0x0001, 0, b"Navi"),
-            (0x07_3A3B4B, vec![0x30, 0x01, 0x00, 0x00, 0x4E, 0x61, 0x76, 0x69]),
+            (
+                0x07_3A3B4B,
+                vec![0x30, 0x01, 0x00, 0x00, 0x4E, 0x61, 0x76, 0x69]
+            ),
         );
         assert_eq!(
             string_chunk_write_raw(0x3A3B4B, 0x0001, 3, &[0x00]),
@@ -313,10 +374,16 @@ mod tests {
         // layout without naming any vendor-specific code.
         assert_eq!(
             encode_login_write(0x188EA2, 0x01, 0.0),
-            (0x07_188EA2, vec![0x08, 0x19, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            (
+                0x07_188EA2,
+                vec![0x08, 0x19, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+            ),
         );
         // Logout: 4 bytes, no code value.
-        assert_eq!(encode_logout(0x43DF24), (0x07_43DF24, vec![0x08, 0x19, 0x00, 0x00]));
+        assert_eq!(
+            encode_logout(0x43DF24),
+            (0x07_43DF24, vec![0x08, 0x19, 0x00, 0x00])
+        );
         // Read: 2 bytes.
         assert_eq!(encode_login_read(0x43DF24), (0x07_43DF24, vec![0x08, 0x19]));
     }

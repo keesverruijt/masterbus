@@ -156,7 +156,11 @@ fn try_use_dir(dir: &std::path::Path) -> bool {
         return false;
     }
     let probe = dir.join(".masterbus-write-probe");
-    match fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
         Ok(_) => {
             let _ = fs::remove_file(&probe);
             true
@@ -271,7 +275,11 @@ fn user_cache_dir() -> Option<PathBuf> {
 #[cfg(target_os = "linux")]
 fn is_writable_dir(dir: &Path) -> bool {
     let probe = dir.join(".masterbus-write-probe");
-    match fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
         Ok(_) => {
             let _ = fs::remove_file(&probe);
             true
@@ -335,10 +343,15 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
             _ => {} // forward-compat: ignore unknown keys + empty cache_dir
         }
     }
-    let device_type = device_type.ok_or_else(|| {
-        Error::Connection(format!("{}: device_type is required", path.display()))
-    })?;
-    Ok(FileConfig { heartbeat_master, device_type, device_name, cache_dir, path })
+    let device_type = device_type
+        .ok_or_else(|| Error::Connection(format!("{}: device_type is required", path.display())))?;
+    Ok(FileConfig {
+        heartbeat_master,
+        device_type,
+        device_name,
+        cache_dir,
+        path,
+    })
 }
 
 /// Render a `FileConfig` to its on-disk INI form, with explanatory comments.
@@ -446,7 +459,10 @@ fn list_can_interfaces() -> Vec<String> {
         .filter(|name| {
             // Read /sys/class/net/<name>/type; CAN is 280 (ARPHRD_CAN).
             let p = format!("/sys/class/net/{name}/type");
-            matches!(fs::read_to_string(&p).ok().as_deref().map(str::trim), Some("280"))
+            matches!(
+                fs::read_to_string(&p).ok().as_deref().map(str::trim),
+                Some("280")
+            )
         })
         .collect();
     out.sort();
@@ -541,8 +557,7 @@ mod tests {
     fn user_paths_follow_xdg() {
         let cfg = user_config_path().expect("HOME set in tests");
         assert!(
-            cfg.ends_with(".config/masterbus/config.ini")
-                || cfg.ends_with("masterbus/config.ini"), // XDG_CONFIG_HOME set
+            cfg.ends_with(".config/masterbus/config.ini") || cfg.ends_with("masterbus/config.ini"), // XDG_CONFIG_HOME set
             "unexpected linux user config: {}",
             cfg.display()
         );

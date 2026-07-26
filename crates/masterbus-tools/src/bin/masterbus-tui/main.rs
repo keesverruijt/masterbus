@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossbeam_channel::{unbounded, Receiver};
+use crossbeam_channel::{Receiver, unbounded};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
 use app::{App, Focus, Names};
@@ -51,14 +51,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Returns whether logs land in the in-TUI pane (so the UI knows to render it).
 fn init_logger() -> bool {
     if let Some(path) = std::env::var_os("MASTERBUS_TUI_LOG") {
-        if let Ok(file) =
-            std::fs::OpenOptions::new().create(true).append(true).open(std::path::PathBuf::from(path))
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::path::PathBuf::from(path))
         {
-            let _ = env_logger::Builder::from_env(
-                env_logger::Env::default().default_filter_or("warn"),
-            )
-            .target(env_logger::Target::Pipe(Box::new(file)))
-            .try_init();
+            let _ =
+                env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+                    .target(env_logger::Target::Pipe(Box::new(file)))
+                    .try_init();
         }
         return false;
     }
@@ -128,18 +129,20 @@ fn spawn_name_backfill(bus: MasterBus, names: Names, stop: Arc<AtomicBool>) {
 
 fn spawn_key_reader() -> Receiver<KeyEvent> {
     let (tx, rx) = unbounded();
-    std::thread::spawn(move || loop {
-        match event::poll(Duration::from_millis(200)) {
-            Ok(true) => {
-                if let Ok(Event::Key(k)) = event::read()
-                    && k.kind == KeyEventKind::Press
-                    && tx.send(k).is_err()
-                {
-                    break;
+    std::thread::spawn(move || {
+        loop {
+            match event::poll(Duration::from_millis(200)) {
+                Ok(true) => {
+                    if let Ok(Event::Key(k)) = event::read()
+                        && k.kind == KeyEventKind::Press
+                        && tx.send(k).is_err()
+                    {
+                        break;
+                    }
                 }
+                Ok(false) => {}
+                Err(_) => break,
             }
-            Ok(false) => {}
-            Err(_) => break,
         }
     });
     rx

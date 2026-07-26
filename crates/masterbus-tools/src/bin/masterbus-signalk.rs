@@ -51,7 +51,9 @@ const RATE: Duration = Duration::from_millis(1000);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let listen = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    let listen = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 
     let bus = match MasterBus::auto(Config::default()) {
@@ -101,14 +103,19 @@ struct FieldMeta {
 /// Parse a mapping file (`<instance>.<menu>[.<group>] = true|false`, `#` comments).
 fn load_mapping(path: &Path) -> BTreeMap<String, bool> {
     let mut map = BTreeMap::new();
-    let Ok(text) = std::fs::read_to_string(path) else { return map };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return map;
+    };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
-            let on = matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+            let on = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            );
             map.insert(k.trim().to_string(), on);
         }
     }
@@ -134,7 +141,10 @@ fn save_mapping(
         let glist = groups.iter().cloned().collect::<Vec<_>>().join(", ");
         out.push_str(&format!("# {instance} \u{2014} groups: {glist}\n"));
         let mk = format!("{instance}.{MENU}");
-        out.push_str(&format!("{mk} = {}\n", map.get(&mk).copied().unwrap_or(false)));
+        out.push_str(&format!(
+            "{mk} = {}\n",
+            map.get(&mk).copied().unwrap_or(false)
+        ));
         for g in groups {
             let gk = format!("{instance}.{MENU}.{g}");
             if let Some(&v) = map.get(&gk) {
@@ -162,7 +172,10 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     // TCP server: clients (e.g. a Signal K server) connect and receive the delta
     // stream. The listener thread appends new connections to the shared set.
     let listener = TcpListener::bind(listen)?;
-    eprintln!("masterbus-signalk: listening on {} (Signal K delta, ndjson)", listener.local_addr()?);
+    eprintln!(
+        "masterbus-signalk: listening on {} (Signal K delta, ndjson)",
+        listener.local_addr()?
+    );
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
     // Static per-device metadata (name / manufacturer), rendered once discovery
     // completes. Replayed to every client the moment it connects so late joiners
@@ -175,7 +188,10 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             for stream in listener.incoming().flatten() {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-                eprintln!("masterbus-signalk: client connected: {:?}", stream.peer_addr().ok());
+                eprintln!(
+                    "masterbus-signalk: client connected: {:?}",
+                    stream.peer_addr().ok()
+                );
                 let sb = static_batch.lock().unwrap().clone();
                 if !sb.is_empty() {
                     let _ = (&stream).write_all(&sb).and_then(|()| (&stream).flush());
@@ -196,7 +212,11 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         let class = name.split_whitespace().next().unwrap_or("").to_string();
         // Instance id = the device name without its leading class word (already
         // implied by the SK path category), lowercased/sanitized.
-        let label = name.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+        let label = name
+            .split_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ");
         let instance = if !label.is_empty() {
             sanitize(&label)
         } else if !name.is_empty() {
@@ -213,10 +233,15 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             article: dev.article_number().unwrap_or_default(),
         });
 
-        let Ok(groups) = dev.tab(Menu::Monitoring) else { continue };
+        let Ok(groups) = dev.tab(Menu::Monitoring) else {
+            continue;
+        };
         for group in groups {
             let gname = sanitize(&group.name().unwrap_or_default());
-            groups_by_instance.entry(instance.clone()).or_default().insert(gname.clone());
+            groups_by_instance
+                .entry(instance.clone())
+                .or_default()
+                .insert(gname.clone());
             for field in group.fields().unwrap_or_default() {
                 fields.push(FieldRec {
                     device: dev.id(),
@@ -266,7 +291,12 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         if on {
             meta.insert(
                 (f.device, f.index),
-                FieldMeta { class: f.class.clone(), instance: f.instance.clone(), name: f.name.clone(), unit: f.unit.clone() },
+                FieldMeta {
+                    class: f.class.clone(),
+                    instance: f.instance.clone(),
+                    name: f.name.clone(),
+                    unit: f.unit.clone(),
+                },
             );
             per_device.entry(f.device).or_default().push(f.index);
         }
@@ -314,7 +344,8 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             while let Some(u) = sub.try_recv() {
                 if have_clients
                     && let Some(m) = meta.get(&(u.device, u.field))
-                    && let Some((path, value)) = map_field(&m.class, &m.instance, &m.name, &m.unit, &u.value)
+                    && let Some((path, value)) =
+                        map_field(&m.class, &m.instance, &m.name, &m.unit, &u.value)
                 {
                     latest.insert(path, value);
                 }
@@ -329,8 +360,10 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                         meta_sent.insert(path.clone());
                     }
                 }
-                let values: Vec<_> =
-                    latest.into_iter().map(|(path, value)| json!({ "path": path, "value": value })).collect();
+                let values: Vec<_> = latest
+                    .into_iter()
+                    .map(|(path, value)| json!({ "path": path, "value": value }))
+                    .collect();
                 let delta = json!({
                     "updates": [{
                         "$source": "masterbus",
@@ -395,7 +428,10 @@ fn sk_units(path: &str) -> Option<&'static str> {
 fn sk_bases(class: &str, id: &str) -> Vec<String> {
     match class {
         "BAT" => vec![format!("electrical.batteries.{id}")],
-        "CMR" => vec![format!("electrical.inverters.{id}"), format!("electrical.chargers.{id}")],
+        "CMR" => vec![
+            format!("electrical.inverters.{id}"),
+            format!("electrical.chargers.{id}"),
+        ],
         "MAC" => vec![format!("electrical.chargers.{id}")],
         "APR" => vec![format!("electrical.alternators.{id}")],
         _ => vec![],
@@ -416,9 +452,13 @@ fn static_meta_batch(devs: &[DeviceMetaRec], published: &HashSet<DeviceId>) -> V
             if !d.name.is_empty() {
                 values.push(json!({ "path": format!("{base}.name"), "value": d.name }));
             }
-            values.push(json!({ "path": format!("{base}.manufacturer.name"), "value": "Mastervolt" }));
+            values.push(
+                json!({ "path": format!("{base}.manufacturer.name"), "value": "Mastervolt" }),
+            );
             if !d.article.is_empty() {
-                values.push(json!({ "path": format!("{base}.manufacturer.model"), "value": d.article }));
+                values.push(
+                    json!({ "path": format!("{base}.manufacturer.model"), "value": d.article }),
+                );
             }
         }
         if values.is_empty() {
@@ -455,9 +495,9 @@ fn map_field(
         _ => None,
     };
     let seconds = match value {
-        Value::Time(t) => {
-            Some(t.days as f64 * 86400.0 + t.hour as f64 * 3600.0 + t.min as f64 * 60.0 + t.sec as f64)
-        }
+        Value::Time(t) => Some(
+            t.days as f64 * 86400.0 + t.hour as f64 * 3600.0 + t.min as f64 * 60.0 + t.sec as f64,
+        ),
         _ => None,
     };
     // Selected label of a list/enum field (e.g. the charge-state name), lowercased.
@@ -470,12 +510,20 @@ fn map_field(
         "BAT" => {
             let b = format!("electrical.batteries.{id}");
             match (name, unit) {
-                ("State of charge", _) => float.map(|v| (format!("{b}.capacity.stateOfCharge"), num(v / 100.0))),
+                ("State of charge", _) => {
+                    float.map(|v| (format!("{b}.capacity.stateOfCharge"), num(v / 100.0)))
+                }
                 ("Battery", "V") => float.map(|v| (format!("{b}.voltage"), num(v))),
                 ("Battery", "A") => float.map(|v| (format!("{b}.current"), num(v))),
-                ("Battery", "\u{b0}C") => celsius.map(|c| (format!("{b}.temperature"), num(c + 273.15))),
-                ("Time remaining", _) => seconds.map(|s| (format!("{b}.capacity.timeRemaining"), num(s))),
-                ("Cap. consumed", _) => float.map(|ah| (format!("{b}.capacity.dischargeSinceFull"), num(ah * 3600.0))),
+                ("Battery", "\u{b0}C") => {
+                    celsius.map(|c| (format!("{b}.temperature"), num(c + 273.15)))
+                }
+                ("Time remaining", _) => {
+                    seconds.map(|s| (format!("{b}.capacity.timeRemaining"), num(s)))
+                }
+                ("Cap. consumed", _) => {
+                    float.map(|ah| (format!("{b}.capacity.dischargeSinceFull"), num(ah * 3600.0)))
+                }
                 _ => None,
             }
         }
@@ -486,16 +534,26 @@ fn map_field(
             match (name, unit) {
                 ("Battery voltage", "V") => float.map(|v| (format!("{inv}.dc.voltage"), num(v))),
                 ("Battery current", "A") => float.map(|v| (format!("{inv}.dc.current"), num(v))),
-                ("Battery temp.", "\u{b0}C") => celsius.map(|c| (format!("{inv}.dc.temperature"), num(c + 273.15))),
+                ("Battery temp.", "\u{b0}C") => {
+                    celsius.map(|c| (format!("{inv}.dc.temperature"), num(c + 273.15)))
+                }
                 ("Output voltage", "V") => float.map(|v| (format!("{inv}.ac.voltage"), num(v))),
                 ("Output power", "W") => float.map(|v| (format!("{inv}.ac.power"), num(v))),
-                ("Output frequency", "Hz") => float.map(|v| (format!("{inv}.ac.frequency"), num(v))),
+                ("Output frequency", "Hz") => {
+                    float.map(|v| (format!("{inv}.ac.frequency"), num(v)))
+                }
                 ("Input voltage", "V") => float.map(|v| (format!("{chg}.acin.voltage"), num(v))),
                 ("Input current", "A") => float.map(|v| (format!("{chg}.acin.current"), num(v))),
-                ("Input frequency", "Hz") => float.map(|v| (format!("{chg}.acin.frequency"), num(v))),
+                ("Input frequency", "Hz") => {
+                    float.map(|v| (format!("{chg}.acin.frequency"), num(v)))
+                }
                 ("AC IN limit", "A") => float.map(|v| (format!("{chg}.acin.currentLimit"), num(v))),
-                ("Inverter", _) => boolean.map(|b| (format!("{inv}.enabled"), serde_json::Value::Bool(b))),
-                ("Charger", _) => boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(b))),
+                ("Inverter", _) => {
+                    boolean.map(|b| (format!("{inv}.enabled"), serde_json::Value::Bool(b)))
+                }
+                ("Charger", _) => {
+                    boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(b)))
+                }
                 _ => None,
             }
         }
@@ -516,18 +574,30 @@ fn map_field(
             match (name, unit.trim()) {
                 ("Output voltage", "V" | "") => float.map(|v| (format!("{chg}.voltage"), num(v))),
                 ("Output current", "A" | "") => float.map(|v| (format!("{chg}.current"), num(v))),
-                ("Input voltage", "V" | "") => float.map(|v| (format!("{chg}.input.voltage"), num(v))),
-                ("Input current", "A" | "") => float.map(|v| (format!("{chg}.input.current"), num(v))),
-                ("Bat. volt sense", "V" | "") => float.map(|v| (format!("{chg}.voltageSense"), num(v))),
-                ("Device", "\u{b0}C") => celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15))),
-                ("Battery", "\u{b0}C") => celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15))),
+                ("Input voltage", "V" | "") => {
+                    float.map(|v| (format!("{chg}.input.voltage"), num(v)))
+                }
+                ("Input current", "A" | "") => {
+                    float.map(|v| (format!("{chg}.input.current"), num(v)))
+                }
+                ("Bat. volt sense", "V" | "") => {
+                    float.map(|v| (format!("{chg}.voltageSense"), num(v)))
+                }
+                ("Device", "\u{b0}C") => {
+                    celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15)))
+                }
+                ("Battery", "\u{b0}C") => {
+                    celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15)))
+                }
                 // "Device state" (Standby/Charging/Fault/…) → deviceMode: the
                 // device-level state, orthogonal to the charge stage below.
                 ("Device state", _) => list_label.map(|s| (format!("{chg}.deviceMode"), text(s))),
                 // "Charge state" (Bulk/Absorption/Float/…) → chargingMode.
                 ("Charge state", _) => list_label.map(|s| (format!("{chg}.chargingMode"), text(s))),
                 // "Standby" off = charger active.
-                ("Standby", _) => boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(!b))),
+                ("Standby", _) => {
+                    boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(!b)))
+                }
                 _ => None,
             }
         }
@@ -547,17 +617,33 @@ fn map_field(
                 ("Alternator volt.", "V") => float.map(|v| (format!("{alt}.voltage"), num(v))),
                 ("Sense voltage", "V") => float.map(|v| (format!("{alt}.voltageSense"), num(v))),
                 ("Field current", "A") => float.map(|v| (format!("{alt}.field.current"), num(v))),
-                ("Alternator temp.", "\u{b0}C") => celsius.map(|c| (format!("{alt}.temperature"), num(c + 273.15))),
+                ("Alternator temp.", "\u{b0}C") => {
+                    celsius.map(|c| (format!("{alt}.temperature"), num(c + 273.15)))
+                }
                 // Shaft speeds → revolutions (Signal K wants Hz, i.e. rpm / 60).
-                ("Alternator shaft", "rpm") => float.map(|r| (format!("{alt}.revolutions"), num(r / 60.0))),
-                ("Engine shaft", "rpm") => float.map(|r| (format!("{alt}.engine.revolutions"), num(r / 60.0))),
+                ("Alternator shaft", "rpm") => {
+                    float.map(|r| (format!("{alt}.revolutions"), num(r / 60.0)))
+                }
+                ("Engine shaft", "rpm") => {
+                    float.map(|r| (format!("{alt}.engine.revolutions"), num(r / 60.0)))
+                }
                 // "Charger state" (Off/Bulk/Absorption/Float/…) → chargingMode.
-                ("Charger state", _) => list_label.map(|s| (format!("{alt}.chargingMode"), text(s))),
+                ("Charger state", _) => {
+                    list_label.map(|s| (format!("{alt}.chargingMode"), text(s)))
+                }
                 // Battery being charged (direct sense + external shunt).
-                ("State of charge", "%") => float.map(|v| (format!("{alt}.battery.stateOfCharge"), num(v / 100.0))),
-                ("Battery voltage", "V") => float.map(|v| (format!("{alt}.battery.voltage"), num(v))),
-                ("Battery current", "A") => float.map(|v| (format!("{alt}.battery.current"), num(v))),
-                ("Battery temp.", "\u{b0}C") => celsius.map(|c| (format!("{alt}.battery.temperature"), num(c + 273.15))),
+                ("State of charge", "%") => {
+                    float.map(|v| (format!("{alt}.battery.stateOfCharge"), num(v / 100.0)))
+                }
+                ("Battery voltage", "V") => {
+                    float.map(|v| (format!("{alt}.battery.voltage"), num(v)))
+                }
+                ("Battery current", "A") => {
+                    float.map(|v| (format!("{alt}.battery.current"), num(v)))
+                }
+                ("Battery temp.", "\u{b0}C") => {
+                    celsius.map(|c| (format!("{alt}.battery.temperature"), num(c + 273.15)))
+                }
                 _ => None,
             }
         }
@@ -570,14 +656,26 @@ fn map_field(
 fn sanitize(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
-    if cleaned.is_empty() { "0".into() } else { cleaned }
+    if cleaned.is_empty() {
+        "0".into()
+    } else {
+        cleaned
+    }
 }
 
 /// Current UTC time as an ISO-8601 / RFC-3339 string (no date dependency).
 fn now_rfc3339() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs();
     let millis = d.subsec_millis();
     let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
@@ -617,11 +715,21 @@ mod tests {
     /// must still map, onto the same paths as when the unit is present.
     #[test]
     fn mac_maps_fields_with_a_missing_unit() {
-        for (name, unit) in
-            [("Output voltage", "V"), ("Output current", "A"), ("Input current", "A"), ("Bat. volt sense", "V")]
-        {
-            assert_eq!(path(f("MAC", name, unit, 1.0)), path(f("MAC", name, "", 1.0)), "{name}");
-            assert!(path(f("MAC", name, "", 1.0)).is_some(), "{name} dropped with an empty unit");
+        for (name, unit) in [
+            ("Output voltage", "V"),
+            ("Output current", "A"),
+            ("Input current", "A"),
+            ("Bat. volt sense", "V"),
+        ] {
+            assert_eq!(
+                path(f("MAC", name, unit, 1.0)),
+                path(f("MAC", name, "", 1.0)),
+                "{name}"
+            );
+            assert!(
+                path(f("MAC", name, "", 1.0)).is_some(),
+                "{name} dropped with an empty unit"
+            );
         }
     }
 
@@ -630,8 +738,14 @@ mod tests {
     /// has no metadata for.
     #[test]
     fn mac_publishes_canonical_charger_paths() {
-        assert_eq!(path(f("MAC", "Output voltage", "", 27.4)).as_deref(), Some("electrical.chargers.1.voltage"));
-        assert_eq!(path(f("MAC", "Output current", "", 42.0)).as_deref(), Some("electrical.chargers.1.current"));
+        assert_eq!(
+            path(f("MAC", "Output voltage", "", 27.4)).as_deref(),
+            Some("electrical.chargers.1.voltage")
+        );
+        assert_eq!(
+            path(f("MAC", "Output current", "", 42.0)).as_deref(),
+            Some("electrical.chargers.1.current")
+        );
         assert_eq!(
             path(f("MAC", "Device", "\u{b0}C", 20.0)).as_deref(),
             Some("electrical.chargers.1.temperature")
@@ -659,18 +773,36 @@ mod tests {
     #[test]
     fn mac_standby_inverts_into_enabled() {
         let on = map_field("MAC", "1", "Standby", "", &Value::Boolean(false));
-        assert_eq!(on, Some(("electrical.chargers.1.enabled".into(), serde_json::Value::Bool(true))));
+        assert_eq!(
+            on,
+            Some((
+                "electrical.chargers.1.enabled".into(),
+                serde_json::Value::Bool(true)
+            ))
+        );
         let off = map_field("MAC", "1", "Standby", "", &Value::Boolean(true));
-        assert_eq!(off, Some(("electrical.chargers.1.enabled".into(), serde_json::Value::Bool(false))));
+        assert_eq!(
+            off,
+            Some((
+                "electrical.chargers.1.enabled".into(),
+                serde_json::Value::Bool(false)
+            ))
+        );
     }
 
     /// Enum fields publish their lowercased label.
     #[test]
     fn mac_enum_states_publish_their_label() {
-        let list = |i: i32| Value::List { index: i, options: vec!["Off".into(), "Bulk".into()] };
+        let list = |i: i32| Value::List {
+            index: i,
+            options: vec!["Off".into(), "Bulk".into()],
+        };
         assert_eq!(
             map_field("MAC", "1", "Charge state", "", &list(1)),
-            Some(("electrical.chargers.1.chargingMode".into(), serde_json::Value::String("bulk".into())))
+            Some((
+                "electrical.chargers.1.chargingMode".into(),
+                serde_json::Value::String("bulk".into())
+            ))
         );
         assert_eq!(
             path(map_field("MAC", "1", "Device state", "", &list(0))).as_deref(),
@@ -682,8 +814,14 @@ mod tests {
     /// different quantities all named "Battery", told apart only by their unit.
     #[test]
     fn other_classes_still_disambiguate_on_unit() {
-        assert_eq!(path(f("BAT", "Battery", "V", 12.8)).as_deref(), Some("electrical.batteries.1.voltage"));
-        assert_eq!(path(f("BAT", "Battery", "A", -5.0)).as_deref(), Some("electrical.batteries.1.current"));
+        assert_eq!(
+            path(f("BAT", "Battery", "V", 12.8)).as_deref(),
+            Some("electrical.batteries.1.voltage")
+        );
+        assert_eq!(
+            path(f("BAT", "Battery", "A", -5.0)).as_deref(),
+            Some("electrical.batteries.1.current")
+        );
         assert_eq!(
             path(f("BAT", "Battery", "\u{b0}C", 20.0)).as_deref(),
             Some("electrical.batteries.1.temperature")

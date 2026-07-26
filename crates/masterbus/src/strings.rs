@@ -61,7 +61,11 @@ where
 {
     let raw: HashMap<String, String> = HashMap::deserialize(d)?;
     raw.into_iter()
-        .map(|(k, v)| k.parse::<u16>().map(|k| (k, v)).map_err(serde::de::Error::custom))
+        .map(|(k, v)| {
+            k.parse::<u16>()
+                .map(|k| (k, v))
+                .map_err(serde::de::Error::custom)
+        })
         .collect()
 }
 
@@ -109,7 +113,10 @@ mod tests {
         let e = &candidates("77010310", "2.14")[0];
         // Static UI strings are served…
         assert_eq!(e.strings.get(&34).map(String::as_str), Some("77010310"));
-        assert_eq!(e.strings.get(&212).map(String::as_str), Some("Factory reset"));
+        assert_eq!(
+            e.strings.get(&212).map(String::as_str),
+            Some("Factory reset")
+        );
         // …but sub-article EEPROM ids (below the table start) are not bundled,
         // so a misaligned boundary read can't leak in (FINDINGS §4.6).
         assert!(!e.strings.contains_key(&18));
@@ -133,7 +140,10 @@ mod tests {
             let e = &candidates(article, "")[0];
             assert!(!e.spot_check.is_empty());
             for id in &e.spot_check {
-                assert!(e.strings.contains_key(id), "{article}: spot id {id} not in table");
+                assert!(
+                    e.strings.contains_key(id),
+                    "{article}: spot id {id} not in table"
+                );
             }
         }
     }

@@ -73,7 +73,10 @@ fn main() {
 
         // `logout` (or `enduser` / `0`) takes no password and exits the
         // current level. Anything else needs a password argument.
-        let logout = matches!(level_arg.to_ascii_lowercase().as_str(), "enduser" | "0" | "logout");
+        let logout = matches!(
+            level_arg.to_ascii_lowercase().as_str(),
+            "enduser" | "0" | "logout"
+        );
         let (level, code) = if logout {
             (AccessLevel::EndUser, None)
         } else {

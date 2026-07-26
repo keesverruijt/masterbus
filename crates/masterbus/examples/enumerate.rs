@@ -48,7 +48,11 @@ fn main() {
             for f in g.fields().unwrap_or_default() {
                 let fname = f.name().unwrap_or_default();
                 let unit = f.unit().unwrap_or_default();
-                let wr = if f.is_writable().unwrap_or(false) { "rw" } else { "ro" };
+                let wr = if f.is_writable().unwrap_or(false) {
+                    "rw"
+                } else {
+                    "ro"
+                };
                 // Read values only for the monitoring menu to limit bus load.
                 let val = if menu == Menu::Monitoring {
                     match f.value() {
@@ -58,7 +62,14 @@ fn main() {
                 } else {
                     String::new()
                 };
-                println!("      {:>3} {:<24} {:<4} {} {}", f.index(), fname, unit, wr, val);
+                println!(
+                    "      {:>3} {:<24} {:<4} {} {}",
+                    f.index(),
+                    fname,
+                    unit,
+                    wr,
+                    val
+                );
             }
         }
     }

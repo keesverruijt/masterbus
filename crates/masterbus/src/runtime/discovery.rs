@@ -8,17 +8,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::Config;
 use super::framelog::frame_log;
 use super::waiter::Waiter;
-use super::Config;
 use crate::model::{
-    field_id, AccessLevel, Channel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu,
+    AccessLevel, Channel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu, field_id,
 };
 use crate::protocol::{
-    btm1_meta_option_req_raw, btm1_meta_req_raw, btm3_meta_option_req_raw, btm3_meta_req_raw,
-    can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
+    VisualizationType, btm1_meta_option_req_raw, btm1_meta_req_raw, btm3_meta_option_req_raw,
+    btm3_meta_req_raw, can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
     schema_field_count_req_class_raw, schema_field_id_req_class_raw,
-    schema_group_name_req_class_raw, string_chunk_req_raw, viz_from_wire, VisualizationType,
+    schema_group_name_req_class_raw, string_chunk_req_raw, viz_from_wire,
 };
 use crate::transport::TransportTx;
 
@@ -154,7 +154,10 @@ impl Disc<'_> {
         let mut out = HashMap::with_capacity(ops.len());
         for &op in ops {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if let Some(r) = self.waiter.wait(&key(op), remaining.max(Duration::from_millis(1))) {
+            if let Some(r) = self
+                .waiter
+                .wait(&key(op), remaining.max(Duration::from_millis(1)))
+            {
                 out.insert(op, r);
             }
         }
@@ -213,12 +216,7 @@ impl Disc<'_> {
     /// Per-channel option-string query. Used during list/enum field discovery
     /// to resolve each option's label string id. Same channel dispatch as
     /// [`Self::meta_batch`].
-    fn meta_option_req(
-        &mut self,
-        addr: DeviceId,
-        fid: FieldId,
-        opt: u8,
-    ) -> Option<u16> {
+    fn meta_option_req(&mut self, addr: DeviceId, fid: FieldId, opt: u8) -> Option<u16> {
         let wire = field_id::wire_index(fid);
         let (prefix, encode): (&str, MetaOptionEncode) = match field_id::channel(fid) {
             Channel::Btm1 => ("btm1_meta", btm1_meta_option_req_raw),
@@ -252,7 +250,9 @@ pub(super) fn fetch_identity(disc: &mut Disc, addr: DeviceId) -> DeviceIdentity 
         format!("{}.{}", major, minor)
     };
     let fetch_prop = |disc: &mut Disc, n: u8| -> String {
-        disc.prop_str_id(addr, n).map(|sid| disc.fetch_str(addr, sid)).unwrap_or_default()
+        disc.prop_str_id(addr, n)
+            .map(|sid| disc.fetch_str(addr, sid))
+            .unwrap_or_default()
     };
     let article = fetch_prop(disc, 1);
     let serial = fetch_prop(disc, 2);
@@ -265,7 +265,13 @@ pub(super) fn fetch_identity(disc: &mut Disc, addr: DeviceId) -> DeviceIdentity 
             r
         }
     };
-    DeviceIdentity { article, serial, revision, name, firmware }
+    DeviceIdentity {
+        article,
+        serial,
+        revision,
+        name,
+        firmware,
+    }
 }
 
 /// Resolve this device's offline string table: pick the catalog candidate for
@@ -284,7 +290,10 @@ pub(super) fn resolve_catalog(
 ) -> Option<&'static HashMap<u16, String>> {
     for entry in crate::strings::candidates(&id.article, &id.firmware) {
         let matches = entry.spot_check.iter().all(|&sid| {
-            entry.strings.get(&sid).is_some_and(|want| disc.fetch_str_wire(addr, sid) == *want)
+            entry
+                .strings
+                .get(&sid)
+                .is_some_and(|want| disc.fetch_str_wire(addr, sid) == *want)
         });
         if matches {
             log::debug!(
@@ -444,21 +453,30 @@ fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option
     let mut field_ids: Vec<FieldId> = Vec::new();
     for idx in 0..field_count {
         let key = format!("{}:{:06X}:03:{}:{}", key_prefix, addr, g, idx as u8);
-        if let Some(r) = disc.req_std(&key, schema_field_id_req_class_raw(class, addr, g, idx as u8))
-            && r.len() >= 6
+        if let Some(r) = disc.req_std(
+            &key,
+            schema_field_id_req_class_raw(class, addr, g, idx as u8),
+        ) && r.len() >= 6
         {
             field_ids.push(field_id::btm1(r[4]));
         }
     }
 
-    let name = name_sid.map(|sid| disc.fetch_str(addr, sid)).unwrap_or_default();
+    let name = name_sid
+        .map(|sid| disc.fetch_str(addr, sid))
+        .unwrap_or_default();
     let mut fields = Vec::new();
     for fid in field_ids {
         if let Some(f) = enumerate_field(disc, addr, fid) {
             fields.push(f);
         }
     }
-    Some(GroupInfo { id: g as i32, name, menu, fields })
+    Some(GroupInfo {
+        id: g as i32,
+        name,
+        menu,
+        fields,
+    })
 }
 
 /// Probe every reachable field across **both** metadata channels (Btm1 +
@@ -521,17 +539,27 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     // so we skip them here (op::MAX is still fetched: it doubles as the option
     // count for lists). The channel is encoded in `fid`; `meta_batch` dispatches
     // to the right encoder + waiter-key family.
-    let meta = disc.meta_batch(addr, fid, &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE]);
+    let meta = disc.meta_batch(
+        addr,
+        fid,
+        &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE],
+    );
     // If nothing came back, this field index is unallocated on this channel —
     // used by the `enumerate_all_fields` flat probe to skip holes in the index
     // space and to give up on a channel the device doesn't speak.
     if meta.is_empty() {
         return None;
     }
-    let u16_at4 = |o: u8| meta.get(&o).filter(|r| r.len() >= 6).map(|r| u16::from_le_bytes([r[4], r[5]]));
+    let u16_at4 = |o: u8| {
+        meta.get(&o)
+            .filter(|r| r.len() >= 6)
+            .map(|r| u16::from_le_bytes([r[4], r[5]]))
+    };
     let byte4 = |o: u8| meta.get(&o).and_then(|r| r.get(4).copied());
     let f32_at4 = |o: u8| {
-        meta.get(&o).filter(|r| r.len() >= 8).map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]))
+        meta.get(&o)
+            .filter(|r| r.len() >= 8)
+            .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]))
     };
 
     let name_sid = u16_at4(op::NAME);
@@ -544,22 +572,34 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     let viz = viz_from_wire(viz_code);
     let n_opts = n_or_max as u32;
 
-    let options = if matches!(viz, VisualizationType::DropDown | VisualizationType::Eventable)
-        && n_opts > 0
+    let options = if matches!(
+        viz,
+        VisualizationType::DropDown | VisualizationType::Eventable
+    ) && n_opts > 0
         && n_opts <= 64
     {
         let mut opts = Vec::new();
         for opt in 0..n_opts {
             let osid = disc.meta_option_req(addr, fid, opt as u8);
-            opts.push(osid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default());
+            opts.push(
+                osid.filter(|&s| s != 0)
+                    .map(|s| disc.fetch_str(addr, s))
+                    .unwrap_or_default(),
+            );
         }
         opts
     } else {
         Vec::new()
     };
 
-    let field_name = name_sid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default();
-    let field_unit = unit_sid.filter(|&s| s != 0).map(|s| disc.fetch_str(addr, s)).unwrap_or_default();
+    let field_name = name_sid
+        .filter(|&s| s != 0)
+        .map(|s| disc.fetch_str(addr, s))
+        .unwrap_or_default();
+    let field_unit = unit_sid
+        .filter(|&s| s != 0)
+        .map(|s| disc.fetch_str(addr, s))
+        .unwrap_or_default();
 
     Some(FieldInfo {
         index: fid,
@@ -600,7 +640,13 @@ fn cache_file(
     );
     let safe: String = key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     dir.join(format!("{}.json", safe))
 }
@@ -659,8 +705,8 @@ mod catalog_tests {
     use super::*;
     use crate::error::Result;
     use crate::runtime::Config;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A `TransportTx` that answers string-chunk (`0x30`) requests from a
     /// scripted `id → full string` map by delivering the right 4-char chunk to
@@ -708,7 +754,13 @@ mod catalog_tests {
         cfg: &'a Config,
         catalog: Option<&'static HashMap<u16, String>>,
     ) -> Disc<'a> {
-        Disc { tx, waiter, cfg, level: AccessLevel::EndUser, catalog }
+        Disc {
+            tx,
+            waiter,
+            cfg,
+            level: AccessLevel::EndUser,
+            catalog,
+        }
     }
 
     #[test]
@@ -748,18 +800,35 @@ mod catalog_tests {
         let cfg = Config::default();
 
         // All spot-check ids answer with the catalog's own text → accept.
-        let good: HashMap<u16, String> =
-            entry.spot_check.iter().map(|&s| (s, entry.strings[&s].clone())).collect();
-        let mut tx = ScriptTx { waiter: waiter.clone(), script: good, sends: Arc::new(AtomicUsize::new(0)) };
+        let good: HashMap<u16, String> = entry
+            .spot_check
+            .iter()
+            .map(|&s| (s, entry.strings[&s].clone()))
+            .collect();
+        let mut tx = ScriptTx {
+            waiter: waiter.clone(),
+            script: good,
+            sends: Arc::new(AtomicUsize::new(0)),
+        };
         let mut disc = disc_with(&mut tx, &waiter, &cfg, None);
         let resolved = resolve_catalog(&mut disc, 0x1403A4, &id).expect("should resolve");
-        assert_eq!(resolved.get(&212).map(String::as_str), Some("Factory reset"));
+        assert_eq!(
+            resolved.get(&212).map(String::as_str),
+            Some("Factory reset")
+        );
 
         // Corrupt one spot-check answer → reject, serve live.
-        let mut bad: HashMap<u16, String> =
-            entry.spot_check.iter().map(|&s| (s, entry.strings[&s].clone())).collect();
+        let mut bad: HashMap<u16, String> = entry
+            .spot_check
+            .iter()
+            .map(|&s| (s, entry.strings[&s].clone()))
+            .collect();
         *bad.get_mut(&entry.spot_check[0]).unwrap() = "WRONG".into();
-        let mut tx = ScriptTx { waiter: waiter.clone(), script: bad, sends: Arc::new(AtomicUsize::new(0)) };
+        let mut tx = ScriptTx {
+            waiter: waiter.clone(),
+            script: bad,
+            sends: Arc::new(AtomicUsize::new(0)),
+        };
         let mut disc = disc_with(&mut tx, &waiter, &cfg, None);
         assert!(resolve_catalog(&mut disc, 0x1403A4, &id).is_none());
     }

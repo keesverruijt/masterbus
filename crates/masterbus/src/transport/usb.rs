@@ -67,14 +67,19 @@ impl UsbTransport {
         let dev = info
             .open_device(&api)
             .map_err(|e| Error::Connection(format!("open USB link: {e}")))?;
-        Ok(UsbTransport { dev: Arc::new(Mutex::new(dev)) })
+        Ok(UsbTransport {
+            dev: Arc::new(Mutex::new(dev)),
+        })
     }
 }
 
 impl Transport for UsbTransport {
     fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
         (
-            Box::new(Rx { dev: self.dev.clone(), queue: VecDeque::new() }),
+            Box::new(Rx {
+                dev: self.dev.clone(),
+                queue: VecDeque::new(),
+            }),
             Box::new(Tx { dev: self.dev }),
         )
     }
@@ -100,7 +105,9 @@ fn parse_report(report: &[u8], out: &mut VecDeque<(u32, Vec<u8>)>) {
     let count = report.first().copied().unwrap_or(0) as usize;
     for i in 0..count {
         let base = 1 + i * REC_LEN;
-        let Some(rec) = report.get(base..base + REC_LEN) else { break };
+        let Some(rec) = report.get(base..base + REC_LEN) else {
+            break;
+        };
         let can_id = decode_can_id(rec);
         let dlc = (rec[4] as usize).min(MAX_DATA);
         out.push_back((can_id, rec[5..5 + dlc].to_vec()));
@@ -160,7 +167,8 @@ impl TransportTx for Tx {
     fn send(&mut self, can_id: u32, data: &[u8]) -> Result<()> {
         let buf = build_report(can_id, data);
         let dev = self.dev.lock().unwrap();
-        dev.write(&buf).map_err(|e| Error::Connection(format!("USB write: {e}")))?;
+        dev.write(&buf)
+            .map_err(|e| Error::Connection(format!("USB write: {e}")))?;
         Ok(())
     }
 }
@@ -173,11 +181,20 @@ mod tests {
     fn decode_real_addresses() {
         // Real captured records → the same ids SocketCAN reports.
         // Battery 6E96CF: hdr c3, b1 6a.
-        assert_eq!(decode_can_id(&[0xc3, 0x6a, 0x96, 0xcf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0x18_6E_96_CF);
+        assert_eq!(
+            decode_can_id(&[0xc3, 0x6a, 0x96, 0xcf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            0x18_6E_96_CF
+        );
         // CombiMaster 188EA2: hdr c0, b1 c8 (device→host marker bit set).
-        assert_eq!(decode_can_id(&[0xc0, 0xc8, 0x8e, 0xa2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0x18_18_8E_A2);
+        assert_eq!(
+            decode_can_id(&[0xc0, 0xc8, 0x8e, 0xa2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            0x18_18_8E_A2
+        );
         // Class-04 broadcast of the CombiMaster: hdr 0x20.
-        assert_eq!(decode_can_id(&[0x20, 0xc8, 0x8e, 0xa2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 0x04_18_8E_A2);
+        assert_eq!(
+            decode_can_id(&[0x20, 0xc8, 0x8e, 0xa2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            0x04_18_8E_A2
+        );
     }
 
     #[test]
@@ -185,14 +202,20 @@ mod tests {
         let mut r = [0u8; REPORT_LEN];
         r[0] = 2;
         // class-0x18 request (dlc 2) and class-0x08 value (dlc 6) from battery 6E96CF.
-        r[1..1 + REC_LEN].copy_from_slice(&[0xc3, 0x6a, 0x96, 0xcf, 0x02, 0x8b, 0x00, 0, 0, 0, 0, 0, 0, 0]);
-        r[15..15 + REC_LEN]
-            .copy_from_slice(&[0x43, 0x6a, 0x96, 0xcf, 0x06, 0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41, 0, 0, 0]);
+        r[1..1 + REC_LEN].copy_from_slice(&[
+            0xc3, 0x6a, 0x96, 0xcf, 0x02, 0x8b, 0x00, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        r[15..15 + REC_LEN].copy_from_slice(&[
+            0x43, 0x6a, 0x96, 0xcf, 0x06, 0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41, 0, 0, 0,
+        ]);
         let mut q = VecDeque::new();
         parse_report(&r, &mut q);
         assert_eq!(q.len(), 2);
         assert_eq!(q[0], (0x18_6E_96_CF, vec![0x8b, 0x00]));
-        assert_eq!(q[1], (0x08_6E_96_CF, vec![0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41]));
+        assert_eq!(
+            q[1],
+            (0x08_6E_96_CF, vec![0x8b, 0x00, 0xbb, 0x49, 0xde, 0x41])
+        );
     }
 
     #[test]
@@ -208,7 +231,12 @@ mod tests {
 
     #[test]
     fn build_then_decode_round_trips() {
-        for id in [0x18_18_8E_A2u32, 0x07_43_DF_24, 0x18_6E_96_CF, 0x04_30_47_2A] {
+        for id in [
+            0x18_18_8E_A2u32,
+            0x07_43_DF_24,
+            0x18_6E_96_CF,
+            0x04_30_47_2A,
+        ] {
             let buf = build_report(id, &[1, 2, 3]);
             assert_eq!(decode_can_id(&buf[2..16]), id);
         }

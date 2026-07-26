@@ -44,7 +44,10 @@ fn main() -> ExitCode {
     let device_id = match parse_hex_u32(&args[0]) {
         Some(v) if v <= 0x00FF_FFFF => v as DeviceId,
         _ => {
-            eprintln!("error: device_id must be a 24-bit hex value (got {:?})", args[0]);
+            eprintln!(
+                "error: device_id must be a 24-bit hex value (got {:?})",
+                args[0]
+            );
             return ExitCode::from(2);
         }
     };
@@ -59,7 +62,10 @@ fn main() -> ExitCode {
 
     // Be generous on the connect timeout: we're only doing one round-trip and
     // a quiet bus can take a moment to broadcast.
-    let config = Config { connect_timeout: Duration::from_secs(5), ..Default::default() };
+    let config = Config {
+        connect_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
     let bus = match MasterBus::auto(config) {
         Ok(b) => b,
         Err(e) => {
@@ -95,7 +101,11 @@ fn main() -> ExitCode {
 
     match field.set(value) {
         Ok(v) => {
-            println!("set ok: 0x{device_id:06X} 0x{field_id:03X} {} = {}", info.name, render(&v));
+            println!(
+                "set ok: 0x{device_id:06X} 0x{field_id:03X} {} = {}",
+                info.name,
+                render(&v)
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -123,7 +133,11 @@ fn build_value(
             let b = match arg.to_ascii_lowercase().as_str() {
                 "true" | "on" | "1" | "yes" => true,
                 "false" | "off" | "0" | "no" => false,
-                _ => return Err(format!("{arg:?} is not a boolean (try true/false/on/off/1/0)")),
+                _ => {
+                    return Err(format!(
+                        "{arg:?} is not a boolean (try true/false/on/off/1/0)"
+                    ));
+                }
             };
             Ok(Value::Boolean(b))
         }
@@ -133,11 +147,17 @@ fn build_value(
             .map_err(|_| format!("{arg:?} is not a number")),
         V::Radio | V::DropDown => {
             let index = resolve_index(arg, options)?;
-            Ok(Value::List { index, options: options.to_vec() })
+            Ok(Value::List {
+                index,
+                options: options.to_vec(),
+            })
         }
         V::Eventable => {
             let index = resolve_index(arg, options)?;
-            Ok(Value::Eventable { index, labels: options.to_vec() })
+            Ok(Value::Eventable {
+                index,
+                labels: options.to_vec(),
+            })
         }
         V::Text => {
             // The editable sid for a Text field is the field's "value" — the
@@ -151,7 +171,10 @@ fn build_value(
                 Value::Text { sid, .. } => sid,
                 other => return Err(format!("expected Text-VIZ value, got {other:?}")),
             };
-            Ok(Value::Text { sid, text: arg.to_string() })
+            Ok(Value::Text {
+                sid,
+                text: arg.to_string(),
+            })
         }
         V::Date | V::Time => Err("Date / Time fields aren't writable from this CLI".to_string()),
         V::DeviceList => Err("DeviceRef fields aren't writable from this CLI".to_string()),
