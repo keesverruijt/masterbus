@@ -48,6 +48,13 @@ pub struct DeviceEntry {
     pub all_fields: Option<Vec<FieldInfo>>,
     /// Latest value per channel-aware field id.
     pub values: HashMap<FieldId, CachedValue>,
+    /// Offline string-catalog binding, resolved once (after identity) via a
+    /// live spot-check. `false` = not yet attempted. When attempted,
+    /// `catalog_table` is `Some(table)` on a spot-check hit and `None` when the
+    /// device has no usable bundled table (strings then fetched live).
+    pub catalog_attempted: bool,
+    /// The spot-checked static string table for this device, if any.
+    pub catalog_table: Option<&'static HashMap<u16, String>>,
 }
 
 impl DeviceEntry {
@@ -63,6 +70,8 @@ impl DeviceEntry {
             menus: HashSet::new(),
             all_fields: None,
             values: HashMap::new(),
+            catalog_attempted: false,
+            catalog_table: None,
         }
     }
 }
@@ -146,6 +155,30 @@ impl State {
         let map = self.devices.lock().unwrap();
         let e = map.get(&addr)?;
         e.schema.as_ref().map(|s| s.identity()).or_else(|| e.identity.clone())
+    }
+
+    /// Whether the offline string catalog has been resolved for this device
+    /// (spot-checked once). Distinguishes "not attempted" from "attempted, no
+    /// usable table".
+    pub fn catalog_attempted(&self, addr: u32) -> bool {
+        self.devices.lock().unwrap().get(&addr).map(|e| e.catalog_attempted).unwrap_or(false)
+    }
+
+    /// The spot-checked static string table for this device, if resolution
+    /// found and confirmed one.
+    pub fn catalog_table(&self, addr: u32) -> Option<&'static HashMap<u16, String>> {
+        self.devices.lock().unwrap().get(&addr).and_then(|e| e.catalog_table)
+    }
+
+    /// Record the result of a catalog resolution attempt (`Some(table)` on a
+    /// spot-check hit, `None` when no usable table). Marks it attempted so we
+    /// don't re-run the spot-check.
+    pub fn put_catalog(&self, addr: u32, table: Option<&'static HashMap<u16, String>>) {
+        let now = Instant::now();
+        let mut map = self.devices.lock().unwrap();
+        let e = map.entry(addr).or_insert_with(|| DeviceEntry::new(addr, now));
+        e.catalog_attempted = true;
+        e.catalog_table = table;
     }
 
     /// Get the device's last-known access level. `None` until we've heard

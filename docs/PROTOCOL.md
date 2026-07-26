@@ -121,6 +121,13 @@ version = "{major}.{minor}"      e.g. "1.37", "7.88", "0.122"
 
 (Empirically verified to reproduce the original output for all devices.)
 
+The resulting `major.minor` is the device's real firmware version, and it
+identifies the exact vendor firmware image: MasterAdjust's aggregated
+`SoftwareVersion` for the same device is `(major << 8) | minor`, and that value
+matches the vendor's published filenames — `0x020E` = 2.14 =
+`Easy_5_V2.14.hex`, `0x0204` = 2.4 = `Digtal_Input_Switch_V2.04.hex`. Useful
+for keying an offline string-table catalog (§4.4).
+
 ### 4.2 Property string id — `[0x09, n]`
 
 Returns the string-table id for a named device property.
@@ -186,6 +193,49 @@ last chunk).
 
 Termination: stop when a chunk contains a `NUL` (0x00) byte **or** is shorter
 than 8 bytes (fewer than 4 chars). Otherwise request `seq + 1`.
+
+**The id space is split.** Low ids are device-specific and held in EEPROM —
+serial number, user-assigned device name, article number. Ids above that are a
+flat index into a **static table baked into the firmware image**, identical for
+every unit running the same firmware. The boundary is per-model (id 6 on the
+Repeater, id 18 on the Digital Input Switch); there is no marker on the wire
+that tells you where it falls.
+
+**This is the dominant cost of discovery.** Four characters per round trip
+means a device reporting 324 strings (an MLI Ultra) costs on the order of a
+thousand exchanges. Because the flash half of the table is static per firmware
+build, it can be recovered offline from the vendor's public firmware bundle and
+shipped alongside the library — see FINDINGS §4.4 for the extraction method,
+which is validated id-for-id against a live 14-device capture.
+
+**`StringVersion` is the cache key.** The `GeneralCount` block reports
+`StringVersion` next to `ArticleNumber` (§4.3). A pre-built table is valid
+exactly when *both* match the device; on any mismatch, fall back to fetching
+over the wire. Do not key on article number alone — firmware revisions
+renumber the table (`Factory reset` at flash index 27 in `Repeater_V1.00` is
+`Factory settings` on the unit captured on the reference bus).
+
+Even with a matching key, **spot-check before trusting a bundled table**: fetch
+two or three ids spread across the range and compare. That costs three round
+trips instead of a thousand and removes any need to be certain the offline
+extraction was correct for a model you have never seen.
+
+The firmware also stores **every UI language**, not just the configured one, so
+a bundled table can offer languages the device itself will not serve. Language
+ordering in flash is *not* the on-wire language enum — see FINDINGS §4.5.
+
+Three rules a bundled table must respect (all learned the hard way — see
+FINDINGS §4.6, where the approach is validated at 420/420 against a live bus):
+
+- **Carry an explicit id range.** Reading past the end of a device's table
+  yields plausible-looking but wrong strings rather than an error.
+- **Never cache an entry the firmware leaves empty.** Empty means "no static
+  text": the device supplies it from EEPROM (user-assigned switch and device
+  names) or generates it at runtime from a template (`Event 3 command`,
+  `P: 2`). Always fetch those live.
+- **Never cache across a version mismatch.** It corrupts wholesale rather than
+  degrading — a Repeater running 0.61 read against the 1.0 table gets roughly
+  half its strings wrong.
 
 ### 4.5 Access-level login — opcode `0x08 0x19`
 

@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Offline string-table catalog (discovery accelerator).** Devices serve their
+  string table four characters per CAN round trip (opcode `0x30`), which
+  dominates first-time discovery — an MLI Ultra reports ~400 strings. The static
+  half of each table is baked into vendor firmware and identical across units of
+  a given `(article, firmware)`, so it is now recovered offline and bundled
+  (`crates/masterbus/src/strings/catalog.json`, generated and validated
+  id-for-id against a live 14-device bus by `tools/gen_runtime.py` in the RE
+  tree). On discovery the table is confirmed against the live device by a
+  three-id spot-check before use; a stale, wrong-language, or wrong-revision
+  table fails the check and degrades to the existing live fetch — never to a
+  wrong string. Ships tables for the EasyView 52, Digital Input Switch, and MLI
+  Ultra; unbundled models are unaffected. See the new `masterbus::strings`
+  module and PROTOCOL §4.4.
+- **`masterbus-signalk`: MAC `deviceMode`.** The MAC "Device state" enum
+  (Standby/Charging/…) is published as `electrical.chargers.<id>.deviceMode`,
+  alongside the existing charge-stage `chargingMode`.
+- Unit tests for `map_field`, pinning the published MAC paths and the
+  name/unit matching rules.
+
 ### Fixed
 - **`masterbus-signalk`: MAC monitoring values were silently dropped.** The MAC
   schema reports an empty unit on several monitoring fields, so the strict
@@ -14,13 +34,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   showed them. Those fields now also accept a missing unit; the temperature
   fields keep the strict match, since `Device` / `Battery` are told apart by
   their unit alone. Reported by @EdKok (#2).
-
-### Added
-- **`masterbus-signalk`: MAC `deviceMode`.** The MAC "Device state" enum
-  (Standby/Charging/…) is published as `electrical.chargers.<id>.deviceMode`,
-  alongside the existing charge-stage `chargingMode`.
-- Unit tests for `map_field`, pinning the published MAC paths and the
-  name/unit matching rules.
 
 ## [0.3.3] - 2026-07-20
 

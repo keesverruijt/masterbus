@@ -39,6 +39,12 @@ pub(super) struct Disc<'a> {
     /// discovered schema gets its own cache file. Unknown defaults to
     /// `EndUser` (the device's boot state).
     pub level: AccessLevel,
+    /// Offline string table for this device, once resolved and spot-checked
+    /// (see [`resolve_catalog`]). When set, [`Disc::fetch_str`] serves listed
+    /// ids from it instead of the four-chars-per-round-trip wire fetch; ids not
+    /// in the table (EEPROM / runtime-generated / out of span) still go live.
+    /// `None` until resolved, or when the device has no usable bundled table.
+    pub catalog: Option<&'static HashMap<u16, String>>,
 }
 
 impl Disc<'_> {
@@ -71,8 +77,22 @@ impl Disc<'_> {
         self.req(key, frame, n)
     }
 
-    /// Fetch a string by id via chunked reads.
+    /// Fetch a string by id. Served from the offline catalog when the id is in
+    /// this device's spot-checked table (zero round trips); otherwise fetched
+    /// live via [`Disc::fetch_str_wire`].
     pub(super) fn fetch_str(&mut self, addr: DeviceId, str_id: u16) -> String {
+        if let Some(cat) = self.catalog {
+            if let Some(s) = cat.get(&str_id) {
+                return s.clone();
+            }
+        }
+        self.fetch_str_wire(addr, str_id)
+    }
+
+    /// Fetch a string by id via chunked wire reads (opcode `0x30`, four chars
+    /// per round trip). Bypasses the catalog — used for the resolution
+    /// spot-check and for any id the catalog doesn't cover.
+    pub(super) fn fetch_str_wire(&mut self, addr: DeviceId, str_id: u16) -> String {
         let mut s = String::new();
         let mut seq: u8 = 0;
         loop {
@@ -246,6 +266,36 @@ pub(super) fn fetch_identity(disc: &mut Disc, addr: DeviceId) -> DeviceIdentity 
         }
     };
     DeviceIdentity { article, serial, revision, name, firmware }
+}
+
+/// Resolve this device's offline string table: pick the catalog candidate for
+/// its `(article, firmware)`, confirm it against the live device by fetching a
+/// few `spot_check` ids over the wire, and return the table only on a full
+/// match. `None` when the model isn't bundled or no candidate spot-checks
+/// clean — in which case strings are fetched live as before.
+///
+/// **The spot-check is the correctness guarantee.** A stale, wrong-language, or
+/// wrong-revision table fails here and degrades to a live fetch, never to a
+/// wrong string. See PROTOCOL §4.4 and [`crate::strings`].
+pub(super) fn resolve_catalog(
+    disc: &mut Disc,
+    addr: DeviceId,
+    id: &DeviceIdentity,
+) -> Option<&'static HashMap<u16, String>> {
+    for entry in crate::strings::candidates(&id.article, &id.firmware) {
+        let matches = entry.spot_check.iter().all(|&sid| {
+            entry.strings.get(&sid).is_some_and(|want| disc.fetch_str_wire(addr, sid) == *want)
+        });
+        if matches {
+            log::debug!(
+                target: "masterbus::discovery",
+                "0x{addr:06X}: string catalog hit (article {}, fw {}, {} ids, {} spot-checks)",
+                id.article, entry.firmware, entry.strings.len(), entry.spot_check.len(),
+            );
+            return Some(&entry.strings);
+        }
+    }
+    None
 }
 
 /// The menus enumerated for a "full" discovery. Monitoring / Configuration /
@@ -601,5 +651,116 @@ fn store_cached_menu(
             }
         }
         Err(e) => log::warn!(target: "masterbus::cache", "encode {}: {e}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use crate::error::Result;
+    use crate::runtime::Config;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A `TransportTx` that answers string-chunk (`0x30`) requests from a
+    /// scripted `id → full string` map by delivering the right 4-char chunk to
+    /// the waiter (which `fetch_str_wire` registered just before this send).
+    /// Counts sends (via a shared atomic) so a test can assert zero wire I/O on
+    /// a catalog hit.
+    struct ScriptTx {
+        waiter: Arc<Waiter>,
+        script: HashMap<u16, String>,
+        sends: Arc<AtomicUsize>,
+    }
+
+    impl TransportTx for ScriptTx {
+        fn send(&mut self, can_id: u32, data: &[u8]) -> Result<()> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            if data.first() == Some(&0x30) && data.len() >= 4 {
+                let sid = u16::from_le_bytes([data[1], data[2]]);
+                let seq = data[3];
+                let addr = can_id & 0x00FF_FFFF;
+                if let Some(full) = self.script.get(&sid) {
+                    let bytes = full.as_bytes();
+                    let start = seq as usize * 4;
+                    let mut resp = vec![0x30, data[1], data[2], seq];
+                    if start >= bytes.len() {
+                        resp.push(0); // terminating (empty) chunk
+                    } else {
+                        let end = (start + 4).min(bytes.len());
+                        resp.extend_from_slice(&bytes[start..end]);
+                        if end < start + 4 || end == bytes.len() {
+                            resp.push(0); // NUL-terminate the final chunk
+                        }
+                    }
+                    let key = format!("str:{:06X}:{:04X}:{}", addr, sid, seq);
+                    self.waiter.deliver(&key, resp);
+                }
+                // Unscripted id: no delivery → the waiter times out → "".
+            }
+            Ok(())
+        }
+    }
+
+    fn disc_with<'a>(
+        tx: &'a mut ScriptTx,
+        waiter: &'a Waiter,
+        cfg: &'a Config,
+        catalog: Option<&'static HashMap<u16, String>>,
+    ) -> Disc<'a> {
+        Disc { tx, waiter, cfg, level: AccessLevel::EndUser, catalog }
+    }
+
+    #[test]
+    fn cataloged_id_served_without_wire_io() {
+        let waiter = Arc::new(Waiter::new());
+        let cfg = Config::default();
+        let table: &'static HashMap<u16, String> =
+            Box::leak(Box::new(HashMap::from([(100u16, "Battery".to_string())])));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let mut tx = ScriptTx {
+            waiter: waiter.clone(),
+            // id 200 is NOT in the catalog but IS scripted on the wire.
+            script: HashMap::from([(200u16, "Live".to_string())]),
+            sends: sends.clone(),
+        };
+        let mut disc = disc_with(&mut tx, &waiter, &cfg, Some(table));
+
+        // Catalog hit: served locally, zero frames sent.
+        assert_eq!(disc.fetch_str(0x0A0B0C, 100), "Battery");
+        assert_eq!(sends.load(Ordering::Relaxed), 0);
+        // Miss: falls through to the wire.
+        assert_eq!(disc.fetch_str(0x0A0B0C, 200), "Live");
+        assert!(sends.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn resolve_accepts_on_matching_spot_check_and_rejects_on_mismatch() {
+        let entry = &crate::strings::candidates("77010310", "2.14")[0];
+        let id = DeviceIdentity {
+            article: "77010310".into(),
+            serial: "X".into(),
+            revision: "A".into(),
+            name: "EasyView".into(),
+            firmware: "2.14".into(),
+        };
+        let waiter = Arc::new(Waiter::new());
+        let cfg = Config::default();
+
+        // All spot-check ids answer with the catalog's own text → accept.
+        let good: HashMap<u16, String> =
+            entry.spot_check.iter().map(|&s| (s, entry.strings[&s].clone())).collect();
+        let mut tx = ScriptTx { waiter: waiter.clone(), script: good, sends: Arc::new(AtomicUsize::new(0)) };
+        let mut disc = disc_with(&mut tx, &waiter, &cfg, None);
+        let resolved = resolve_catalog(&mut disc, 0x1403A4, &id).expect("should resolve");
+        assert_eq!(resolved.get(&212).map(String::as_str), Some("Factory reset"));
+
+        // Corrupt one spot-check answer → reject, serve live.
+        let mut bad: HashMap<u16, String> =
+            entry.spot_check.iter().map(|&s| (s, entry.strings[&s].clone())).collect();
+        *bad.get_mut(&entry.spot_check[0]).unwrap() = "WRONG".into();
+        let mut tx = ScriptTx { waiter: waiter.clone(), script: bad, sends: Arc::new(AtomicUsize::new(0)) };
+        let mut disc = disc_with(&mut tx, &waiter, &cfg, None);
+        assert!(resolve_catalog(&mut disc, 0x1403A4, &id).is_none());
     }
 }

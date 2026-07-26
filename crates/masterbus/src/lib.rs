@@ -133,6 +133,7 @@ pub mod model;
 pub mod protocol;
 mod runtime;
 pub mod settings;
+pub mod strings;
 pub mod transport;
 pub mod value;
 

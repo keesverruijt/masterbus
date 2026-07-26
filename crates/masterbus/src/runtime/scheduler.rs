@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
-use super::discovery::{discover_menu, enumerate_all_fields, fetch_identity, Disc, MENUS};
+use super::discovery::{
+    discover_menu, enumerate_all_fields, fetch_identity, resolve_catalog, Disc, MENUS,
+};
 use super::framelog::frame_log;
 use crate::model::{DeviceIdentity, Menu};
 use super::reader::value_key;
@@ -177,12 +179,26 @@ impl Sched {
         id
     }
 
+    /// Resolve (once) the device's offline string table via a live spot-check,
+    /// so subsequent string fetches during enumeration can be served locally.
+    /// Cheap and idempotent: a few round trips on first call, nothing after.
+    /// A miss (unbundled model or failed spot-check) is remembered too, so we
+    /// don't re-probe — strings then fetch live exactly as before.
+    fn ensure_catalog(&mut self, addr: DeviceId, id: &DeviceIdentity) {
+        if self.state.catalog_attempted(addr) {
+            return;
+        }
+        let table = self.with_disc(addr, |disc| resolve_catalog(disc, addr, id));
+        self.state.put_catalog(addr, table);
+    }
+
     /// Discover one menu's groups for a device (the lazy unit of discovery).
     fn do_discover_menu(&mut self, addr: DeviceId, menu: Menu) {
         if self.state.has_menu(addr, menu) {
             return;
         }
         let id = self.ensure_identity(addr);
+        self.ensure_catalog(addr, &id);
         // Discover this device's own menu (per-device disk cache inside). We do
         // not reuse another same-article device's schema: devices that share an
         // article can differ (e.g. the cluster master battery has an extra group).
@@ -203,7 +219,8 @@ impl Sched {
         if self.state.has_all_fields(addr) {
             return;
         }
-        let _ = self.ensure_identity(addr);
+        let id = self.ensure_identity(addr);
+        self.ensure_catalog(addr, &id);
         let fields = self.with_disc(addr, |disc| enumerate_all_fields(disc, addr));
         self.last_send = Instant::now();
         self.state.put_all_fields(addr, fields);
@@ -226,7 +243,10 @@ impl Sched {
         };
         let waiter = self.waiter.clone();
         let cfg = self.config.clone();
-        let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg, level };
+        // Inject the device's spot-checked string table (if resolved). `None`
+        // until `ensure_catalog` has run, so identity discovery stays live.
+        let catalog = self.state.catalog_table(addr);
+        let mut disc = Disc { tx: &mut *self.tx, waiter: &waiter, cfg: &cfg, level, catalog };
         f(&mut disc)
     }
 
