@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-26
+
 ### Added
 - **Offline string-table catalog (discovery accelerator).** Devices serve their
   string table four characters per CAN round trip (opcode `0x30`), which
