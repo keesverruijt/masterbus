@@ -176,12 +176,25 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
 
     // Snapshot device-name map once for resolving event-target device refs.
     let names = app.names.lock().unwrap();
-    // An `Event N command` selects an output of the event's *target* device,
-    // which is the immediately-preceding `Event N target` field. Track the last
-    // target device id seen so a command row can resolve its output's name.
+    // A device-reference (`DeviceList`) field only indexes the *full* bus device
+    // list when it is an **event target** — the vendor library builds a
+    // per-field, filtered candidate list for other device-reference fields (e.g.
+    // a battery's `Cluster master`, which points into the battery cluster), and
+    // that filter isn't reversed yet. An event target is identifiable
+    // structurally: a `DeviceList` field immediately followed by an
+    // `EventCommand`. Only those are resolved to a device name; other
+    // device-reference fields show their raw index rather than a wrong device.
+    let next_field_viz = |from: usize| -> Option<VisualizationType> {
+        app.rows[from + 1..].iter().find_map(|r| match r {
+            Row::Field(f) => Some(f.viz_type),
+            Row::Group(_) => None,
+        })
+    };
+    // `Event N command` selects an output of the event's target device (the
+    // preceding target field); track the last event-target device id for it.
     let mut last_target: Option<u32> = None;
     let mut items: Vec<ListItem> = Vec::with_capacity(app.rows.len());
-    for row in &app.rows {
+    for (i, row) in app.rows.iter().enumerate() {
         let item = match row {
             Row::Group(name) => ListItem::new(Span::styled(
                 name.clone(),
@@ -189,8 +202,9 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
             )),
             Row::Field(field) => {
                 let value = app.values.get(&field.index);
-                // Remember the target device a following command row acts on.
-                if field.viz_type == VisualizationType::DeviceList {
+                let is_event_target = field.viz_type == VisualizationType::DeviceList
+                    && next_field_viz(i) == Some(VisualizationType::EventCommand);
+                if is_event_target {
                     last_target = match value {
                         Some(Value::DeviceRef { index, .. }) => {
                             app.device_ids.get(*index as usize).copied()
@@ -199,7 +213,15 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                     };
                 }
                 let val = match (field.viz_type, value) {
-                    // Resolve the command index to the target's output name.
+                    // Event target: resolve against the full bus device list.
+                    (VisualizationType::DeviceList, Some(Value::DeviceRef { index, .. })) => {
+                        if is_event_target {
+                            device_ref_label(*index, &app.device_ids, &names)
+                        } else {
+                            format!("[{index}]")
+                        }
+                    }
+                    // Command: resolve the index to the target's output name.
                     (VisualizationType::EventCommand, Some(v)) => {
                         command_label(v.index(), last_target, app)
                     }
