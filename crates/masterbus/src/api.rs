@@ -257,6 +257,38 @@ impl Device {
         self.engine.state.all_fields(self.id).ok_or(Error::NotReady)
     }
 
+    /// Names of this device's **eventable outputs**, in field-index order — the
+    /// target space an `Event N command` on another device selects into. An
+    /// event's command index `K` maps to `eventable_outputs()[K]` on the
+    /// event's target device.
+    ///
+    /// Reads only **already-discovered** fields (schema groups + the flat
+    /// probe); it does not trigger discovery, so it is empty until the device's
+    /// configuration has been enumerated. See PROTOCOL.md §9a.
+    pub fn eventable_outputs(&self) -> Vec<String> {
+        let mut evt: Vec<(FieldId, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut add = |f: &FieldInfo| {
+            if f.eventable && seen.insert(f.index) {
+                evt.push((f.index, f.name.clone()));
+            }
+        };
+        if let Some(schema) = self.engine.state.schema(self.id) {
+            for g in &schema.groups {
+                for f in &g.fields {
+                    add(f);
+                }
+            }
+        }
+        if let Some(all) = self.engine.state.all_fields(self.id) {
+            for f in &all {
+                add(f);
+            }
+        }
+        evt.sort_by_key(|(i, _)| *i);
+        evt.into_iter().map(|(_, n)| n).collect()
+    }
+
     /// Read the device's current access level (PROTOCOL.md §4.5).
     ///
     /// Note: a level change does not always change the index space, but it
@@ -476,7 +508,8 @@ fn write_value_for(viz: VisualizationType, value: Value) -> Result<WriteValue> {
             Value::Boolean(b) => Ok(WriteValue::Bool(b)),
             _ => wrong("Boolean"),
         },
-        V::Radio | V::DropDown => match value {
+        // Radio/DropDown and the event-command selector are all a list index.
+        V::Radio | V::DropDown | V::EventCommand => match value {
             Value::List { index, .. } => Ok(WriteValue::ListIndex(index)),
             _ => wrong("List"),
         },

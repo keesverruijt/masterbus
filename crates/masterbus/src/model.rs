@@ -204,6 +204,12 @@ pub struct FieldInfo {
     /// Whether the field is currently writable (meta op `0x0B`); gated fields
     /// read `false` until an access-level login is performed.
     pub writeable: bool,
+    /// Whether the field is an **eventable output** (meta op `0x0D`): a
+    /// controllable parameter that an event on another device can drive. A
+    /// device's eventable fields, in index order, are the target space an
+    /// `Event N command` selects into.
+    #[serde(default)]
+    pub eventable: bool,
     /// Minimum value (numeric fields).
     pub min: f64,
     /// Maximum value, or option count for lists.

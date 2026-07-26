@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
 
-use masterbus::{DeviceStatus, FieldId, Value};
+use masterbus::{DeviceStatus, FieldId, Value, VisualizationType};
 
 use crate::app::{App, EditKind, Focus, LOGIN_LEVELS, Row, TABS, TabKind, level_label, tab_label};
 
@@ -176,20 +176,36 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
 
     // Snapshot device-name map once for resolving event-target device refs.
     let names = app.names.lock().unwrap();
-    let items: Vec<ListItem> = app
-        .rows
-        .iter()
-        .map(|row| match row {
+    // An `Event N command` selects an output of the event's *target* device,
+    // which is the immediately-preceding `Event N target` field. Track the last
+    // target device id seen so a command row can resolve its output's name.
+    let mut last_target: Option<u32> = None;
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.rows.len());
+    for row in &app.rows {
+        let item = match row {
             Row::Group(name) => ListItem::new(Span::styled(
                 name.clone(),
                 Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow),
             )),
             Row::Field(field) => {
-                let val = app
-                    .values
-                    .get(&field.index)
-                    .map(|v| format_value_for(v, &field.options, &app.device_ids, &names))
-                    .unwrap_or_else(|| "…".into());
+                let value = app.values.get(&field.index);
+                // Remember the target device a following command row acts on.
+                if field.viz_type == VisualizationType::DeviceList {
+                    last_target = match value {
+                        Some(Value::DeviceRef { index, .. }) => {
+                            app.device_ids.get(*index as usize).copied()
+                        }
+                        _ => None,
+                    };
+                }
+                let val = match (field.viz_type, value) {
+                    // Resolve the command index to the target's output name.
+                    (VisualizationType::EventCommand, Some(v)) => {
+                        command_label(v.index(), last_target, app)
+                    }
+                    (_, Some(v)) => format_value_for(v, &field.options, &app.device_ids, &names),
+                    (_, None) => "…".into(),
+                };
                 // Cap to the column width so a long value (e.g. a "0d HH:MM:SS"
                 // time) can't push the unit column out of alignment.
                 let val = truncate(&val, VALUE_COL);
@@ -201,8 +217,9 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                     field.unit,
                 )))
             }
-        })
-        .collect();
+        };
+        items.push(item);
+    }
 
     let mut state = ListState::default();
     if !app.rows.is_empty() {
@@ -492,6 +509,22 @@ fn format_value_for(
         Value::Eventable { index, labels } => label(*index, labels),
         Value::DeviceRef { index, .. } => device_ref_label(*index, devices, names),
         _ => format_value(v),
+    }
+}
+
+/// Resolve an event `command` index to the target device's output name.
+/// `command = K` selects the target's `K`-th eventable output (see PROTOCOL
+/// §9a). Falls back to `output K` when the target's config isn't discovered yet
+/// (so its outputs aren't cached) or the index is out of range.
+fn command_label(index: Option<i32>, target: Option<u32>, app: &App) -> String {
+    let Some(k) = index else { return "…".into() };
+    let name = target
+        .map(|id| app.bus.device(id).eventable_outputs())
+        .and_then(|outs| usize::try_from(k).ok().and_then(|i| outs.get(i).cloned()))
+        .filter(|n| !n.is_empty());
+    match name {
+        Some(n) => truncate(&n, VALUE_COL),
+        None => format!("output {k}"),
     }
 }
 

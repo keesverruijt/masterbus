@@ -178,6 +178,18 @@ pub fn decode_value(raw: &[u8], viz: VisualizationType) -> Value {
             },
             device_ids: Vec::new(),
         },
+        // Event command: an index into the target's eventable outputs, encoded
+        // as an f32 like the other list types. Carried as a plain list index;
+        // the human label (the target output's name) is resolved by the caller,
+        // which has the target device's schema.
+        V::EventCommand => Value::List {
+            index: if raw.len() >= 4 {
+                f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]).round() as i32
+            } else {
+                raw.first().map(|&b| b as i32).unwrap_or(0)
+            },
+            options: Vec::new(),
+        },
         V::Text => {
             // For Text-VIZ fields the field's "value" is the editable string
             // id (the Btm3 push carries it as f32; round to u16). The text
@@ -348,6 +360,26 @@ mod tests {
     fn wire_viz_0x09_is_device_list() {
         use crate::protocol::viz_from_wire;
         assert_eq!(viz_from_wire(0x09), VisualizationType::DeviceList);
+    }
+
+    #[test]
+    fn wire_viz_0x0a_is_event_command() {
+        use crate::protocol::viz_from_wire;
+        assert_eq!(viz_from_wire(0x0A), VisualizationType::EventCommand);
+    }
+
+    #[test]
+    fn event_command_decodes_float_index_as_list() {
+        // The command is an f32 index (which of the target's outputs), carried
+        // as a plain list index; the label is resolved from the target's schema.
+        let raw = 1.0f32.to_le_bytes();
+        assert_eq!(
+            decode_value(&raw, VisualizationType::EventCommand),
+            Value::List {
+                index: 1,
+                options: Vec::new()
+            }
+        );
     }
 
     #[test]

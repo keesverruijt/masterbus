@@ -530,7 +530,7 @@ wire codes for `0x02`:
 | 0x07      | Time          |
 | 0x08      | Date          |
 | 0x09      | DeviceList (event target — a device reference) |
-| 0x0A      | Event command (which of the target's eventable outputs) |
+| 0x0A      | EventCommand (which of the target's eventable outputs) |
 
 The full set was recovered by matching MasterAdjust's captured
 `VisualizationType` field against known field types — the values agree with the
@@ -613,10 +613,19 @@ device in that sorted list. Confirmed against the reference bus: a battery's
 "Stop charge → Solar → Off" event stores target `3`, and Solar is at sorted
 index 3. See FINDINGS §8 for the derivation.
 
-The `command` field's option count equals the **target's** eventable count
-(`Eventables`), i.e. it selects which of the target's eventable outputs to
-drive. Resolving that output's *name* needs the target's eventable list, which
-is not yet reversed; the index alone is available today.
+The `command` field selects **which of the target's eventable outputs** to
+drive: its value is an index into the target device's ordered list of eventable
+fields. A field is an eventable output when its per-field metadata flag **op
+`0x0D`** is set (`byte[4] == 1`, same shape as the writeable flag `0x0B`, §6) —
+so the device's eventable outputs are just its fields with that flag, in index
+order. On the reference bus the Main Battery's outputs are `Close relay` (field
+117) and `Open relay` (119); Solar's single output is `Activate` (field 2). To
+show a command's label, resolve `command = K` to the *target* device's `K`-th
+eventable field name — the target being the sibling `Event N target`.
+
+> The device-level `EventableList` MasterAdjust reports (e.g. `[117, 119]`) is
+> exactly the set of fields carrying the `0x0D` flag; there is no separate
+> device-level list query — it is derived from the per-field flag.
 
 ---
 

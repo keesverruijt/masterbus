@@ -145,7 +145,8 @@ fn build_value(
             .parse::<f32>()
             .map(Value::Float)
             .map_err(|_| format!("{arg:?} is not a number")),
-        V::Radio | V::DropDown => {
+        // Radio/DropDown and the event-command selector are all a list index.
+        V::Radio | V::DropDown | V::EventCommand => {
             let index = resolve_index(arg, options)?;
             Ok(Value::List {
                 index,

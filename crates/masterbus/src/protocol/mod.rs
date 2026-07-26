@@ -99,6 +99,12 @@ pub mod meta_op {
     pub const FACTORY_DEFAULT: u8 = 0x09;
     /// Writeable flag (`byte[4]`: 1 = writable).
     pub const WRITEABLE: u8 = 0x0B;
+    /// Eventable flag (`byte[4]`: 1 = this field is a controllable output that
+    /// an event on another device can drive). The device's ordered eventable
+    /// fields are the `Event N command` target space (see model/discovery).
+    /// From the MasterAdjust `pit*` decompile; the flag-byte form mirrors
+    /// [`WRITEABLE`] and should be confirmed on a live bus.
+    pub const EVENTABLE: u8 = 0x0D;
     /// Unit string id.
     pub const UNIT: u8 = 0x2C;
     /// Option string id (`[0x26, field, 0x00, opt_idx]`).
@@ -135,6 +141,10 @@ pub enum VisualizationType {
     Eventable,
     /// Device reference list.
     DeviceList,
+    /// Event command: selects which of the target device's eventable outputs an
+    /// event drives. The value is an index into the *target's* ordered
+    /// eventable fields (the target is the sibling [`DeviceList`] field).
+    EventCommand,
     /// Free text.
     Text,
 }
@@ -158,9 +168,8 @@ pub fn viz_from_wire(code: u8) -> VisualizationType {
         0x08 => VisualizationType::Date,
         // Event target: a device reference (index into the sorted device list).
         0x09 => VisualizationType::DeviceList,
-        // 0x0A is the event "command" (which of the target's eventable outputs);
-        // resolving its label needs the target's eventable list, not yet
-        // reversed, so it stays a plain index for now.
+        // Event command: an index into the target device's eventable outputs.
+        0x0A => VisualizationType::EventCommand,
         _ => VisualizationType::Float,
     }
 }

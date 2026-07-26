@@ -542,7 +542,14 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     let meta = disc.meta_batch(
         addr,
         fid,
-        &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE],
+        &[
+            op::NAME,
+            op::VIZ,
+            op::MAX,
+            op::UNIT,
+            op::WRITEABLE,
+            op::EVENTABLE,
+        ],
     );
     // If nothing came back, this field index is unallocated on this channel —
     // used by the `enumerate_all_fields` flat probe to skip holes in the index
@@ -568,6 +575,8 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     let unit_sid = u16_at4(op::UNIT);
     // Writability: meta op 0x0B, flag at byte[4].
     let writeable = byte4(op::WRITEABLE).map(|b| b != 0).unwrap_or(false);
+    // Eventable-output flag: meta op 0x0D, flag at byte[4] (same shape as 0x0B).
+    let eventable = byte4(op::EVENTABLE).map(|b| b != 0).unwrap_or(false);
 
     let viz = viz_from_wire(viz_code);
     let n_opts = n_or_max as u32;
@@ -607,6 +616,7 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
         unit: field_unit,
         viz_type: viz,
         writeable,
+        eventable,
         // Deferred numeric bounds (not fetched during enumeration).
         min: 0.0,
         max: n_or_max as f64,

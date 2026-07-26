@@ -14,9 +14,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through to `Float`, so targets showed as a raw number), and `masterbus-tui`
   renders it as the target's name (`→ Solar`) via the live device list. The
   action (`data`) already shows its label (`Off`/`On`/`Copy`/`Copy invert`/
-  `Toggle`). The `command` field (which of the target's outputs) still shows as
-  an index — resolving its name needs the target's eventable list, not yet
-  reversed. See PROTOCOL §9a.
+  `Toggle`). See PROTOCOL §9a.
+- **Events resolve their command to the target's output name.** The `Event N
+  command` field (wire viz `0x0A`, now mapped) selects which of the target
+  device's eventable outputs to drive. Per-field metadata op `0x0D` (eventable
+  flag) is now fetched into `FieldInfo.eventable`, `Device::eventable_outputs()`
+  returns a device's ordered output names, and `masterbus-tui` renders the
+  command as that name (e.g. `Close relay`) when the target device's config has
+  been discovered (else `output N`).
 
 ### Fixed
 - **`VisualizationType::DeviceList` value decoded from the wrong byte.** It read
