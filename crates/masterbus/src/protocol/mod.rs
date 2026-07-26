@@ -100,10 +100,16 @@ pub mod meta_op {
     /// Writeable flag (`byte[4]`: 1 = writable).
     pub const WRITEABLE: u8 = 0x0B;
     /// Eventable flag (`byte[4]`: 1 = this field is a controllable output that
-    /// an event on another device can drive). The device's ordered eventable
-    /// fields are the `Event N command` target space (see model/discovery).
-    /// From the MasterAdjust `pit*` decompile; the flag-byte form mirrors
-    /// [`WRITEABLE`] and should be confirmed on a live bus.
+    /// an event on another device can drive). The device's eventable fields are
+    /// the `Event N command` target space (see model/discovery).
+    ///
+    /// A device answers this **only for its eventable fields** — non-eventable
+    /// fields stay silent — so discovery queries it *best-effort* and only on
+    /// Monitoring fields (the only tab that carries eventable outputs). A
+    /// blocking query on every field would pay a full timeout on the silent
+    /// majority. (Note the same byte `0x0D` is also a device-level
+    /// `[0x08, 0x0D]` selector for the *count* of eventable fields; that's a
+    /// different query.)
     pub const EVENTABLE: u8 = 0x0D;
     /// Unit string id.
     pub const UNIT: u8 = 0x2C;

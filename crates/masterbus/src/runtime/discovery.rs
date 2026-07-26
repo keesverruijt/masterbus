@@ -24,6 +24,11 @@ use crate::transport::TransportTx;
 
 const OPTIONAL_RETRIES: usize = 1;
 
+/// How long a best-effort metadata op ([`Disc::meta_batch`]) is polled after
+/// the blocking ops resolve. Its response, if any, has already arrived with the
+/// batch, so this only needs to cover jitter — not a full discovery timeout.
+const BEST_EFFORT_META_WAIT: Duration = Duration::from_millis(4);
+
 /// Wire-frame encoder for a metadata request: `(addr, opcode, field_id) → frame`.
 type MetaEncode = fn(DeviceId, u8, u16) -> (u32, Vec<u8>);
 /// Wire-frame encoder for an option-string request: `(addr, field, opt) → frame`.
@@ -135,29 +140,50 @@ impl Disc<'_> {
     ///
     /// Absent metadata (silent or a `0x10` "no value") resolves within one
     /// shared timeout window — that batching is the main discovery speed-up.
-    fn meta_batch(&mut self, addr: DeviceId, fid: FieldId, ops: &[u8]) -> HashMap<u8, Vec<u8>> {
+    ///
+    /// `best_effort` ops are sent alongside `ops` but **not** waited on with the
+    /// full timeout — only briefly polled after the blocking ops resolve. Use
+    /// it for an opcode a device answers only for *some* fields (e.g. the
+    /// eventable flag `0x0D`, which a device replies to only for its eventable
+    /// outputs): a blocking wait would pay a full timeout on every silent field,
+    /// but the response — when it comes — arrives together with the other ops,
+    /// so it's already present by the time the blocking ops finish.
+    fn meta_batch(
+        &mut self,
+        addr: DeviceId,
+        fid: FieldId,
+        ops: &[u8],
+        best_effort: &[u8],
+    ) -> HashMap<u8, Vec<u8>> {
         let wire = field_id::wire_index(fid);
         let (prefix, encode): (&str, MetaEncode) = match field_id::channel(fid) {
             Channel::Btm1 => ("btm1_meta", btm1_meta_req_raw),
             Channel::Btm3 => ("btm3_meta", btm3_meta_req_raw),
         };
         let key = |op: u8| format!("{}:{:06X}:{:02X}:{}", prefix, addr, op, wire);
-        for &op in ops {
+        for &op in ops.iter().chain(best_effort) {
             self.waiter.register(&key(op));
         }
-        for &op in ops {
+        for &op in ops.iter().chain(best_effort) {
             let frame = encode(addr, op, wire as u16);
             frame_log("Tx", frame.0, &frame.1);
             let _ = self.tx.send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
-        let mut out = HashMap::with_capacity(ops.len());
+        let mut out = HashMap::with_capacity(ops.len() + best_effort.len());
         for &op in ops {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if let Some(r) = self
                 .waiter
                 .wait(&key(op), remaining.max(Duration::from_millis(1)))
             {
+                out.insert(op, r);
+            }
+        }
+        // Best-effort ops: a short poll (the response is already in flight with
+        // the batch), never the full timeout.
+        for &op in best_effort {
+            if let Some(r) = self.waiter.wait(&key(op), BEST_EFFORT_META_WAIT) {
                 out.insert(op, r);
             }
         }
@@ -465,9 +491,12 @@ fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option
     let name = name_sid
         .map(|sid| disc.fetch_str(addr, sid))
         .unwrap_or_default();
+    // Only Monitoring fields can be eventable outputs, so only they carry the
+    // best-effort 0x0D query.
+    let want_eventable = menu == Menu::Monitoring;
     let mut fields = Vec::new();
     for fid in field_ids {
-        if let Some(f) = enumerate_field(disc, addr, fid) {
+        if let Some(f) = enumerate_field(disc, addr, fid, want_eventable) {
             fields.push(f);
         }
     }
@@ -518,7 +547,9 @@ fn probe_channel(disc: &mut Disc, addr: DeviceId, channel: Channel, out: &mut Ve
             Channel::Btm1 => field_id::btm1(wire),
             Channel::Btm3 => field_id::btm3(wire),
         };
-        if let Some(f) = enumerate_field(disc, addr, fid) {
+        // The flat probe is Btm3 config space; eventable outputs live on the
+        // Btm1 Monitoring tab, so don't pay the 0x0D query here.
+        if let Some(f) = enumerate_field(disc, addr, fid, false) {
             out.push(f);
         }
     }
@@ -531,7 +562,18 @@ fn probe_channel(disc: &mut Disc, addr: DeviceId, channel: Channel, out: &mut Ve
 /// 256-index space.
 const PROBE_CHUNK: u16 = 64;
 
-fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<FieldInfo> {
+/// Enumerate one field's metadata. `want_eventable` requests the eventable-flag
+/// op (`0x0D`) as a best-effort extra — set it only for **Monitoring** fields,
+/// the only tab whose fields are ever eventable outputs (confirmed 14/14 on the
+/// reference bus). A device answers `0x0D` only for its eventable fields, so
+/// querying it blocking on every field would pay a timeout on the silent
+/// majority (the discovery slowdown this avoids).
+fn enumerate_field(
+    disc: &mut Disc,
+    addr: DeviceId,
+    fid: FieldId,
+    want_eventable: bool,
+) -> Option<FieldInfo> {
     use crate::protocol::meta_op as op;
 
     // Per-field metadata in one pipelined round-trip. Numeric editing bounds
@@ -539,17 +581,16 @@ fn enumerate_field(disc: &mut Disc, addr: DeviceId, fid: FieldId) -> Option<Fiel
     // so we skip them here (op::MAX is still fetched: it doubles as the option
     // count for lists). The channel is encoded in `fid`; `meta_batch` dispatches
     // to the right encoder + waiter-key family.
+    let best_effort: &[u8] = if want_eventable {
+        &[op::EVENTABLE]
+    } else {
+        &[]
+    };
     let meta = disc.meta_batch(
         addr,
         fid,
-        &[
-            op::NAME,
-            op::VIZ,
-            op::MAX,
-            op::UNIT,
-            op::WRITEABLE,
-            op::EVENTABLE,
-        ],
+        &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE],
+        best_effort,
     );
     // If nothing came back, this field index is unallocated on this channel —
     // used by the `enumerate_all_fields` flat probe to skip holes in the index

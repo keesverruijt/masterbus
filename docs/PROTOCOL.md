@@ -614,18 +614,28 @@ device in that sorted list. Confirmed against the reference bus: a battery's
 index 3. See FINDINGS §8 for the derivation.
 
 The `command` field selects **which of the target's eventable outputs** to
-drive: its value is an index into the target device's ordered list of eventable
-fields. A field is an eventable output when its per-field metadata flag **op
-`0x0D`** is set (`byte[4] == 1`, same shape as the writeable flag `0x0B`, §6) —
-so the device's eventable outputs are just its fields with that flag, in index
-order. On the reference bus the Main Battery's outputs are `Close relay` (field
-117) and `Open relay` (119); Solar's single output is `Activate` (field 2). To
-show a command's label, resolve `command = K` to the *target* device's `K`-th
-eventable field name — the target being the sibling `Event N target`.
+drive: its value is an index into the target device's eventable fields, in field
+index order. A field is an eventable output when per-field metadata **op `0x0D`**
+answers with `byte[4] == 1`. On the reference bus the Main Battery's outputs are
+`Close relay` (**Monitoring** field 117) and `Open relay` (119); Solar's single
+output is `Activate` (field 2). To show a command's label, resolve `command = K`
+to the *target* device's `K`-th eventable field name — the target being the
+sibling `Event N target`.
 
-> The device-level `EventableList` MasterAdjust reports (e.g. `[117, 119]`) is
-> exactly the set of fields carrying the `0x0D` flag; there is no separate
-> device-level list query — it is derived from the per-field flag.
+> **Eventable outputs are always Monitoring-tab fields** (100% of them across
+> the 14-device reference bus; 0% on other tabs). Field indices are per-tab, so
+> Monitoring field 117 (`Close relay`) is unrelated to Configuration field 117
+> (`Cell 5`).
+>
+> **A device answers `0x0D` only for its eventable fields** — non-eventable
+> fields don't reply. So querying it blocking on every field pays a full timeout
+> on the silent majority. Query it *best-effort* (the reply, when it comes,
+> arrives with the rest of the field's metadata batch) and only on Monitoring
+> fields. MasterAdjust sidesteps this entirely by reading the *count* of
+> eventables from the device-level selector `[0x08, 0x0D]` and a device-level
+> eventable-list collection (`MB_Device_General_Count`); the wire query for the
+> list items themselves isn't reversed yet — the per-field best-effort probe is
+> what this crate uses.
 
 ---
 

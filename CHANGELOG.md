@@ -28,6 +28,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `byte[0]` of the 4-byte value, but the selection is an `f32` index (like
   Radio/DropDown), so any index ≥ 1 was misread as `0`. Now decoded as
   `round(f32)`.
+- **Discovery slowdown from the eventable (`0x0D`) query.** A device answers
+  `0x0D` only for its eventable fields, so querying it blocking on every field
+  paid a full metadata timeout on every silent (non-eventable) field — badly
+  slowing monitoring-heavy devices. It is now a **best-effort** query (a short
+  poll after the blocking ops, since the reply arrives with the batch) issued
+  **only on Monitoring fields** (the only tab that carries eventable outputs).
+  No behaviour change to the resolved output names; just no more per-field
+  timeouts.
 
 ## [0.3.4] - 2026-07-26
 
