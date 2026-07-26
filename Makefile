@@ -13,6 +13,7 @@
 #   make clippy        - Workspace clippy at `-D warnings` (what CI enforces)
 #   make precommit     - fmt-check + clippy + test — run this before pushing
 #   make tools         - Release build of just the command-line tools
+#   make release       - Bump version, tag, push (VERSION=X.Y.Z)
 #   make publish       - Publish masterbus + masterbus-tools to crates.io
 #   make clean         - `cargo clean`
 #
@@ -24,8 +25,11 @@
 CARGO ?= cargo
 
 .PHONY: all build debug check test fmt fmt-check clippy precommit \
-        tools publish-dry publish \
+        tools release publish-dry publish \
         clean help
+
+DATE       := $(shell date +%Y-%m-%d)
+OLDVERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 all: build
 
@@ -71,6 +75,41 @@ precommit: fmt-check clippy test
 tools:
 	$(CARGO) build --release -p masterbus-tools
 
+# --- release ----------------------------------------------------------------
+#
+# Cut a release:
+#
+#   make release VERSION=0.3.4
+#
+# Bumps the workspace version — both `[workspace.package] version` and the
+# internal `masterbus` dependency pin — dates the CHANGELOG's [Unreleased]
+# section (leaving a fresh empty one), verifies the tree (precommit),
+# refreshes Cargo.lock, commits "Bump to X.Y.Z", tags vX.Y.Z, and pushes
+# main + the tag. Pushing the tag triggers the CI release build (artifacts).
+# Then `make publish` uploads to crates.io.
+#
+# precommit runs on the current tree *before* any edit, so a failing check
+# leaves the working tree untouched. The bump only rewrites version strings
+# and one CHANGELOG line, so it can't break a tree that was already green.
+release:
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=X.Y.Z"; exit 1; }
+	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' \
+	  || { echo "VERSION must be semver X.Y.Z (got '$(VERSION)')"; exit 1; }
+	@test "$(VERSION)" != "$(OLDVERSION)" \
+	  || { echo "already at $(VERSION)"; exit 1; }
+	@git diff --quiet && git diff --cached --quiet \
+	  || { echo "working tree not clean — commit or stash first"; exit 1; }
+	$(MAKE) precommit
+	perl -pi -e 's/"\Q$(OLDVERSION)\E"/"$(VERSION)"/g' Cargo.toml
+	perl -pi -e 's/^## \[Unreleased\]\s*$$/## [Unreleased]\n\n## [$(VERSION)] - $(DATE)\n/' CHANGELOG.md
+	$(CARGO) check --workspace   # refresh Cargo.lock to the new version
+	git add Cargo.toml Cargo.lock CHANGELOG.md
+	git commit -m "Bump to $(VERSION)"
+	git tag v$(VERSION)
+	git push origin main
+	git push origin v$(VERSION)
+	@echo "Released v$(VERSION). Run 'make publish' to upload to crates.io."
+
 # --- crates.io publishing ---------------------------------------------------
 #
 # The publishable crates, in dependency order. masterbus-ffi is `publish =
@@ -111,6 +150,7 @@ help:
 	@echo ""
 	@echo "  make tools          Release build of just the command-line tools"
 	@echo ""
+	@echo "  make release        VERSION=X.Y.Z — bump, changelog, tag, push"
 	@echo "  make publish-dry    Dry-run the crates.io package (core crate)"
 	@echo "  make publish        Publish masterbus + masterbus-tools to crates.io"
 	@echo ""
