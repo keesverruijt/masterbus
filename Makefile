@@ -13,6 +13,7 @@
 #   make clippy        - Workspace clippy at `-D warnings` (what CI enforces)
 #   make precommit     - fmt-check + clippy + test — run this before pushing
 #   make tools         - Release build of just the command-line tools
+#   make publish       - Publish masterbus + masterbus-tools to crates.io
 #   make clean         - `cargo clean`
 #
 # Per-developer targets (SSH deploys to your own boxes, regenerating the
@@ -23,7 +24,7 @@
 CARGO ?= cargo
 
 .PHONY: all build debug check test fmt fmt-check clippy precommit \
-        tools \
+        tools publish-dry publish \
         clean help
 
 all: build
@@ -70,6 +71,29 @@ precommit: fmt-check clippy test
 tools:
 	$(CARGO) build --release -p masterbus-tools
 
+# --- crates.io publishing ---------------------------------------------------
+#
+# The publishable crates, in dependency order. masterbus-ffi is `publish =
+# false` (C-ABI demos, not a library) and is intentionally excluded. Bump
+# the workspace version and commit before publishing — cargo refuses a dirty
+# tree and refuses a version that already exists on crates.io.
+
+# Dry-run the core crate: builds the packaged manifest exactly as crates.io
+# will, without uploading. Run this first. (masterbus-tools can only be
+# verified once the core crate it depends on is live, so it isn't dry-run
+# here — its real publish below verifies against the just-published core.)
+publish-dry:
+	$(CARGO) publish -p masterbus --dry-run
+
+# Publish to crates.io, core before tools. IRREVERSIBLE — a published
+# version can only be yanked, never replaced or deleted. cargo waits for the
+# core crate to land in the registry index before publishing the tools crate
+# that depends on it, so no manual delay is needed. First publish of a crate
+# name creates the package; later runs release new versions.
+publish: publish-dry
+	$(CARGO) publish -p masterbus
+	$(CARGO) publish -p masterbus-tools
+
 clean:
 	$(CARGO) clean
 
@@ -86,6 +110,9 @@ help:
 	@echo "  make precommit      fmt-check + clippy + test (mirrors CI)"
 	@echo ""
 	@echo "  make tools          Release build of just the command-line tools"
+	@echo ""
+	@echo "  make publish-dry    Dry-run the crates.io package (core crate)"
+	@echo "  make publish        Publish masterbus + masterbus-tools to crates.io"
 	@echo ""
 	@echo "  make clean          cargo clean"
 	@echo ""
