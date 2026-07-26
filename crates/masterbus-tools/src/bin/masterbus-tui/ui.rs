@@ -1,5 +1,7 @@
 //! Rendering of the [`App`] state with ratatui.
 
+use std::collections::HashMap;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -172,6 +174,8 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Snapshot device-name map once for resolving event-target device refs.
+    let names = app.names.lock().unwrap();
     let items: Vec<ListItem> = app
         .rows
         .iter()
@@ -184,7 +188,7 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                 let val = app
                     .values
                     .get(&field.index)
-                    .map(|v| format_value_for(v, &field.options))
+                    .map(|v| format_value_for(v, &field.options, &app.device_ids, &names))
                     .unwrap_or_else(|| "…".into());
                 // Cap to the column width so a long value (e.g. a "0d HH:MM:SS"
                 // time) can't push the unit column out of alignment.
@@ -459,8 +463,15 @@ fn status_style(status: DeviceStatus) -> (&'static str, Color) {
 }
 
 /// Format a value, resolving a list/enum index to its label using the value's
-/// own option strings if present, else the field's schema options.
-fn format_value_for(v: &Value, schema_opts: &[String]) -> String {
+/// own option strings if present, else the field's schema options. A
+/// [`Value::DeviceRef`] (an event target) is resolved to the referenced
+/// device's name via the address-sorted bus device list.
+fn format_value_for(
+    v: &Value,
+    schema_opts: &[String],
+    devices: &[u32],
+    names: &HashMap<u32, String>,
+) -> String {
     // Append the raw integer index for list/eventable values so the underlying
     // wire value is visible alongside the human label: `Stabilized(2)`.
     let label = |index: i32, value_opts: &[String]| -> String {
@@ -479,7 +490,28 @@ fn format_value_for(v: &Value, schema_opts: &[String]) -> String {
     match v {
         Value::List { index, options } => label(*index, options),
         Value::Eventable { index, labels } => label(*index, labels),
+        Value::DeviceRef { index, .. } => device_ref_label(*index, devices, names),
         _ => format_value(v),
+    }
+}
+
+/// Resolve an event-target device reference to a name. The stored value is a
+/// 0-based index into the bus device list sorted by device address — the same
+/// canonical order [`MasterBus::device_ids`] returns (see FINDINGS) — so
+/// `devices[index]` is the target device id, and `names` maps it to a name.
+/// Falls back to the hex id (name not yet backfilled) or `[index]` (index out
+/// of range, e.g. a referenced device currently offline).
+fn device_ref_label(index: i32, devices: &[u32], names: &HashMap<u32, String>) -> String {
+    match usize::try_from(index).ok().and_then(|i| devices.get(i)) {
+        Some(&id) => {
+            let name = names
+                .get(&id)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("0x{id:06X}"));
+            format!("→ {}", truncate(&name, 18))
+        }
+        None => format!("→ [{index}]"),
     }
 }
 
@@ -526,5 +558,42 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_ref_resolves_index_to_device_name() {
+        // Real 24-bit device_addr values (what device_ids() returns), sorted
+        // ascending — CombiMaster, Alternator, Watt & Sea, Solar.
+        let devices = [0x188EA2u32, 0x30472A, 0x386FFD, 0x387028];
+        let names: HashMap<u32, String> = [
+            (0x386FFD, "Watt & Sea".to_string()),
+            (0x387028, "Solar".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // index 2 -> Watt & Sea, index 3 -> Solar (matches the reference bus).
+        assert_eq!(device_ref_label(2, &devices, &names), "→ Watt & Sea");
+        assert_eq!(device_ref_label(3, &devices, &names), "→ Solar");
+        // Name not yet backfilled -> hex id fallback (same 06X form the UI uses).
+        assert_eq!(device_ref_label(0, &devices, &names), "→ 0x188EA2");
+        // Out of range (referenced device offline) -> raw index.
+        assert_eq!(device_ref_label(9, &devices, &names), "→ [9]");
+    }
+
+    #[test]
+    fn device_ref_value_renders_via_format_value_for() {
+        let devices = [0x386FFDu32, 0x387028];
+        let names: HashMap<u32, String> = [(0x387028, "Solar".to_string())].into_iter().collect();
+        let v = Value::DeviceRef {
+            index: 1,
+            device_ids: Vec::new(),
+        };
+        assert_eq!(format_value_for(&v, &[], &devices, &names), "→ Solar");
     }
 }

@@ -140,6 +140,13 @@ pub enum VisualizationType {
 }
 
 /// Map the wire visualization byte (meta op `0x02`) to a [`VisualizationType`].
+///
+/// The full code set was recovered by cross-referencing MasterAdjust's captured
+/// `VisualizationType` field (which equals the wire code) against known field
+/// types: `0x01`/`0x03`/`0x06`/`0x07`/`0x08` line up exactly on Float / DropDown
+/// / Text / Time / Date. `0x09` (`DeviceList`) is the event **target** — an
+/// index into the address-sorted bus device list — and was previously
+/// unmapped, so event-target fields rendered as a raw number. See FINDINGS.
 pub fn viz_from_wire(code: u8) -> VisualizationType {
     match code {
         0x01 => VisualizationType::Float,
@@ -149,6 +156,11 @@ pub fn viz_from_wire(code: u8) -> VisualizationType {
         0x06 => VisualizationType::Text,
         0x07 => VisualizationType::Time,
         0x08 => VisualizationType::Date,
+        // Event target: a device reference (index into the sorted device list).
+        0x09 => VisualizationType::DeviceList,
+        // 0x0A is the event "command" (which of the target's eventable outputs);
+        // resolving its label needs the target's eventable list, not yet
+        // reversed, so it stays a plain index for now.
         _ => VisualizationType::Float,
     }
 }

@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Events resolve their target device by name.** A device's event definitions
+  (`Event N source / target / command / data`) reference their target device by
+  a bare index that is a position in the address-sorted bus device list. Wire
+  visualization code `0x09` (`DeviceList`) is now mapped (it previously fell
+  through to `Float`, so targets showed as a raw number), and `masterbus-tui`
+  renders it as the target's name (`→ Solar`) via the live device list. The
+  action (`data`) already shows its label (`Off`/`On`/`Copy`/`Copy invert`/
+  `Toggle`). The `command` field (which of the target's outputs) still shows as
+  an index — resolving its name needs the target's eventable list, not yet
+  reversed. See PROTOCOL §9a.
+
+### Fixed
+- **`VisualizationType::DeviceList` value decoded from the wrong byte.** It read
+  `byte[0]` of the 4-byte value, but the selection is an `f32` index (like
+  Radio/DropDown), so any index ≥ 1 was misread as `0`. Now decoded as
+  `round(f32)`.
+
 ## [0.3.4] - 2026-07-26
 
 ### Added

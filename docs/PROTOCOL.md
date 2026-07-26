@@ -526,8 +526,17 @@ wire codes for `0x02`:
 | 0x03      | DropDown      |
 | 0x04      | Eventable     |
 | 0x05      | CheckBox      |
+| 0x06      | Text          |
 | 0x07      | Time          |
 | 0x08      | Date          |
+| 0x09      | DeviceList (event target — a device reference) |
+| 0x0A      | Event command (which of the target's eventable outputs) |
+
+The full set was recovered by matching MasterAdjust's captured
+`VisualizationType` field against known field types — the values agree with the
+wire codes on every type observed both ways (`0x01`/`0x03`/`0x06`/`0x07`/`0x08`),
+which fixes `0x09`/`0x0A`. `0x02` (a greyed float) and `0x0B` (a switch variant)
+are also seen but not yet needed.
 
 ### Float / GrayVisualization
 IEEE-754 single, little-endian. The quiet-NaN `0x7FC00000` means
@@ -575,12 +584,39 @@ the Solar "Override" drop-down read/wrote `00 00 80 3f` for option 1. Decode as
 `round(f32)`. The human-readable label comes from the option strings (§6 opcode
 0x26).
 
-### Eventable / DeviceList
-`byte[0]` = selected index (not yet re-checked against the float form above —
-likely also a float, given Radio/DropDown).
+### Eventable / DeviceList / Event command
+The selected **index as a 4-byte float**, same as Radio/DropDown (`round(f32)`).
+Decoding `byte[0]` alone is wrong — a small index like `2.0` has a zero low
+byte.
 
 ### Text
 UTF-8 bytes of the payload (lossy decode).
+
+---
+
+## 9a. Events
+
+A device can act on other devices when a condition occurs. Each event is **four
+consecutive config fields**:
+
+| field | viz | meaning |
+|-------|-----|---------|
+| `Event N source`  | 0x03 DropDown   | the trigger condition on this device (device-specific list, e.g. `Stop charge`, `Battery low`) |
+| `Event N target`  | 0x09 DeviceList | **which device to act on** |
+| `Event N command` | 0x0A            | **which of the target's eventable outputs** |
+| `Event N data`    | 0x03 DropDown   | the action: `Off` / `On` / `Copy` / `Copy invert` / `Toggle` |
+
+**The target is an index into the bus device list sorted by device address
+ascending** — the exact order `masterbus_devices()` (and this crate's
+`device_ids()`, which sorts by `addr`) returns. So `target = 2` is the third
+device in that sorted list. Confirmed against the reference bus: a battery's
+"Stop charge → Solar → Off" event stores target `3`, and Solar is at sorted
+index 3. See FINDINGS §8 for the derivation.
+
+The `command` field's option count equals the **target's** eventable count
+(`Eventables`), i.e. it selects which of the target's eventable outputs to
+drive. Resolving that output's *name* needs the target's eventable list, which
+is not yet reversed; the index alone is available today.
 
 ---
 

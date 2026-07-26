@@ -166,7 +166,16 @@ pub fn decode_value(raw: &[u8], viz: VisualizationType) -> Value {
             labels: Vec::new(),
         },
         V::DeviceList => Value::DeviceRef {
-            index: raw.first().map(|&b| b as i32).unwrap_or(0),
+            // The selection is the index as a 4-byte float, same encoding as
+            // Radio/DropDown (a small integer like 2.0 has a zero low byte, so
+            // reading byte[0] would wrongly yield 0). `device_ids` is left empty
+            // here — decode has no bus context; the caller resolves the index
+            // against the address-sorted device list.
+            index: if raw.len() >= 4 {
+                f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]).round() as i32
+            } else {
+                raw.first().map(|&b| b as i32).unwrap_or(0)
+            },
             device_ids: Vec::new(),
         },
         V::Text => {
@@ -319,6 +328,26 @@ mod tests {
                 year: 2026
             })
         );
+    }
+
+    #[test]
+    fn device_ref_index_is_a_float_not_a_byte() {
+        // An event-target value is the index as an f32 (2.0), whose low byte is
+        // zero — reading byte[0] would wrongly give 0. Must decode to index 2.
+        let raw = 2.0f32.to_le_bytes();
+        assert_eq!(
+            decode_value(&raw, VisualizationType::DeviceList),
+            Value::DeviceRef {
+                index: 2,
+                device_ids: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn wire_viz_0x09_is_device_list() {
+        use crate::protocol::viz_from_wire;
+        assert_eq!(viz_from_wire(0x09), VisualizationType::DeviceList);
     }
 
     #[test]
