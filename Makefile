@@ -11,7 +11,7 @@
 #   make test          - Run the workspace test suite
 #   make fmt           - `cargo fmt --all`
 #   make clippy        - Workspace clippy at `-D warnings` (what CI enforces)
-#   make precommit     - fmt + clippy + test — run this before pushing
+#   make precommit     - fmt-check + clippy + test — run this before pushing
 #   make tools         - Release build of just the command-line tools
 #   make clean         - `cargo clean`
 #
@@ -46,13 +46,12 @@ check:
 test:
 	$(CARGO) test --workspace
 
-# NOTE: this tree is not maintained under default rustfmt — running `fmt`
-# would reformat essentially every file. CI does not gate on formatting, so
-# these targets are opt-in and deliberately kept out of `precommit`. Don't
-# run them unless you intend to adopt rustfmt across the whole repo.
+# Reformat the whole tree.
 fmt:
 	$(CARGO) fmt --all
 
+# fmt but read-only (fails when files aren't formatted). What the CI
+# `rustfmt` job runs.
 fmt-check:
 	$(CARGO) fmt --all --check
 
@@ -61,9 +60,9 @@ fmt-check:
 clippy:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
-# Everything you'd want green before opening a PR — mirrors CI (clippy +
-# tests). Formatting is intentionally excluded (see the note above).
-precommit: clippy test
+# Everything you'd want green before opening a PR — mirrors CI (rustfmt +
+# clippy + tests). Uses fmt-check (read-only); run `make fmt` to fix.
+precommit: fmt-check clippy test
 
 # Release build of just the three command-line tools (masterbus-tui,
 # masterbus-signalk, masterbus-set-field) — handy when you don't need the
@@ -81,9 +80,10 @@ help:
 	@echo "  make debug          Debug build of every workspace member"
 	@echo "  make check          Type-check without producing binaries"
 	@echo "  make test           Run the workspace test suite"
-	@echo "  make fmt            cargo fmt --all (opt-in; churns the whole tree)"
+	@echo "  make fmt            cargo fmt --all"
+	@echo "  make fmt-check      cargo fmt --all --check (CI shape)"
 	@echo "  make clippy         Workspace clippy at -D warnings (CI shape)"
-	@echo "  make precommit      clippy + test (mirrors CI)"
+	@echo "  make precommit      fmt-check + clippy + test (mirrors CI)"
 	@echo ""
 	@echo "  make tools          Release build of just the command-line tools"
 	@echo ""
