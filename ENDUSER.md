@@ -19,9 +19,11 @@ A computer that can reach the bus. Two options, both covered in
   Bring up `can0` at 250 kbit/s and you're set.
 
 Then download the latest binary release from
-<https://github.com/keesverruijt/masterbus/releases> *(coming soon —
-until then, build from source: `cargo build --release` produces
-`target/release/masterbus-tui` and `target/release/masterbus-signalk`).*
+<https://github.com/keesverruijt/masterbus/releases> — there is a tarball
+per platform (Linux x86_64 / armv7 / aarch64, macOS Intel / Apple Silicon,
+Windows). Or build from source: `cargo build --release` produces
+`target/release/masterbus-tui` and `target/release/masterbus-signalk`;
+[CONTRIBUTING.md](CONTRIBUTING.md) walks through installing the toolchain.
 
 ## First steps: explore the bus
 
