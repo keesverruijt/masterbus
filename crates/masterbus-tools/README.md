@@ -105,16 +105,30 @@ A hardened unit is included at
 ```sh
 sudo cp $(which masterbus-signalk) /usr/local/bin/             # already there if installed via cargo install
 sudo cp etc/masterbus-signalk.service /etc/systemd/system/
-# First run as root creates /etc/default/masterbus/config.ini with
-# auto-detected transport + master settings; review/edit it as needed.
+sudo systemctl daemon-reload
 sudo systemctl enable --now masterbus-signalk
 ```
 
+Nothing else needs creating by hand: systemd makes
+`/etc/default/masterbus-signalk` and `/etc/default/masterbus` on the
+first start (`ConfigurationDirectory=` in the unit), the first run writes
+`/etc/default/masterbus/config.ini` with the auto-detected transport and
+master settings, and `mapping.ini` appears next to it in
+`/etc/default/masterbus-signalk` once devices are discovered. Review
+`config.ini` after the first start; `journalctl -u masterbus-signalk`
+shows what was detected.
+
 Transport, master role, and the schema-cache directory are configured
-in `/etc/default/masterbus/config.ini` (auto-created on first run; see
-the **Configuration** section above) and the systemd unit's `LISTEN`
-env var. The service keeps a persistent schema cache in
-`/var/lib/masterbus` and restarts on failure.
+in `/etc/default/masterbus/config.ini` (see the **Configuration**
+section above) and the systemd unit's `LISTEN` env var (override it in
+`/etc/default/masterbus-signalk/config`). The service keeps a persistent
+schema cache in `/var/lib/masterbus` and restarts on failure.
+
+The binary lives in `/usr/local/bin` rather than `/usr/local/sbin` on
+purpose: it is the same executable an unprivileged user runs from a
+shell to try things out, `cargo install` puts it on the user's `PATH`
+alongside `masterbus-tui`, and one location for all three tools keeps
+the instructions short.
 
 ## `masterbus-set-field`
 

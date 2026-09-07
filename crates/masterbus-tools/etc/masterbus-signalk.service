@@ -10,7 +10,8 @@
 # (auto-created on first run with detected defaults; review and edit as
 # needed — see `masterbus::FileConfig` for the format).
 #
-# /etc/default/masterbus-signalk/ optionally holds:
+# /etc/default/masterbus-signalk/ (created by systemd on first start, see
+# ConfigurationDirectory= below) optionally holds:
 #   config       environment overrides (e.g. LISTEN); read by systemd.
 #   mapping.ini  per-device publish toggles; the service auto-creates and updates
 #                it as devices are discovered. Edit the true/false flags while the
@@ -42,6 +43,13 @@ RestartSec=5
 # the path is read from /etc/default/masterbus/config.ini's `cache_dir` key,
 # which defaults to /var/lib/masterbus on first run).
 StateDirectory=masterbus
+
+# Create /etc/default/masterbus-signalk and /etc/default/masterbus before the
+# service starts. ReadWritePaths= below refuses to start the unit (exit code
+# 226/NAMESPACE) when a listed path does not exist, and on a fresh install
+# neither does: config.ini is only written by the first run, mapping.ini only
+# when MAPPING is set. Paths are relative to /etc.
+ConfigurationDirectory=default/masterbus-signalk default/masterbus
 
 # Hardening. The service auto-rewrites mapping.ini in /etc, which a DynamicUser
 # sandbox can't own, so it runs as root but is tightly confined: the only

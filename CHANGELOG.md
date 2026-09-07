@@ -29,6 +29,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **systemd unit failed to start on a fresh install (exit 226/NAMESPACE).**
+  `ReadWritePaths=` listed `/etc/default/masterbus-signalk` and
+  `/etc/default/masterbus`, and systemd refuses to set up the sandbox when a
+  listed path is missing — which it is until something creates it. The unit now
+  declares both via `ConfigurationDirectory=` so systemd creates them before
+  the first start, and `masterbus-signalk` creates the parent directory of
+  `MAPPING` itself for non-systemd runs. (#5)
 - **`VisualizationType::DeviceList` value decoded from the wrong byte.** It read
   `byte[0]` of the 4-byte value, but the selection is an `f32` index (like
   Radio/DropDown), so any index ≥ 1 was misread as `0`. Now decoded as
