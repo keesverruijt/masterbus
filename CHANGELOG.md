@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`CONTRIBUTING.md`** — a getting-started guide for non-developers: installing
+  the Rust toolchain per OS, building, using an AI assistant to add a device
+  class to the Signal K sidecar, and what "unsupported device" means (the core
+  discovers every device; only `masterbus-signalk`'s per-class mapping is
+  model-specific).
 - **Events resolve their target device by name.** A device's event definitions
   (`Event N source / target / command / data`) reference their target device by
   a bare index that is a position in the address-sorted bus device list. Wire
