@@ -153,6 +153,11 @@ fn save_mapping(
         }
         out.push('\n');
     }
+    // A fresh install has no /etc/default/masterbus-signalk yet; create the
+    // parent so a bare `MAPPING=/some/new/dir/mapping.ini` works too.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(path, out)
 }
 
