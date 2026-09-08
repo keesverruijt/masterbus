@@ -1,6 +1,6 @@
 # masterbus-tools
 
-Three command-line tools for Mastervolt **MasterBus**, built on the
+Four command-line tools for Mastervolt **MasterBus**, built on the
 [`masterbus`](https://crates.io/crates/masterbus) library. Install all
 of them in one go:
 
@@ -12,7 +12,7 @@ device, no vendor driver needed).
 
 ## Configuration
 
-All three tools share a small INI file describing the transport and the
+All four tools share a small INI file describing the transport and the
 optional "act as bus master" role:
 
 | OS | Config path | Default cache dir |
@@ -127,7 +127,7 @@ schema cache in `/var/lib/masterbus` and restarts on failure.
 The binary lives in `/usr/local/bin` rather than `/usr/local/sbin` on
 purpose: it is the same executable an unprivileged user runs from a
 shell to try things out, `cargo install` puts it on the user's `PATH`
-alongside `masterbus-tui`, and one location for all three tools keeps
+alongside `masterbus-tui`, and one location for all four tools keeps
 the instructions short.
 
 ## `masterbus-set-field`
@@ -150,6 +150,37 @@ Examples:
     masterbus-set-field 188EA2 0x013 on               # CombiMaster bool
     masterbus-set-field 3A3B4B 0x104 "Nav Chg"        # Magic Nav Chg rename
     masterbus-set-field 53A493 0x160 "Schakelaar"     # EasyView Switch 1
+
+## `masterbus-dump`
+
+Walks the whole bus and writes one JSON document: per device its
+identity and status, per group its id and menu, per field its
+channel-aware id, name, unit, visualization type, writability, range and
+enum option labels, plus the live values for the monitoring menu.
+
+    masterbus-dump [options] [output.json]
+
+- `-o, --output <file>`: write here instead of stdout.
+- `--menus <list>`: which menus to enumerate, comma-separated, or `all`.
+  Default `monitoring,configuration,service`.
+- `--values <mode>`: `none`, `monitoring` (default) or `all`.
+- `--device <hex>`: restrict to one device address; repeatable.
+- `--probe`: also flat-probe the field-index space, finding fields no
+  menu lists. Slow.
+- `--compact`: one-line JSON instead of pretty-printed.
+
+Examples:
+
+    masterbus-dump -o mybus.json                      # the usual three menus
+    masterbus-dump --values all --menus all -o mybus.json
+    masterbus-dump --device 286CA9 --probe            # one device, to stdout
+
+This is the tool to run when reporting a device the Signal K sidecar
+does not yet map: the dump gives someone without your hardware
+everything needed to write the mapping. Field ids print in the same
+three-digit hex `masterbus-set-field` accepts. Device, group and field
+*names* are installer-editable strings held in device EEPROM, so a
+mapping table should key on the ids and read the names as documentation.
 
 ## License
 

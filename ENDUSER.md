@@ -21,9 +21,11 @@ A computer that can reach the bus. Two options, both covered in
 Then download the latest binary release from
 <https://github.com/keesverruijt/masterbus/releases> — there is a tarball
 per platform (Linux x86_64 / armv7 / aarch64, macOS Intel / Apple Silicon,
-Windows). Or build from source: `cargo build --release` produces
-`target/release/masterbus-tui` and `target/release/masterbus-signalk`;
-[CONTRIBUTING.md](CONTRIBUTING.md) walks through installing the toolchain.
+Windows). Every tarball carries `masterbus-tui`, `masterbus-set-field`
+and `masterbus-dump`, plus `masterbus-signalk` and its systemd unit on
+Linux. Or build from source: `cargo build --release` produces the same
+binaries under `target/release/`; [CONTRIBUTING.md](CONTRIBUTING.md)
+walks through installing the toolchain.
 
 ## First steps: explore the bus
 
@@ -114,3 +116,23 @@ Examples:
 The TUI shows the *device id* (title bar, e.g. `[188EA2]`) and the
 *field id* on every editable row, so picking the right ids is a
 copy-paste away.
+
+## Reporting a device that isn't mapped yet
+
+Every device on your bus shows up in the TUI, because the library
+discovers them generically. The Signal K sidecar is the part that knows
+only some device classes, so a device can be perfectly visible in the
+TUI and still publish nothing to Signal K.
+
+To get yours added, run the dump and attach the file to an issue:
+
+    masterbus-dump --values all --menus all -o mybus.json
+
+That records every device, group and field with its id, name, unit,
+range and current value. It is enough for someone without your hardware
+to write the mapping. If the bus is large, `--device <id>` limits the
+dump to the one device you care about.
+
+The file contains your devices' names, serial numbers and whatever they
+were reading at the time. Nothing secret, but edit it first if you would
+rather not publish serial numbers.

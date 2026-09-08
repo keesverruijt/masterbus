@@ -125,8 +125,8 @@ cargo build --release
 ```
 
 That builds everything. The binaries land in `target/release/`:
-`masterbus-tui`, `masterbus-signalk`, `masterbus-set-field`. Run one
-straight away:
+`masterbus-tui`, `masterbus-signalk`, `masterbus-set-field`,
+`masterbus-dump`. Run one straight away:
 
 ```sh
 ./target/release/masterbus-tui

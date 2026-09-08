@@ -73,9 +73,9 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
-      # Shippable artifacts: the three `masterbus-tools` binaries (TUI
-      # + set-field everywhere, signalk on Linux only), the FFI library
-      # + header, and (Linux only) the signalk systemd unit. The
+      # Shippable artifacts: the four `masterbus-tools` binaries (TUI
+      # + set-field + dump everywhere, signalk on Linux only), the FFI
+      # library + header, and (Linux only) the signalk systemd unit. The
       # `masterbus` core crate is an rlib (consumed via crates.io) and
       # has no standalone binary; it is still built / checked as part
       # of the workspace above.
@@ -87,7 +87,7 @@ jobs:
           mkdir -p "$dist"
           cp crates/masterbus-ffi/include/masterbus.h "$dist/"
           # Cross-platform tools (with or without .exe)
-          for b in masterbus-tui masterbus-set-field; do
+          for b in masterbus-tui masterbus-set-field masterbus-dump; do
             if [ -f "$out/$b.exe" ]; then cp "$out/$b.exe" "$dist/"; else cp "$out/$b" "$dist/"; fi
           done
           # FFI library + static lib (whichever names this platform produced)

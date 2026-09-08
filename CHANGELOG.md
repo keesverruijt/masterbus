@@ -38,6 +38,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **`masterbus-dump` was missing from the release artifacts.** The CI staging
+  loop copied only `masterbus-tui` and `masterbus-set-field`, so the one tool
+  that `CONTRIBUTING.md` asks people to run when reporting an unmapped device
+  could only be obtained by building from source — precisely the toolchain
+  setup the binary releases exist to avoid. It is a plain cross-platform binary
+  on the same `MasterBus::auto` entry point as `masterbus-set-field`, so it now
+  ships in every artifact and tarball. The tool listings in `ENDUSER.md`,
+  `CONTRIBUTING.md` and the `masterbus-tools` README were likewise still
+  written for three binaries; all now cover four, the crate README documents
+  `masterbus-dump`'s options, and `ENDUSER.md` gained a section on reporting a
+  device the Signal K sidecar does not map yet. (#10)
 - **systemd unit failed to start on a fresh install (exit 226/NAMESPACE).**
   `ReadWritePaths=` listed `/etc/default/masterbus-signalk` and
   `/etc/default/masterbus`, and systemd refuses to set up the sandbox when a
