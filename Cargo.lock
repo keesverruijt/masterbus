@@ -890,6 +890,7 @@ dependencies = [
  "log",
  "masterbus",
  "ratatui",
+ "serde",
  "serde_json",
  "tui-logger",
 ]

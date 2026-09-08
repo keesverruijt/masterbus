@@ -7,6 +7,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`masterbus-dump`** — a fourth command-line tool that walks the whole bus and
+  writes one JSON document: per device its identity and status, per group its id
+  and menu, per field its channel-aware id, name, unit, range, enum options and
+  writability, plus the live monitoring values. `--menus` picks which menus to
+  enumerate, `--values none|monitoring|all` how much to read, `--device <hex>`
+  restricts to one device, `--probe` adds the flat field-index probe. Intended
+  for issue reports: it gives someone without the hardware everything needed to
+  write a Signal K mapping. Field ids print as `0x000`..`0x1FF`, the same
+  encoding `masterbus-tui` shows and `masterbus-set-field` accepts.
 - **`CONTRIBUTING.md`** — a getting-started guide for non-developers: installing
   the Rust toolchain per OS, building, using an AI assistant to add a device
   class to the Signal K sidecar, and what "unsupported device" means (the core

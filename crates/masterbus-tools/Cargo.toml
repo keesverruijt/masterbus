@@ -22,10 +22,15 @@ path = "src/bin/masterbus-signalk.rs"
 name = "masterbus-set-field"
 path = "src/bin/masterbus-set-field.rs"
 
+[[bin]]
+name = "masterbus-dump"
+path = "src/bin/masterbus-dump.rs"
+
 [dependencies]
 masterbus.workspace = true
 ratatui.workspace = true
 crossbeam-channel.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true

@@ -166,10 +166,17 @@ touching the wire protocol, [docs/PROTOCOL.md](docs/PROTOCOL.md). These
 are written to be read by an AI as much as by a human.
 
 **Give it the facts from your bus.** The AI cannot see your devices. You
-can: open `masterbus-tui`, select the device, go to the **Monitoring**
-tab, and write down (or screenshot) the device's name, and every field's
-group, name, unit and a typical value. That list is the entire
-specification of the change.
+can. The quickest way is one command:
+
+```sh
+./target/release/masterbus-dump -o mybus.json
+```
+
+That writes every device, group and field — id, name, unit, range, enum
+options — plus the live monitoring values, as JSON. Point the AI at the
+file. Failing that, open `masterbus-tui`, select the device, go to the
+**Monitoring** tab and screenshot it; the field id in the left column is
+the part that matters most.
 
 An example prompt that has everything it needs:
 
@@ -263,9 +270,11 @@ Your AI assistant can do steps 2 through 4 for you if you ask; the `gh`
 command-line tool can even open the PR. Small, one-class PRs are easier
 to review than one PR for five classes.
 
-Not up for a PR at all? Open an issue with the field list from section 5
-(device name, and every monitoring field's group, name, unit and a sample
-value). That is enough for someone else to write the mapping blind.
+Not up for a PR at all? Open an issue and attach the `mybus.json` from
+section 5. That is enough for someone else to write the mapping blind.
+It contains your devices' names, serial numbers and current readings —
+nothing secret, but if you would rather not publish serial numbers, edit
+them out first, or use `--device <address>` to dump only the one device.
 
 ## 8. When the device itself misbehaves
 
@@ -297,6 +306,7 @@ numbers.
 | `crates/masterbus-tools/src/bin/masterbus-tui/` | the terminal UI |
 | `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar, including the per-class mapping |
 | `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
+| `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |
 | `crates/masterbus-tools/etc/` | the systemd unit |
 | `crates/masterbus-ffi/` | C ABI wrapper and C demos |
 | `docs/PROTOCOL.md` | the wire protocol, as reverse engineered |

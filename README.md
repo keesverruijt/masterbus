@@ -10,7 +10,7 @@ A Cargo workspace:
 | crate | what |
 |-------|------|
 | [`masterbus`](crates/masterbus) | core library (the protocol, discovery, caching, subscriptions, the `MasterBus`/`Device`/`Group`/`Field` navigator API and a non-blocking channel API) |
-| [`masterbus-tools`](crates/masterbus-tools) | three command-line tools — `masterbus-tui` (terminal UI), `masterbus-signalk` (Signal K sidecar), `masterbus-set-field` (one-shot field writer). `cargo install masterbus-tools` installs all three |
+| [`masterbus-tools`](crates/masterbus-tools) | four command-line tools — `masterbus-tui` (terminal UI), `masterbus-signalk` (Signal K sidecar), `masterbus-set-field` (one-shot field writer), `masterbus-dump` (whole-bus JSON snapshot). `cargo install masterbus-tools` installs all four |
 | [`masterbus-ffi`](crates/masterbus-ffi) | C ABI `cdylib` (single-threaded), header generated with cbindgen, plus C demos (not published to crates.io) |
 
 The wire protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -64,8 +64,8 @@ cargo test  --workspace                 # unit tests
 cargo build --release --target aarch64-unknown-linux-gnu   # cross-compile for a Pi
 ```
 
-Or install the three command-line tools (`masterbus-tui`,
-`masterbus-signalk`, `masterbus-set-field`) directly:
+Or install the four command-line tools (`masterbus-tui`,
+`masterbus-signalk`, `masterbus-set-field`, `masterbus-dump`) directly:
 
 ```sh
 cargo install masterbus-tools
@@ -142,6 +142,23 @@ Ships with a hardened systemd unit.
 masterbus-signalk [listen-addr]
 # e.g. masterbus-signalk 0.0.0.0:3009
 ```
+
+### Bus dump
+
+`masterbus-dump` walks every device and writes one JSON document: identity,
+groups, fields (id, name, unit, range, enum options, writability) and, for the
+monitoring menu, the live values. It is the fastest way to hand someone without
+your hardware everything needed to write a mapping for a device class.
+
+```sh
+masterbus-dump -o mybus.json          # monitoring + configuration + service
+masterbus-dump --values all --menus all -o mybus.json
+masterbus-dump --device 286CA9        # just one device, to stdout
+```
+
+Field ids appear as `0x000`..`0x1FF` — the same encoding the TUI shows and
+`masterbus-set-field` accepts. Names are installer-editable and ids are not, so
+mapping tables should key on `field.id` and `group.id`.
 
 ### C library and demos
 
