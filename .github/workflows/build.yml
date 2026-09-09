@@ -35,9 +35,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu,      os: ubuntu-latest,  packages: "",                      rustflags: "" }
-          - { target: armv7-unknown-linux-gnueabihf, os: ubuntu-latest,  packages: gcc-arm-linux-gnueabihf, rustflags: "" } # armhf
-          - { target: aarch64-unknown-linux-gnu,     os: ubuntu-latest,  packages: gcc-aarch64-linux-gnu,   rustflags: "" }
+          # Linux is built against musl so the binaries are fully static
+          # and run on any distro regardless of its glibc (#20: the gnu
+          # builds wanted the runner's glibc 2.39, newer than Raspberry
+          # Pi OS bookworm ships). The workspace is pure Rust on Linux
+          # (hidapi uses its native hidraw backend), so no musl C
+          # toolchain is needed: rustc supplies musl's crt and libc from
+          # its own target bundle, and the gnu cross gcc only drives ld.
+          - { target: x86_64-unknown-linux-musl,     os: ubuntu-latest,  packages: "",                      rustflags: "" }
+          - { target: armv7-unknown-linux-musleabihf, os: ubuntu-latest, packages: gcc-arm-linux-gnueabihf, rustflags: "" } # armhf
+          - { target: aarch64-unknown-linux-musl,    os: ubuntu-latest,  packages: gcc-aarch64-linux-gnu,   rustflags: "" }
           - { target: x86_64-pc-windows-msvc,        os: windows-latest, packages: "",                      rustflags: "-C target-feature=+crt-static" }
           - { target: aarch64-apple-darwin,          os: macos-latest,   packages: "",                      rustflags: "" }
           - { target: x86_64-apple-darwin,           os: macos-latest,   packages: "",                      rustflags: "" }
@@ -61,7 +68,7 @@ jobs:
 
       # Lint and test once, on the native Linux target.
       - name: Clippy, tests & docs
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         env:
           # Intra-doc links rot silently when an item is renamed or moves
           # between modules; nothing else in the build notices.
@@ -73,14 +80,16 @@ jobs:
 
       - name: Build release (whole workspace)
         env:
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
       # Shippable artifacts: the four `masterbus-tools` binaries (TUI
       # + set-field + dump everywhere, signalk on Linux only), the FFI
-      # library + header, and (Linux only) the signalk systemd unit. The
+      # library + header, and (Linux only) the signalk systemd unit. On
+      # Linux (musl) rustc drops the cdylib crate type, so only the
+      # static libmasterbus_ffi.a ships there, no .so. The
       # `masterbus` core crate is an rlib (consumed via crates.io) and
       # has no standalone binary; it is still built / checked as part
       # of the workspace above.
