@@ -121,16 +121,22 @@ commands each target expands to.
 | `crates/masterbus/src/strings/catalog.json` | bundled string tables that make discovery fast for known firmware images |
 | `crates/masterbus-tools/src/bin/masterbus-tui/` | the terminal UI |
 | `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar |
+| `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
+| `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |
 | `crates/masterbus-tools/src/mapping.rs` | the `mapping.json` format |
 | `crates/masterbus-tools/src/seed.rs` | per-class path suggestions used to seed a new mapping |
 | `crates/masterbus-tools/src/database.rs` | per-model path suggestions, keyed on article number |
 | `crates/masterbus-tools/src/suggestions/catalog.json` | the bundled per-model data |
 | `crates/masterbus-tools/src/units.rs` | device-unit → SI conversion, derived from the unit pair |
-| `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
-| `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |
 | `crates/masterbus-tools/etc/` | the systemd unit |
 | `crates/masterbus-ffi/` | C ABI wrapper and C demos |
 | `docs/PROTOCOL.md` | the wire protocol, as reverse engineered |
+
+The five modules directly under `masterbus-tools/src/` are a library target
+only so the four binaries can share them. They are **internal**: hidden from
+the rendered docs, no stability guarantee, and nothing outside this workspace
+should depend on `masterbus_tools`. Change them freely. The published surface
+is the `masterbus` library and these tools' own arguments and file formats.
 ## 4. Working on the library
 
 Most of what there is to build is in `crates/masterbus`. The tools on top
