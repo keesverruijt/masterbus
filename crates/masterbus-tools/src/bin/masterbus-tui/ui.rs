@@ -320,16 +320,16 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                     truncate(&field.name, 22),
                     field.unit,
                 );
-                // In mapping mode, show where this field publishes. The path is
-                // the point of the mode, so it gets the rest of the line.
+                // In mapping mode, show where this field publishes. Signal K
+                // paths are long and the columns to their left are already
+                // wide, so on a narrow terminal the path wraps onto a
+                // continuation line rather than being cut off — the path is the
+                // whole point of the mode, and a truncated one is unreadable.
                 match app.mapped_path(field.index) {
-                    Some(path) => ListItem::new(Line::from(vec![
-                        Span::raw(head),
-                        Span::styled(format!(" {path}"), Style::new().fg(Color::Green)),
-                    ])),
+                    Some(path) => mapped_item(head, path, content.width as usize),
                     None if app.mapping_mode() => ListItem::new(Line::from(vec![
                         Span::raw(head),
-                        Span::styled(" —", Style::new().fg(Color::DarkGray)),
+                        Span::styled(" \u{2014}", Style::new().fg(Color::DarkGray)),
                     ])),
                     None => ListItem::new(Line::raw(head)),
                 }
@@ -694,6 +694,40 @@ pub fn format_value(v: &Value) -> String {
     }
 }
 
+/// Indent of a wrapped Signal K path, including its continuation marker.
+const WRAP_INDENT: &str = "      \u{21b3} ";
+
+/// One field row in mapping mode: the field's columns, then its Signal K path
+/// on the same line when it fits, otherwise on a continuation line.
+///
+/// `avail` is the width of the list's content area. A `ListItem` may be several
+/// lines tall and the selection highlight covers all of them, so wrapping costs
+/// nothing but vertical space.
+fn mapped_item<'a>(head: String, path: &str, avail: usize) -> ListItem<'a> {
+    ListItem::new(mapped_lines(head, path, avail))
+}
+
+/// The one or two lines of a mapping row. Split out from [`mapped_item`] so the
+/// wrapping decision can be tested without rendering a frame.
+fn mapped_lines<'a>(head: String, path: &str, avail: usize) -> Vec<Line<'a>> {
+    let green = Style::new().fg(Color::Green);
+    if head.chars().count() + 1 + path.chars().count() <= avail {
+        return vec![Line::from(vec![
+            Span::raw(head),
+            Span::styled(format!(" {path}"), green),
+        ])];
+    }
+    // Still too long for a line of its own: truncate rather than wrap twice.
+    let room = avail.saturating_sub(WRAP_INDENT.chars().count());
+    vec![
+        Line::raw(head),
+        Line::from(Span::styled(
+            format!("{WRAP_INDENT}{}", truncate(path, room)),
+            green,
+        )),
+    ]
+}
+
 /// Render a channel-aware [`FieldId`] as `0x000`..`0x1FF` — three hex digits
 /// of the full `u16` id, where bit 8 encodes the channel (`0x000`..`0x0FF` =
 /// Btm1, `0x100`..`0x1FF` = Btm3). Five chars wide, matches the encoding the
@@ -708,6 +742,76 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
+    }
+}
+
+#[cfg(test)]
+mod mapping_row_tests {
+    use super::*;
+
+    /// The columns to the left of the path are fixed-width and already wide, so
+    /// this is what a real row's head looks like.
+    fn head() -> String {
+        format!(
+            "  {} {:<22} {:<2} {:>VALUE_COL$} {:<4}",
+            field_id_tag(0x001),
+            "Battery",
+            "ro",
+            "26.35",
+            "V"
+        )
+    }
+
+    /// Flatten a line back to the text a terminal would show.
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    const PATH: &str = "electrical.batteries.main-batt.voltage";
+
+    #[test]
+    fn a_path_that_fits_stays_on_one_line() {
+        let h = head();
+        let exact = h.chars().count() + 1 + PATH.chars().count();
+        let l = mapped_lines(h.clone(), PATH, exact);
+        assert_eq!(l.len(), 1);
+        assert_eq!(text(&l[0]), format!("{h} {PATH}"));
+        // One column of slack is still one line.
+        assert_eq!(mapped_lines(h, PATH, exact + 1).len(), 1);
+    }
+
+    #[test]
+    fn a_path_one_column_too_wide_wraps() {
+        let h = head();
+        let exact = h.chars().count() + 1 + PATH.chars().count();
+        let l = mapped_lines(h.clone(), PATH, exact - 1);
+        assert_eq!(l.len(), 2);
+        // The head is untouched, so the columns stay aligned with the rows
+        // above and below.
+        assert_eq!(text(&l[0]), h);
+        // The whole path survives on the continuation line.
+        assert!(text(&l[1]).ends_with(PATH), "{}", text(&l[1]));
+        assert!(text(&l[1]).starts_with(WRAP_INDENT));
+    }
+
+    /// A terminal narrow enough that even the continuation line cannot hold the
+    /// path must not wrap a second time; it truncates instead.
+    #[test]
+    fn a_very_narrow_pane_truncates_rather_than_wrapping_twice() {
+        let l = mapped_lines(head(), PATH, 30);
+        assert_eq!(l.len(), 2);
+        let cont = text(&l[1]);
+        assert!(cont.chars().count() <= 30, "{} chars", cont.chars().count());
+        assert!(cont.ends_with('\u{2026}'), "{cont}");
+    }
+
+    /// Degenerate width must not panic or produce a negative-width slice.
+    #[test]
+    fn an_absurdly_narrow_pane_is_survivable() {
+        for w in [0usize, 1, 5, 8] {
+            let l = mapped_lines(head(), PATH, w);
+            assert_eq!(l.len(), 2);
+        }
     }
 }
 

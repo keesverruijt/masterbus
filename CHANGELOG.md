@@ -73,7 +73,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metadata. Copying skips fields the target device does not have, so a cluster
   master's extra fields are not forced onto a plain member, and it keeps an
   instance the user already chose. Entries for devices that are off the bus are
-  preserved. (#12)
+  preserved. A path too long for the row wraps onto a continuation line rather
+  than being cut off, since the path is the whole point of the mode. (#12)
 - **A library target for `masterbus-tools`.** The crate was binaries only,
   which left `masterbus-signalk` and `masterbus-tui` unable to share code. Two
   modules to start: `signalk` (the SI unit each Signal K path leaf carries) and
