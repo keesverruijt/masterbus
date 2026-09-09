@@ -14,14 +14,17 @@
 #                `listen` address for this service. Auto-created on first run
 #                with detected defaults; review and edit — see
 #                `masterbus::FileConfig` for the format.
-#   mapping.ini  per-device publish toggles; the service auto-creates and
-#                updates it as devices are discovered. Edit the true/false
-#                flags while the service is stopped, then restart.
+#   mapping.json which MasterBus field publishes to which Signal K path,
+#                keyed on device serial and field id. Seeded from built-in
+#                heuristics on the first run that finds no file; curate it
+#                while the service is stopped, then restart.
 #
-# Upgrading from a release that used /etc/default/masterbus-signalk/: move
-# mapping.ini into /etc/default/masterbus/, copy any LISTEN= you set in that
-# directory's `config` file into config.ini's `listen` key, and delete the old
-# directory. Nothing reads it any more.
+# Upgrading from a release that used /etc/default/masterbus-signalk/: copy any
+# LISTEN= you set in that directory's `config` file into config.ini's `listen`
+# key, then delete the directory. Its mapping.ini is not carried over — the
+# format changed from group toggles to explicit per-field Signal K paths, and
+# the first run writes a fresh mapping.json seeded from the same heuristics the
+# old build used.
 #
 # Then add a Signal K data connection of type "Signal K" over TCP pointing at
 # this host on the listen port (default 3009).
@@ -36,9 +39,8 @@ Wants=network-online.target
 Type=exec
 SyslogIdentifier=masterbus-signalk
 
-# The listen address comes from config.ini's `listen` key (default
-# 0.0.0.0:3009), so this unit needs no environment file of its own.
-Environment=MAPPING=/etc/default/masterbus/mapping.ini
+# The listen address and the mapping file both come from
+# /etc/default/masterbus/, so this unit needs no environment of its own.
 ExecStart=/usr/local/bin/masterbus-signalk
 
 Restart=on-failure
@@ -55,7 +57,7 @@ StateDirectory=masterbus
 # written by the first run. Paths are relative to /etc.
 ConfigurationDirectory=default/masterbus
 
-# Hardening. The service auto-rewrites mapping.ini in /etc, which a DynamicUser
+# Hardening. The service writes mapping.json in /etc on first run, which a DynamicUser
 # sandbox can't own, so it runs as root but is tightly confined: the only
 # writable paths are the config dir and the state dir, the only capability is
 # CAP_NET_RAW (for SocketCAN), and the syscall/address-family surface is limited.
