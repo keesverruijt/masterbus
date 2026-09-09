@@ -112,6 +112,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **The mapping editor records the instance a path actually uses.** Curated
+  paths are typed by hand and often do not contain the instance proposed for
+  the device: an `INT Nav Chg` gets mapped onto
+  `electrical.chargers.nav-battery` because that is what it charges. `instance`
+  is what "apply to this article" substitutes, so leaving it stale made that
+  copy substitute nothing and hand two devices the same Signal K node. The
+  instance is now taken from the committed path, and a copy that would
+  substitute nothing is skipped rather than written. Found in real use. (#12)
 - **The seed no longer maps two fields of one device onto the same Signal K
   path.** Found by deploying onto a live 14-device bus: a battery reports the
   same six measurements once for its cluster and once for itself, so the seed

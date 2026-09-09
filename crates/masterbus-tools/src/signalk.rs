@@ -52,6 +52,19 @@ pub fn node_of(path: &str) -> Option<String> {
     Some(seg[..depth].join("."))
 }
 
+/// The instance segment of a path: the last segment of its node.
+///
+/// Used to keep a device's recorded instance honest. A curated path is typed by
+/// hand, so it often does not contain the instance that was proposed for the
+/// device: someone maps an `INT Nav Chg` onto `electrical.chargers.nav-battery`
+/// because that is what the thing charges. Recording `nav-chg` as the instance
+/// would then be a lie, and the mapping editor's "apply to this article" copies
+/// by substituting the instance segment — so it would substitute nothing and
+/// give two devices the same node.
+pub fn instance_of(path: &str) -> Option<String> {
+    node_of(path)?.rsplit('.').next().map(str::to_string)
+}
+
 /// Encode a device value as the JSON a Signal K delta carries.
 ///
 /// `conv` is the unit conversion derived from the field's unit and the target
@@ -151,6 +164,24 @@ mod tests {
             options: vec![],
         };
         assert!(encode(&bare, Conversion::IDENTITY, false).is_none());
+    }
+
+    #[test]
+    fn the_instance_is_the_nodes_last_segment() {
+        assert_eq!(
+            instance_of("electrical.chargers.nav-battery.voltage").as_deref(),
+            Some("nav-battery")
+        );
+        assert_eq!(
+            instance_of("electrical.inverters.mass-sine.enabled").as_deref(),
+            Some("mass-sine")
+        );
+        assert_eq!(
+            instance_of("propulsion.port.revolutions").as_deref(),
+            Some("port")
+        );
+        // A branch with no per-device node has no instance to report.
+        assert_eq!(instance_of("environment.outside.temperature"), None);
     }
 
     #[test]

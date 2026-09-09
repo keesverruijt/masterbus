@@ -1240,8 +1240,16 @@ impl App {
             entry.firmware = i.firmware.clone();
             entry.name = i.name.clone();
         }
-        if entry.instance.is_empty() {
-            entry.instance = instance;
+        // Record the instance the path actually uses, not the one proposed for
+        // the device. People rename freely here — an `INT Nav Chg` gets mapped
+        // onto `electrical.chargers.nav-battery` because that is what it
+        // charges — and `instance` is what "apply to this article" substitutes.
+        // Left stale, that copy would substitute nothing and hand two devices
+        // the same Signal K node.
+        match signalk::instance_of(&path) {
+            Some(used) => entry.instance = used,
+            None if entry.instance.is_empty() => entry.instance = instance,
+            None => {}
         }
         entry.fields.insert(
             field_key(ed.field),
@@ -1415,10 +1423,18 @@ fn copy_to_targets(
         for (key, fm) in &src.fields {
             match parse_field_key(key) {
                 Some(id) if t.have.contains(&id) => {
+                    let path = retarget(&fm.path, &src.instance, &target_instance);
+                    // Nothing was substituted, so this target would publish to
+                    // the source's own node. Two devices writing one path is
+                    // never what "apply to this article" meant.
+                    if path == fm.path {
+                        skipped += 1;
+                        continue;
+                    }
                     entry.fields.insert(
                         key.to_string(),
                         FieldMapping {
-                            path: retarget(&fm.path, &src.instance, &target_instance),
+                            path,
                             invert: fm.invert,
                         },
                     );
@@ -1548,6 +1564,58 @@ mod mapping_tests {
         assert_eq!(
             d.fields[&field_key(0x001)].path,
             "electrical.batteries.port-bank.voltage"
+        );
+    }
+
+    /// From real use on a live boat: an `INT Nav Chg` was mapped by hand onto
+    /// `electrical.chargers.nav-battery`, because that is what it charges. The
+    /// device's proposed instance was `nav-chg`, which appears nowhere in that
+    /// path. Copying to a sibling would substitute nothing and hand both
+    /// devices the same Signal K node.
+    #[test]
+    fn a_copy_that_would_substitute_nothing_is_skipped() {
+        let mut map = Mapping::new();
+        let mut src = DeviceMapping {
+            article: "77030450".into(),
+            instance: "nav-chg".into(),
+            ..Default::default()
+        };
+        src.fields.insert(
+            field_key(0x028),
+            FieldMapping {
+                path: "electrical.chargers.nav-battery.voltage".into(),
+                invert: false,
+            },
+        );
+        let t = target("X922S0096", "INT 24V DC/DC", &[0x028]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src, &[t]);
+        assert_eq!((copied, skipped), (0, 1));
+        assert!(map.devices["X922S0096"].fields.is_empty());
+    }
+
+    /// With the instance recorded from the path itself, the same copy works.
+    #[test]
+    fn a_copy_substitutes_the_instance_the_path_actually_uses() {
+        let mut map = Mapping::new();
+        let mut src = DeviceMapping {
+            article: "77030450".into(),
+            // What commit_map now records: the segment the path really uses.
+            instance: "nav-battery".into(),
+            ..Default::default()
+        };
+        src.fields.insert(
+            field_key(0x028),
+            FieldMapping {
+                path: "electrical.chargers.nav-battery.voltage".into(),
+                invert: false,
+            },
+        );
+        let t = target("X922S0096", "INT 24V DC/DC", &[0x028]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src, &[t]);
+        assert_eq!((copied, skipped), (1, 0));
+        assert_eq!(
+            map.devices["X922S0096"].fields[&field_key(0x028)].path,
+            "electrical.chargers.24v-dc-dc.voltage"
         );
     }
 
