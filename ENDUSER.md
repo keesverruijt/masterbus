@@ -99,6 +99,17 @@ bank, call it that. Pick names from the
 where one fits (`electrical.batteries`, `electrical.chargers`,
 `electrical.inverters`, `electrical.alternators`, `electrical.solar`).
 
+A path whose units make no sense for it is refused with an explanation
+rather than saved. An unfamiliar name is accepted, with a note that it
+will publish without unit information.
+
+What you are editing is `mapping.json`, next to `config.ini` (see the
+**Configuration** table in the [README](README.md) for where that is on
+your platform). You never have to open it, but it is plain text if you
+want to, and the
+[tools README](crates/masterbus-tools/README.md#what-gets-published-mappingjson)
+describes the format. Back it up once you have it the way you want it.
+
 ### Why it isn't automatic
 
 The first time `masterbus-signalk` runs with no mapping it guesses one

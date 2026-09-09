@@ -113,16 +113,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - **`CONTRIBUTING.md` sent readers through a toolchain they did not need.**
-  Its section 1 said you build from source "when you want to change
-  something: typically add a device class", then sections 3 and 4 installed
-  Rust — and only afterwards did the guide reveal that fixing your own devices
-  needs no code at all. The mapping editor now comes before the toolchain,
-  section 1 splits the two jobs so a reader can stop after section 3, and the
-  AI section leads with `suggestions/catalog.json` (data) rather than
-  `masterbus-signalk.rs`, which no longer holds any mapping. Its verification
-  step also told readers to **delete `mapping.json`** to re-seed it — the file
-  they had just been taught to curate; it now seeds a scratch copy via
-  `MAPPING` on a spare port.
+  It opened by explaining that you build from source "typically to add a
+  device class", installed Rust, built the workspace, and only afterwards
+  revealed that fixing your own devices needs no code at all. Everything about
+  not compiling is gone from it: the file is now for improving the project,
+  and it points anyone who wants their own bus in Signal K at `ENDUSER.md` in
+  its second paragraph. Ten sections become seven. The AI section leads with
+  `suggestions/catalog.json` (data) rather than `masterbus-signalk.rs`, which
+  no longer holds any mapping, and its verification step no longer tells
+  readers to **delete `mapping.json`** to re-seed it — the file they had just
+  curated — but to seed a scratch copy via `MAPPING` on a spare port.
+  `ENDUSER.md` gained the detail that moved out of it, and the README now
+  routes non-developers to `ENDUSER.md` rather than to the contributor guide.
 - **`ENDUSER.md` said the sidecar publishes everything it finds, and told
   people to open an issue and wait.** Both were true before the curated
   mapping landed and neither is now: `masterbus-signalk` publishes exactly what

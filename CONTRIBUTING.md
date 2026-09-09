@@ -1,159 +1,35 @@
-# Contributing — even if you are not a developer
+# Contributing — you do not need to know Rust
 
-This file is for the boat owner whose MasterBus network has devices this
-project does not publish to Signal K yet. Maybe you wrote software twenty
-years ago, maybe never.
+This file is for people who want to improve the project itself. An AI
+assistant can do the typing; section 3 is about that.
 
-Read section 1 before anything else. It decides whether you need a
-toolchain at all, and for most people the answer is no.
+**If you just want your own MasterBus devices in Signal K, you are in the
+wrong file.** That needs no build, no Rust and nothing from here: download
+a release, run `masterbus-tui --mapping`, and map your devices. See
+[ENDUSER.md](ENDUSER.md), with [HARDWARE.md](HARDWARE.md) for connecting
+to the bus. You do not have to change this project's code and you do not
+have to wait for anyone.
+
+What is worth contributing is everything *around* that. The core library
+discovers every device on the bus generically, so there is no per-model
+code to add for a device to appear in the TUI. What reaches Signal K is a
+per-installation file, `mapping.json`, which its owner curates. The part
+this project ships, and the part you can improve, is the **guesses** that
+file is seeded from on a first run: a bundled table of known models keyed
+on article number, and a weaker fallback matching device-class prefixes
+against field names. Teaching those is section 4, and it is the most
+useful thing most people can do here.
+
+The other job is the library itself — a field that decodes wrong, a menu
+that never finishes discovering, a protocol gap. Section 6 covers
+capturing what that needs.
 
 If you *are* a developer: the short version is `make precommit` before you
-open a PR, and the rest of this file will still tell you where things live.
+open a PR, and section 7 tells you where things live.
 
-## 1. First: do you even need to build anything?
+## 1. Install git and the Rust toolchain
 
-There are two different jobs here and they need very different amounts of
-effort. Work out which one you are doing.
-
-**Getting your own devices into Signal K.** No build, no Rust, no
-toolchain. Download the release binaries from
-<https://github.com/keesverruijt/masterbus/releases> — Linux (x86_64,
-armv7, aarch64, the last two covering every Raspberry Pi), macOS (Intel
-and Apple Silicon), Windows — and use the mapping editor. That is section
-3, and for most people it is the whole story. [ENDUSER.md](ENDUSER.md)
-covers the same ground from scratch, and [HARDWARE.md](HARDWARE.md)
-explains how to connect to the bus.
-
-**Improving what everyone else gets out of the box.** The program ships
-with guesses about common models, so a fresh install is not silent. If you
-have a model it guesses badly, or not at all, you can teach it — and *that*
-needs the toolchain in sections 4 and 5. It is optional, it helps the next
-owner rather than you, and it is genuinely the smaller job of the two once
-you have done section 3.
-
-The rarer case is a device that misbehaves in the TUI itself, which is a
-protocol problem rather than a mapping one. Section 9 says what to capture.
-
-## 2. What "not supported" usually means
-
-This is the single most important thing to understand before you start,
-because it decides how much work you are in for.
-
-The core library discovers **every** device on the bus generically. It
-does not have a list of known models. If a device announces itself, the
-TUI (`masterbus-tui`) lists it and lets you browse all its menus and live
-values, whatever it is. There is no per-model code to add for that.
-
-What the **Signal K sidecar** (`masterbus-signalk`) publishes is decided
-by a file, not by code: `mapping.json`, beside `config.ini`. It says which
-field of which device publishes to which Signal K path, keyed on the
-device's serial number and the field's id. Anything not listed there is
-not published.
-
-So "my MSU and CHG don't show up in Signal K" means "nothing in your
-mapping file points at them yet", and the fix is on your own boat, in
-your own file. You do not need to change this project's code, and you do
-not have to wait for anyone.
-
-On the first run with no mapping file, the sidecar seeds one, so common
-devices arrive already mapped. It looks first in a bundled table of known
-models, keyed on the article number the firmware reports, and falls back
-to matching the first word of the device name (`BAT`, `CMR`, `MAC`, `APR`)
-against field names. Both are *guesses*, and the second is the weaker one:
-real bus surveys show field names vary between models of the same class
-and get renamed by installers. A guess that misses simply leaves the field
-out of the seed for you to add.
-
-The other, rarer case is a device that misbehaves in the TUI itself (a
-field with a nonsense value, a menu that never finishes discovering). That
-is a protocol issue and section 9 tells you how to capture what the
-maintainer needs.
-
-## 3. Map your own bus
-
-This needs no Rust, no build, and nothing else from this guide. If all you
-want is your own devices in Signal K, do this and stop.
-
-Every device already appears in the TUI, because discovery is generic.
-What reaches Signal K is a separate list you control, one entry per field,
-in `mapping.json`. A device missing from that list publishes nothing,
-however healthy it looks in the TUI.
-
-### The editor
-
-You do not have to write JSON. Stop the service, then:
-
-```sh
-masterbus-tui --mapping
-```
-
-The device list shows how many of each device's fields publish, so an
-unmapped device stands out. Open one, go to the Monitoring tab, and press
-`+` on a field. The prompt arrives pre-filled with a suggestion where the
-built-in heuristics have one, and shows the unit conversion the path
-implies, which is the moment to check that °C is about to become kelvin.
-`-` unmaps. `a` copies the whole device's mapping to every other device
-with the same article, which is what makes ten identical batteries a
-one-minute job. `w` writes the file.
-
-A path whose units cannot be reconciled is refused with an explanation.
-An unfamiliar leaf is accepted, with a note that it will publish without
-unit metadata.
-
-### The same thing by hand
-
-The file sits beside `config.ini` (`/etc/default/masterbus/` on a Linux
-system install; see the **Configuration** table in the README for the
-other platforms).
-
-```json
-{
-  "version": 1,
-  "devices": {
-    "1937R08110": {
-      "article": "40021006",
-      "firmware": "7.9",
-      "name": "CHG 24V Ch.U4-1",
-      "instance": "24v-ch-u4-1",
-      "fields": {
-        "0x00E": { "path": "electrical.chargers.24v-ch-u4-1.voltage" },
-        "0x00F": { "path": "electrical.chargers.24v-ch-u4-1.current" },
-        "0x011": { "path": "electrical.chargers.24v-ch-u4-1.temperature" }
-      }
-    }
-  }
-}
-```
-
-Everything you need is in the TUI: the serial on the device's Summary
-tab, and the field id in the left column of every Monitoring row.
-`masterbus-dump` gives you the same thing as one file.
-
-Three things to know:
-
-- **Presence is the toggle.** A field you do not list is not published.
-- **You never write a scale factor.** The conversion to SI follows from
-  the field's unit and the unit the path's last segment implies, so `°C`
-  into a `temperature` leaf becomes kelvin by itself. A pair that cannot
-  be reconciled is reported at startup and skipped, so a mistake tells
-  you rather than publishing a wrong number.
-- **The path is yours.** A non-standard leaf or a different category is
-  honoured, and the device's `name` metadata follows it there. You will
-  get a warning that an unknown leaf carries no unit metadata.
-
-Pick paths from the [Signal K specification](https://signalk.org/specification/1.7.0/doc/vesselsBranch.html)
-where a standard one exists (`electrical.batteries`, `electrical.chargers`,
-`electrical.inverters`, `electrical.alternators`, `electrical.solar`).
-Where Signal K has no standard leaf, nest it under the device node with a
-descriptive camelCase name, the way the `APR` seed does with
-`.battery.voltage` and `.engine.revolutions`.
-
-## 4. Install git and the Rust toolchain
-
-*Only if you are doing the second job from section 1.* Section 3 needs
-none of this.
-
-You need two things: **git**, to fetch the code and send changes back,
+Everything from here on needs a toolchain. You need two things: **git**, to fetch the code and send changes back,
 and the Rust toolchain. Rust installs with one tool, `rustup`, which
 manages the compiler (`rustc`), the build tool and package manager
 (`cargo`), and updates. Everything below is a one-time setup.
@@ -216,7 +92,7 @@ because WSL cannot see the USB HID device.
 The project needs Rust 1.85 or later (`rust-version` in `Cargo.toml`).
 `rustup update` brings you to the current stable release.
 
-## 5. Get the code and build it
+## 2. Get the code and build it
 
 ```sh
 git clone https://github.com/keesverruijt/masterbus.git
@@ -249,7 +125,7 @@ The cheat sheet:
 If `make` is not installed, the Makefile header lists the `cargo`
 commands each target expands to.
 
-## 6. Let an AI do the typing
+## 3. Let an AI do the typing
 
 The maintainer wrote most of this project with Claude Code, and teaching
 the shipped guesses is exactly the kind of bounded, well-specified task an
@@ -258,7 +134,8 @@ Codex, Cursor, Copilot's agent mode, Aider. Install one, open it in the
 cloned `masterbus` directory, and talk to it.
 
 Note what the job is now. You are not asking it to write the mapping for
-your boat — you did that yourself in section 3, in a text UI, in minutes.
+your boat — you did that yourself in the editor, in minutes, per
+[ENDUSER.md](ENDUSER.md).
 You are asking it to fold what you learned into the data this project
 ships, so the next owner of that model does not have to repeat it.
 
@@ -306,7 +183,8 @@ consistent, say so and point it at `seed.rs` instead, asking for tests in
 the style of the ones already there.
 
 Then **check the result yourself**, which needs no Rust. Do not delete
-your `mapping.json` to do it — that is the file you built in section 3.
+your `mapping.json` to do it — that is the file you curated for your own
+boat.
 Point the program at a scratch copy instead, so a fresh one gets seeded
 somewhere harmless:
 
@@ -326,7 +204,7 @@ look.
 Ask the AI to explain any change you do not understand before you send
 it in. You are the one signing the pull request.
 
-## 7. Teaching the shipped guesses
+## 4. Teaching the shipped guesses
 
 Optional, and only worth doing for a model several boats will have.
 Suggestions come in two tiers and you want the right one.
@@ -383,7 +261,7 @@ Either way, remember what a suggestion is for: it is a starting point a human th
 never the last word. Suggesting nothing is always better than suggesting
 something wrong.
 
-## 8. Sending it back
+## 5. Sending it back
 
 You need a free GitHub account.
 
@@ -410,14 +288,14 @@ command-line tool can even open the PR. Small PRs, one model at a time, are
 easier to review than one PR for five.
 
 Not up for a PR at all? Open an issue and attach the `mybus.json` from
-section 6. It carries your mapping alongside the bus, so it is enough for
+section 3. It carries your mapping alongside the bus, so it is enough for
 someone else to turn your work into a bundled suggestion without your
 hardware. It contains your devices' names, serial numbers and current
 readings — nothing secret, but if you would rather not publish serial
 numbers, edit them out first, or use `--device <address>` to dump only
 the one device.
 
-## 9. When the device itself misbehaves
+## 6. When the device itself misbehaves
 
 If a device is missing from the TUI, a value looks like garbage, or
 discovery of a menu never completes, the fix is in the core library and
@@ -436,7 +314,7 @@ protocol notes in [docs/PROTOCOL.md](docs/PROTOCOL.md) were reverse
 engineered from. Nothing in it is secret beyond your devices' serial
 numbers.
 
-## 10. Where things live
+## 7. Where things live
 
 | Path | What |
 |------|------|

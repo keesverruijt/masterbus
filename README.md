@@ -14,9 +14,11 @@ A Cargo workspace:
 | [`masterbus-ffi`](crates/masterbus-ffi) | C ABI `cdylib` (single-threaded), header generated with cbindgen, plus C demos (not published to crates.io) |
 
 The wire protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
-Not a developer but want to add support for your devices? Start with
-[`CONTRIBUTING.md`](CONTRIBUTING.md) — toolchain setup, using an AI assistant,
-and what "unsupported device" actually means here.
+Want your own devices in Signal K? No build needed — see
+[`ENDUSER.md`](ENDUSER.md), which walks through connecting to the bus and
+mapping your devices with `masterbus-tui --mapping`. To improve what the
+project ships for everyone, [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the
+toolchain and using an AI assistant to do the typing.
 
 ## Background
 
