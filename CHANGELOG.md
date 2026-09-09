@@ -111,6 +111,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **The seed no longer maps two fields of one device onto the same Signal K
+  path.** Found by deploying onto a live 14-device bus: a battery reports the
+  same six measurements once for its cluster and once for itself, so the seed
+  produced twelve entries writing six paths, coalescing to whichever arrived
+  last. An alternator does the same for battery voltage across its Battery and
+  Shunt groups, which the old code documented as harmless but which is visible
+  and fixable now that mappings are per field. The lowest field id wins; the
+  rest are left out for a human to add deliberately. (#12)
 - **Device property strings are trimmed.** At least one shipping charger
   reports its article number with a trailing space (`"44010250 "`), which
   silently defeats every lookup keyed on it — the bundled string catalog, and

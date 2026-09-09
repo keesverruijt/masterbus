@@ -174,8 +174,18 @@ fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
             instance: d.instance.clone(),
             ..Default::default()
         };
-        for (id, fname, unit) in &d.fields {
-            if let Some((s, _tier)) = seed::suggest_best(
+        // Two fields of one device that seed to the same path would just
+        // coalesce to whichever arrives last, which is a mapping file that
+        // silently disagrees with itself. Real devices do this: a battery
+        // reports the same six measurements once for its cluster and once for
+        // itself, and an alternator reports battery voltage in both its Battery
+        // and Shunt groups. The first field id wins and the rest are left out
+        // for a human to add deliberately if they want them.
+        let mut taken: HashMap<String, FieldId> = HashMap::new();
+        let mut ordered: Vec<_> = d.fields.iter().collect();
+        ordered.sort_by_key(|(id, _, _)| *id);
+        for (id, fname, unit) in ordered {
+            let Some((s, _tier)) = seed::suggest_best(
                 &d.article,
                 &d.firmware,
                 &class,
@@ -183,15 +193,27 @@ fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
                 *id,
                 fname,
                 unit,
-            ) {
-                dm.fields.insert(
+            ) else {
+                continue;
+            };
+            if let Some(first) = taken.get(s.path.as_str()) {
+                log::debug!(
+                    "{}: {} would publish to {}, already taken by {}; skipped",
+                    d.name,
                     field_key(*id),
-                    FieldMapping {
-                        path: s.path,
-                        invert: s.invert,
-                    },
+                    s.path,
+                    field_key(*first)
                 );
+                continue;
             }
+            taken.insert(s.path.clone(), *id);
+            dm.fields.insert(
+                field_key(*id),
+                FieldMapping {
+                    path: s.path,
+                    invert: s.invert,
+                },
+            );
         }
         if !dm.fields.is_empty() {
             m.devices.insert(d.serial.clone(), dm);
@@ -603,6 +625,57 @@ mod tests {
         );
         // A relay has no Signal K home, so it is simply absent.
         assert!(!d.fields.contains_key(&field_key(0x022)));
+    }
+
+    /// Found by deploying onto a live boat: a battery reports the same six
+    /// measurements once for its cluster and once for itself, so the seed
+    /// produced two fields writing the same Signal K path. They would coalesce
+    /// to whichever arrived last, giving a file that silently disagrees with
+    /// itself. The lowest field id wins; the rest are left for a human to add
+    /// deliberately.
+    #[test]
+    fn a_device_never_seeds_two_fields_onto_one_path() {
+        let d = dev(
+            "MLI-CLUSTER",
+            "BAT Main Batt",
+            &[
+                // Cluster group.
+                (0x000, "State of charge", "%"),
+                (0x001, "Battery", "V"),
+                (0x005, "Battery", "\u{b0}C"),
+                // The device's own battery group: same measurements again.
+                (0x088, "State of charge", "%"),
+                (0x08B, "Battery", "V"),
+                (0x08D, "Battery", "\u{b0}C"),
+            ],
+        );
+        let m = seed_mapping(&[d]);
+        let f = &m.devices["MLI-CLUSTER"].fields;
+        let paths: Vec<&str> = f.values().map(|v| v.path.as_str()).collect();
+        let unique: HashSet<&str> = paths.iter().copied().collect();
+        assert_eq!(paths.len(), unique.len(), "duplicate paths: {paths:?}");
+        // The lower id of each pair survives.
+        assert!(f.contains_key(&field_key(0x001)));
+        assert!(!f.contains_key(&field_key(0x08B)));
+    }
+
+    /// The alternator case, which the old code documented as harmless: battery
+    /// voltage appears in both the Battery and Shunt groups.
+    #[test]
+    fn the_alternators_repeated_battery_reading_is_seeded_once() {
+        let mut d = dev(
+            "APR-1",
+            "APR Alternator",
+            &[
+                (0x006, "Battery voltage", "V"),
+                (0x014, "Battery voltage", "V"),
+            ],
+        );
+        d.article = "45512000".into();
+        let m = seed_mapping(&[d]);
+        let f = &m.devices["APR-1"].fields;
+        assert_eq!(f.len(), 1);
+        assert!(f.contains_key(&field_key(0x006)));
     }
 
     #[test]
