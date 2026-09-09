@@ -7,6 +7,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **`masterbus-signalk` publishes a curated mapping, not a built-in table.**
+  `map_field` decided both *what* a field meant and *where* it went, by
+  matching the device-class prefix and the field's name. A 28-device survey
+  (#12) showed that cannot work: field names are installer-editable, two
+  charger articles both advertise as `CHG` with unrelated contents under
+  identically-named groups, and even factory names differ between models, so
+  the supported `BAT` class was silently dropping voltage, current and
+  temperature on one battery family. Publishing is now driven by
+  `mapping.json` beside `config.ini`, keyed on device **serial number** and
+  **field id** — what the firmware fixes rather than what a human typed.
+  Presence is the toggle; there are no menu/group flags and so no precedence
+  rules. Unit conversion is **derived** from the field's unit and the target
+  leaf's unit rather than stored, so a mapping never carries a scale factor
+  someone could get wrong; a pair that cannot be reconciled is reported at
+  startup and skipped instead of published as a wrong number. `invert` is the
+  one transform no unit can express. On the first run with no file, a mapping
+  is seeded from the old per-class heuristics (now
+  `masterbus_tools::seed`, with no authority over anything) and written out,
+  so an existing install keeps working and has something to edit. The old
+  `mapping.ini` is not migrated; its group toggles have no equivalent.
+- **Per-installation Signal K paths.** Closes #3: every path in the mapping is
+  an override, including onto a different category. The device's `name` and
+  `manufacturer` metadata follow it, because the Signal K node is now derived
+  from the paths a device actually publishes to rather than from a per-class
+  table. A leaf this build knows no unit for is still published, with a
+  warning that it carries no unit metadata.
 - **One configuration directory per host.** `/etc/default/masterbus-signalk/`
   is gone; everything lives beside `config.ini` in `/etc/default/masterbus/`
   (and the OS-native per-user equivalent elsewhere). `config.ini` gained a

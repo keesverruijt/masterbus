@@ -33,18 +33,29 @@ does not have a list of known models. If a device announces itself, the
 TUI (`masterbus-tui`) lists it and lets you browse all its menus and live
 values, whatever it is. There is no per-model code to add for that.
 
-What *is* per-model is the **Signal K sidecar** (`masterbus-signalk`). It
-takes the first word of each device's name — the class code the firmware
-prepends, such as `BAT`, `CMR`, `MAC`, `APR`, `MSH`, `MCU`, `CHG`, `SCM` —
-and looks it up in one function, `map_field`, to decide which Signal K
-path each monitoring field lands on and how to convert it to SI units.
-A class that is not in that function is silently skipped: the device is
-discovered, it shows up in `mapping.ini`, but nothing is published for it.
+What the **Signal K sidecar** (`masterbus-signalk`) publishes is decided
+by a file, not by code: `mapping.json`, beside `config.ini`. It says which
+field of which device publishes to which Signal K path, keyed on the
+device's serial number and the field's id. Anything not listed there is
+not published.
 
-So "my MSU and CHG don't show up in Signal K" almost always means "nobody
-has written the ten-to-forty lines that map that class's fields yet". That
-is the contribution this guide walks you through. It is a table, not an
-algorithm.
+So "my MSU and CHG don't show up in Signal K" means "nothing in your
+mapping file points at them yet", and the fix is on your own boat, in
+your own file. You do not need to change this project's code, and you do
+not have to wait for anyone.
+
+On the first run with no mapping file, the sidecar seeds one from
+built-in per-class name heuristics, so common devices arrive already
+mapped. Those heuristics are a *guess*: they match on the first word of
+the device name (`BAT`, `CMR`, `MAC`, `APR`) and on field names, and real
+bus surveys show both of those vary between models and get renamed by
+installers. A guess that misses simply leaves a field out of the seed for
+you to add.
+
+That gives two different contributions, and it is worth knowing which one
+you are making. Editing your own `mapping.json` fixes your boat today.
+Improving the seed heuristics (section 6) makes the next person's file
+start closer to right. The second is optional and strictly a bonus.
 
 The other, rarer case is a device that misbehaves in the TUI itself (a
 field with a nonsense value, a menu that never finishes discovering). That
@@ -180,8 +191,8 @@ the part that matters most.
 
 An example prompt that has everything it needs:
 
-> Read CONTRIBUTING.md and crates/masterbus-tools/src/bin/masterbus-signalk.rs.
-> Add Signal K support for the Mastervolt `MSH` device class (a battery
+> Read CONTRIBUTING.md and crates/masterbus-tools/src/seed.rs.
+> Add seed suggestions for the Mastervolt `MSH` device class (a battery
 > shunt / monitor). The TUI shows these monitoring fields:
 >
 > group "Battery": "Battery" V (13.2), "Battery" A (-4.5),
@@ -190,59 +201,99 @@ An example prompt that has everything it needs:
 >
 > group "Shunt": "Consumed" Ah (-32)
 >
-> Map them onto `electrical.batteries.<id>` like the existing `BAT`
+> Map them onto `electrical.batteries.<instance>` like the existing `BAT`
 > class does. Add tests in the same style as the existing ones, then run
 > `make precommit` and fix anything it reports.
 
-Then **check the result yourself**, which needs no Rust: build, run
-`masterbus-signalk`, and look at the stream with `nc localhost 3009`
-(or a Signal K server). Do the values match what the TUI shows, in SI
-units? Volts stay volts, but temperatures must be Kelvin, percentages
-ratios 0..1, rpm becomes Hz. If a value is wrong, tell the AI what you
-saw and what you expected. If it claims the tests pass, run `make
-precommit` yourself and look.
+Then **check the result yourself**, which needs no Rust: delete your
+`mapping.json` so it is seeded afresh, run `masterbus-signalk`, and look
+at the stream with `nc localhost 3009` (or a Signal K server). Do the
+values match what the TUI shows, in SI units? Volts stay volts, but
+temperatures must be Kelvin, percentages ratios 0..1, rpm becomes Hz. If
+a value is wrong, tell the AI what you saw and what you expected. If it
+claims the tests pass, run `make precommit` yourself and look.
 
 Ask the AI to explain any change you do not understand before you send
 it in. You are the one signing the pull request.
 
-## 6. Anatomy of a device-class addition
+## 6. Two ways to fix an unmapped device
 
-So you can follow what the AI does (or do it by hand), here is what a
-class needs. Everything is in
-`crates/masterbus-tools/src/bin/masterbus-signalk.rs`.
+### The one that fixes your boat: edit `mapping.json`
 
-1. **`sk_bases`** — the Signal K node(s) a class publishes under, used
-   for the static `name` / `manufacturer` metadata. One line:
-   `"MSH" => vec![format!("electrical.batteries.{id}")],`
+The file sits beside `config.ini` (`/etc/default/masterbus/` on a Linux
+system install; see the **Configuration** table in the README for the
+other platforms). Stop the service before editing it.
 
-2. **`map_field`** — a `match` arm per class. Inside, a `match` on
-   `(name, unit)` pairs — the *exact* strings the device reports — that
-   returns a Signal K path and the converted value. Copy the arm of the
-   most similar existing class (`BAT` for anything battery-like, `MAC`
-   or `CMR` for chargers and inverters, `APR` for alternators) and edit
-   the names. Fields you leave out are simply not published; that is
-   fine for a first version.
+```json
+{
+  "version": 1,
+  "devices": {
+    "1937R08110": {
+      "article": "40021006",
+      "firmware": "7.9",
+      "name": "CHG 24V Ch.U4-1",
+      "instance": "24v-ch-u4-1",
+      "fields": {
+        "0x00E": { "path": "electrical.chargers.24v-ch-u4-1.voltage" },
+        "0x00F": { "path": "electrical.chargers.24v-ch-u4-1.current" },
+        "0x011": { "path": "electrical.chargers.24v-ch-u4-1.temperature" }
+      }
+    }
+  }
+}
+```
 
-3. **`sk_units`** — only if you introduce a new leaf name (the last
-   path segment). Existing leaves such as `voltage`, `current`,
-   `temperature`, `stateOfCharge` already carry units.
+Everything you need is in the TUI, on the device's Monitoring tab: the
+serial on the Summary tab, and the field id in the left column of every
+row. `masterbus-dump` gives you the same thing as one file.
 
-4. **Tests** at the bottom of the file, in the `#[cfg(test)]` module.
-   The existing ones show the style: call `map_field` with a class, a
-   name, a unit and a value, assert the path and the converted number.
+Three things to know:
 
-5. A line in [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]`.
+- **Presence is the toggle.** A field you do not list is not published.
+- **You never write a scale factor.** The conversion to SI follows from
+  the field's unit and the unit the path's last segment implies, so `°C`
+  into a `temperature` leaf becomes kelvin by itself. A pair that cannot
+  be reconciled is reported at startup and skipped, so a mistake tells
+  you rather than publishing a wrong number.
+- **The path is yours.** A non-standard leaf or a different category is
+  honoured, and the device's `name` metadata follows it there. You will
+  get a warning that an unknown leaf carries no unit metadata.
 
-Pick Signal K paths from the [Signal K specification](https://signalk.org/specification/1.7.0/doc/vesselsBranch.html)
+Pick paths from the [Signal K specification](https://signalk.org/specification/1.7.0/doc/vesselsBranch.html)
 where a standard one exists (`electrical.batteries`, `electrical.chargers`,
 `electrical.inverters`, `electrical.alternators`, `electrical.solar`).
-When Signal K has no standard leaf for a field, nest it under the device
-node with a descriptive camelCase name, the way `APR` does with
+Where Signal K has no standard leaf, nest it under the device node with a
+descriptive camelCase name, the way the `APR` seed does with
 `.battery.voltage` and `.engine.revolutions`.
 
-Which fields to map: values a dashboard would want — voltages, currents,
-power, state of charge, temperatures, charger state, on/off. Skip
-configuration knobs; the sidecar only publishes the Monitoring menu.
+### The one that helps everyone: improve the seed
+
+Optional, and only worth doing for a class several boats will have. It is
+one file, `crates/masterbus-tools/src/seed.rs`.
+
+1. **`suggest`** — a `match` arm per class. Inside, a `match` on
+   `(name, unit)` pairs, the *exact* strings the device reports, each
+   returning a Signal K path. Copy the arm of the most similar existing
+   class (`BAT` for anything battery-like, `MAC` or `CMR` for chargers
+   and inverters, `APR` for alternators) and edit the names. A class
+   whose devices are named inconsistently across models can list both
+   spellings, as `BAT` does for `Battery` and `Voltage`.
+
+2. **`signalk::leaf_unit`** in `src/signalk.rs` — only if you introduce a
+   new leaf name. Existing leaves such as `voltage`, `current`,
+   `temperature` and `stateOfCharge` already carry units. If your leaf is
+   a new physical quantity, `units::conversion` may need a row too.
+
+3. **Tests** at the bottom of `seed.rs`. The existing ones show the
+   style. One of them checks that *every* path the table proposes has a
+   derivable conversion; a new suggestion that fails it is pointing at a
+   leaf whose unit nothing can reach.
+
+4. A line in [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]`.
+
+Remember what a seed is for: it is a starting point a human then edits,
+never the last word. Suggesting nothing is always better than suggesting
+something wrong.
 
 ## 7. Sending it back
 
@@ -304,7 +355,10 @@ numbers.
 | `crates/masterbus/src/runtime/discovery.rs` | how a device's menus, groups and fields are enumerated |
 | `crates/masterbus/src/strings/catalog.json` | bundled string tables that make discovery fast for known firmware images |
 | `crates/masterbus-tools/src/bin/masterbus-tui/` | the terminal UI |
-| `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar, including the per-class mapping |
+| `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar |
+| `crates/masterbus-tools/src/mapping.rs` | the `mapping.json` format |
+| `crates/masterbus-tools/src/seed.rs` | per-class path suggestions used to seed a new mapping |
+| `crates/masterbus-tools/src/units.rs` | device-unit → SI conversion, derived from the unit pair |
 | `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
 | `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |
 | `crates/masterbus-tools/etc/` | the systemd unit |

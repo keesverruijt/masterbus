@@ -61,8 +61,10 @@ quits.
 [Signal K](https://signalk.org) sidecar: subscribes to the monitoring
 values of every device and serves Signal K deltas as newline-delimited
 JSON over TCP (default `0.0.0.0:3009`), with values converted to SI
-units. The instance id is the device's name, lowercased and stripped of
-its leading class word (e.g. `BAT Main Batt 4` → `main-batt-4`).
+units. Which field lands where is a curated file, not a built-in table;
+see below. When that file is seeded, the instance id proposed for a
+device is its name lowercased and stripped of its leading class word
+(e.g. `BAT Main Batt 4` → `main-batt-4`).
 
     masterbus-signalk [listen-addr]
     # e.g.: masterbus-signalk                # config.ini's `listen`, else 0.0.0.0:3009
@@ -74,29 +76,54 @@ Sample delta:
 {"updates":[{"$source":"masterbus","timestamp":"2026-05-25T18:00:00.000Z","values":[{"path":"electrical.batteries.main-batt-4.voltage","value":26.6}]}]}
 ```
 
-### Filtering with `mapping.ini`
+### What gets published: `mapping.json`
 
-The mapping file lives beside `config.ini` (the systemd unit points
-`MAPPING` at `/etc/default/masterbus/mapping.ini`). Output is gated
-per device/group. As devices are discovered the file is auto-populated
-and rewritten; **edit the `true`/`false` flags while the service is
-stopped**, then restart.
+The sidecar publishes exactly what the mapping file says, and nothing
+else. It lives beside `config.ini`; `MAPPING` overrides the location.
 
-Keys are `<instance>.<menu>[.<group>] = true|false`. A group-level line
-overrides the menu-level line. New entries default **off**, except a
-battery's `cluster` group, which defaults **on** — so out of the box
-you get the battery cluster and nothing else:
+Entries are keyed on the device's **serial number** and the **field id**,
+because those are what the firmware fixes. Device, group and field
+*names* are installer-editable — a charger's `Output 1` is routinely
+renamed `Eng.batt` — and even factory names differ between models of the
+same class, so nothing here matches on a name.
 
-```ini
-# main-batt — groups: battery, cluster
-main-batt.monitoring = false
-main-batt.monitoring.cluster = true
-
-# combimaster — groups: ac-in, ac-out, dc-in-out, general
-combimaster.monitoring = false
+```json
+{
+  "version": 1,
+  "devices": {
+    "R516V1070": {
+      "article": "26024000",
+      "firmware": "2.65",
+      "name": "MSU Inverter",
+      "instance": "inverter",
+      "fields": {
+        "0x006": { "path": "electrical.inverters.inverter.dc.voltage" },
+        "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true }
+      }
+    }
+  }
+}
 ```
 
-Without `MAPPING`, every mapped field is published.
+Presence is the toggle: a field that is not listed is not published.
+Field ids are the same three-digit hex the TUI shows next to every row.
+
+There are no scale factors, on purpose. The conversion to SI follows
+from the field's own unit and the unit the target path's leaf wants, so
+`°C` into a `temperature` leaf becomes kelvin without being told. A pair
+that cannot be reconciled is reported at startup and skipped rather than
+published as a wrong number. `invert` is the one transform no unit can
+express: a charger reporting `Standby` publishes to `enabled` negated.
+
+The path is yours. Point a field at a non-standard leaf or a different
+category and it is honoured; the device's `name` and `manufacturer`
+metadata follow it there. A leaf this build knows no unit for is still
+published, with a warning that it will carry no unit metadata.
+
+**First run.** With no mapping file, the service seeds one from built-in
+per-class name heuristics and writes it out, so an install keeps working
+and has something to edit. Curate it while the service is stopped, then
+restart.
 
 ### Run as a systemd service
 
@@ -113,19 +140,21 @@ sudo systemctl enable --now masterbus-signalk
 Nothing else needs creating by hand: systemd makes
 `/etc/default/masterbus` on the first start (`ConfigurationDirectory=`
 in the unit), the first run writes `config.ini` there with the
-auto-detected transport and master settings, and `mapping.ini` appears
+auto-detected transport and master settings, and `mapping.json` appears
 next to it once devices are discovered. Review `config.ini` after the
 first start; `journalctl -u masterbus-signalk` shows what was detected.
 
 That one directory holds everything: transport, master role,
 schema-cache directory and the `listen` address all live in
-`config.ini` (see the **Configuration** section above), so the unit
-needs no environment file of its own. The service keeps a persistent
+`config.ini` (see the **Configuration** section above), with
+`mapping.json` beside it, so the unit needs no environment of its own. The service keeps a persistent
 schema cache in `/var/lib/masterbus` and restarts on failure.
 
 Upgrading from a release that used `/etc/default/masterbus-signalk/`:
-move `mapping.ini` into `/etc/default/masterbus/`, copy any `LISTEN=`
-you set into `config.ini`'s `listen` key, and delete the old directory.
+copy any `LISTEN=` you set into `config.ini`'s `listen` key, then delete
+the directory. Its `mapping.ini` is not carried over — the format
+changed from group toggles to explicit per-field paths — and the first
+run seeds a fresh `mapping.json`.
 
 The binary lives in `/usr/local/bin` rather than `/usr/local/sbin` on
 purpose: it is the same executable an unprivileged user runs from a

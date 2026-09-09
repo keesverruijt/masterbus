@@ -1,7 +1,7 @@
 //! Signal K sidecar for Mastervolt MasterBus.
 //!
-//! Subscribes to the monitoring values of every device on the bus and serves
-//! **Signal K deltas** as newline-delimited JSON over **TCP**. It listens on
+//! Subscribes to the fields a curated mapping names and serves **Signal K
+//! deltas** as newline-delimited JSON over **TCP**. It listens on
 //! `0.0.0.0:3009` by default; a Signal K server connects to it as a client
 //! (data connection type: Signal K, over TCP).
 //!
@@ -14,55 +14,68 @@
 //! `masterbus::FileConfig`); the file is created on first run. A listen
 //! address given on the command line overrides the file.
 //!
-//! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
-//! in [`map_field`]; it currently covers batteries, the CombiMaster, the MAC
-//! DC-DC charger, and the APR alternator regulator, and is easy to extend per
-//! device class.
+//! # What gets published
 //!
-//! # Which fields are published
+//! Exactly what `mapping.json` says, and nothing else. The file sits beside
+//! `config.ini`; `MAPPING` overrides the location. It is keyed on device
+//! **serial number** and **field id**, because those are what the firmware
+//! fixes — device, group and field *names* are installer-editable, and issue
+//! #12 has the bus that proves matching on them cannot work.
 //!
-//! If the `MAPPING` environment variable points at a file, it gates output per
-//! `<instance>.<menu>[.<group>]`. New devices are auto-added (menu-level = off;
-//! the battery `cluster` group = on) and the file is rewritten; edit the
-//! `true`/`false` flags while the service is stopped. Without `MAPPING`, every
-//! mapped field is published.
+//! The file is meant to be curated by a human in `masterbus-tui`. When it is
+//! missing or empty, this service seeds one from
+//! [`masterbus_tools::seed`]'s per-class name heuristics and writes it out, so
+//! an install that worked before keeps working and has something to edit.
+//!
+//! Unit conversion is **derived**, never stored: the factor follows from the
+//! field's unit and the unit the target Signal K leaf wants. A mapping entry
+//! whose units cannot be reconciled is reported at startup and skipped rather
+//! than published as a wrong number.
 //!
 //! Besides live values, each published device also emits static `name` and
-//! `manufacturer` (name + article/model) metadata once per client connection —
-//! see [`static_meta_batch`].
+//! `manufacturer` metadata once per client connection.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Value};
+use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu};
+use masterbus_tools::mapping::{DeviceMapping, FieldMapping, Mapping, field_key, parse_field_key};
+use masterbus_tools::seed;
+use masterbus_tools::signalk;
+use masterbus_tools::units::{self, Conversion};
 use serde_json::json;
 
 /// Default TCP listen address.
 const DEFAULT_LISTEN: &str = "0.0.0.0:3009";
 
-/// The menu the sidecar publishes (only monitoring carries mapped data today).
-const MENU: &str = "monitoring";
+/// The menu whose fields are offered for mapping. Configuration and Service
+/// carry settings rather than measurements.
+const MENU: Menu = Menu::Monitoring;
 
 /// How often each value is (re)emitted.
 const RATE: Duration = Duration::from_millis(1000);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let file_config = masterbus::FileConfig::load_or_create().ok();
     // Listen address: command line wins, then `listen` in the per-host config
     // file, then the built-in default. Having it in the config file is what
     // lets the systemd unit drop its own environment file, so this project
     // keeps exactly one configuration directory per host.
     let listen = std::env::args().nth(1).unwrap_or_else(|| {
-        masterbus::FileConfig::load_or_create()
-            .ok()
-            .and_then(|c| c.listen)
+        file_config
+            .as_ref()
+            .and_then(|c| c.listen.clone())
             .unwrap_or_else(|| DEFAULT_LISTEN.to_string())
     });
-    let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
+    // Mapping file: `MAPPING` overrides, otherwise it sits beside config.ini.
+    let mapping_path: Option<PathBuf> = std::env::var_os("MAPPING")
+        .map(PathBuf::from)
+        .or_else(|| file_config.as_ref().map(|c| c.mapping_path()));
 
     let bus = match MasterBus::auto(Config::default()) {
         Ok(b) => b,
@@ -71,114 +84,183 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(e) = run(bus, &listen, mapping.as_deref()) {
+    if let Err(e) = run(bus, &listen, mapping_path.as_deref()) {
         eprintln!("masterbus-signalk: {e}");
         std::process::exit(1);
     }
 }
 
-/// A discovered field and where it lives (used to build the mapping + metadata).
-struct FieldRec {
-    device: DeviceId,
-    index: FieldId,
-    class: String,
-    instance: String,
-    group: String,
-    name: String,
-    unit: String,
-}
-
-/// Per-device identity captured at startup, used to publish the static Signal K
-/// `name` / `manufacturer` metadata for each device's node(s).
-struct DeviceMetaRec {
-    device: DeviceId,
-    class: String,
-    instance: String,
-    /// Human-readable device name (as configured on the Mastervolt system).
-    name: String,
-    /// Article number → Signal K `manufacturer.model`.
+/// One discovered device, reduced to what mapping needs.
+struct DeviceRec {
+    /// Bus address.
+    id: DeviceId,
+    /// Serial number — the mapping file's key for this unit.
+    serial: String,
+    /// Article (model) number.
     article: String,
-}
-
-/// Per-field metadata captured at startup so updates can be mapped cheaply.
-struct FieldMeta {
-    class: String,
-    instance: String,
+    /// Installer-assigned name. Displayed and recorded, never matched on.
     name: String,
-    unit: String,
+    /// Firmware version.
+    firmware: String,
+    /// Proposed Signal K instance id, used when seeding.
+    instance: String,
+    /// Monitoring fields: id, name and unit as the device reports them.
+    fields: Vec<(FieldId, String, String)>,
 }
 
-/// Parse a mapping file (`<instance>.<menu>[.<group>] = true|false`, `#` comments).
-fn load_mapping(path: &Path) -> BTreeMap<String, bool> {
-    let mut map = BTreeMap::new();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return map;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let on = matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes" | "on"
-            );
-            map.insert(k.trim().to_string(), on);
-        }
-    }
-    map
+/// Everything needed to turn one field's updates into a Signal K value.
+struct Emit {
+    /// Target Signal K path.
+    path: String,
+    /// Conversion derived from the field's unit and the path's leaf unit.
+    conv: Conversion,
+    /// Publish the logical negation (booleans only).
+    invert: bool,
 }
 
-/// Rewrite the mapping file: a per-instance comment listing its groups, the
-/// menu-level toggle, then any group-level toggles present in `map`.
-fn save_mapping(
-    path: &Path,
-    map: &BTreeMap<String, bool>,
-    groups_by_instance: &BTreeMap<String, BTreeSet<String>>,
-) -> std::io::Result<()> {
-    let mut out = String::new();
-    out.push_str(
-        "# masterbus-signalk Signal K mapping.\n\
-         # Edit the true/false flags below while the service is STOPPED, then restart.\n\
-         # Keys: <instance>.<menu>[.<group>] = true|false  (a group line overrides the\n\
-         # menu line). New devices are added automatically: the menu-level toggle\n\
-         # defaults to false and the battery `cluster` group to true.\n\n",
-    );
-    for (instance, groups) in groups_by_instance {
-        let glist = groups.iter().cloned().collect::<Vec<_>>().join(", ");
-        out.push_str(&format!("# {instance} \u{2014} groups: {glist}\n"));
-        let mk = format!("{instance}.{MENU}");
-        out.push_str(&format!(
-            "{mk} = {}\n",
-            map.get(&mk).copied().unwrap_or(false)
-        ));
-        for g in groups {
-            let gk = format!("{instance}.{MENU}.{g}");
-            if let Some(&v) = map.get(&gk) {
-                out.push_str(&format!("{gk} = {v}\n"));
+/// Walk the bus and collect every device's monitoring fields.
+fn discover(bus: &MasterBus) -> Vec<DeviceRec> {
+    let mut devices = bus.devices_all();
+    devices.sort_by_key(|d| d.id());
+    let mut out = Vec::new();
+    for dev in &devices {
+        let identity = dev
+            .identity()
+            .unwrap_or_else(|_| masterbus::DeviceIdentity {
+                article: String::new(),
+                serial: String::new(),
+                revision: String::new(),
+                name: String::new(),
+                firmware: String::new(),
+            });
+        let mut fields = Vec::new();
+        for group in dev.tab(MENU).unwrap_or_default() {
+            for field in group.fields().unwrap_or_default() {
+                fields.push((
+                    field.index(),
+                    field.name().unwrap_or_default(),
+                    field.unit().unwrap_or_default(),
+                ));
             }
         }
-        out.push('\n');
+        out.push(DeviceRec {
+            id: dev.id(),
+            instance: seed::instance_of(&identity.name, dev.id()),
+            serial: identity.serial,
+            article: identity.article,
+            name: identity.name,
+            firmware: identity.firmware,
+            fields,
+        });
     }
-    // A fresh install has no /etc/default/masterbus-signalk yet; create the
-    // parent so a bare `MAPPING=/some/new/dir/mapping.ini` works too.
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, out)
+    out
 }
 
-/// Resolve whether a field's (instance, menu, group) is enabled: a group-level
-/// entry wins over a menu-level one; the default is on only for `cluster`.
-fn enabled(map: &BTreeMap<String, bool>, instance: &str, menu: &str, group: &str) -> bool {
-    if let Some(&v) = map.get(&format!("{instance}.{menu}.{group}")) {
-        return v;
+/// Build a mapping from the per-class name heuristics — the migration path for
+/// an install that has no curated file yet, and the starting point a human
+/// edits in the TUI.
+fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
+    let mut m = Mapping::new();
+    for d in devices {
+        if d.serial.is_empty() {
+            continue;
+        }
+        let class = seed::class_of(&d.name).to_string();
+        let mut dm = DeviceMapping {
+            article: d.article.clone(),
+            firmware: d.firmware.clone(),
+            name: d.name.clone(),
+            instance: d.instance.clone(),
+            ..Default::default()
+        };
+        for (id, fname, unit) in &d.fields {
+            if let Some(s) = seed::suggest(&class, &d.instance, fname, unit) {
+                dm.fields.insert(
+                    field_key(*id),
+                    FieldMapping {
+                        path: s.path,
+                        invert: s.invert,
+                    },
+                );
+            }
+        }
+        if !dm.fields.is_empty() {
+            m.devices.insert(d.serial.clone(), dm);
+        }
     }
-    if let Some(&v) = map.get(&format!("{instance}.{menu}")) {
-        return v;
+    m
+}
+
+/// Resolve the mapping against the live bus: which (device, field) pairs to
+/// subscribe to, and how to encode each one. Entries that cannot be honoured
+/// are reported once at startup rather than failing silently.
+fn resolve(devices: &[DeviceRec], mapping: &Mapping) -> HashMap<(DeviceId, FieldId), Emit> {
+    let mut emit = HashMap::new();
+    let by_serial: HashMap<&str, &DeviceRec> = devices
+        .iter()
+        .filter(|d| !d.serial.is_empty())
+        .map(|d| (d.serial.as_str(), d))
+        .collect();
+
+    for (serial, dm) in &mapping.devices {
+        let Some(dev) = by_serial.get(serial.as_str()) else {
+            eprintln!(
+                "masterbus-signalk: mapping lists serial {serial:?}, which is not on the bus"
+            );
+            continue;
+        };
+        if !dm.firmware.is_empty() && dm.firmware != dev.firmware {
+            eprintln!(
+                "masterbus-signalk: {} ({serial}) is running firmware {} but its mapping was \
+                 written for {}; field ids may have moved — check it in `masterbus-tui --mapping`",
+                dev.name, dev.firmware, dm.firmware
+            );
+        }
+        for (key, fm) in &dm.fields {
+            let Some(id) = parse_field_key(key) else {
+                eprintln!("masterbus-signalk: {serial}: {key:?} is not a field id");
+                continue;
+            };
+            let Some((_, _, unit)) = dev.fields.iter().find(|(i, _, _)| *i == id) else {
+                eprintln!(
+                    "masterbus-signalk: {} ({serial}) has no monitoring field {key}",
+                    dev.name
+                );
+                continue;
+            };
+            let leaf = signalk::leaf_unit(&fm.path);
+            let Some(conv) = units::conversion(unit, leaf) else {
+                eprintln!(
+                    "masterbus-signalk: {} ({serial}) {key}: cannot convert {:?} to what {} \
+                     expects; skipped",
+                    dev.name, unit, fm.path
+                );
+                continue;
+            };
+            // A field that reports a unit, published to a leaf this build does
+            // not know, is almost always a typo or a path from a newer Signal K
+            // vocabulary. It is still published — a custom path is a legitimate
+            // choice — but the value arrives without unit metadata, so a server
+            // cannot convert it. Say so once rather than leaving it to be
+            // discovered from a dashboard reading nonsense. (#3)
+            if leaf.is_none() && !units::normalize(unit).is_empty() {
+                eprintln!(
+                    "masterbus-signalk: {} ({serial}) {key}: {} is not a leaf this build knows a \
+                     unit for, so {:?} values publish without unit metadata",
+                    dev.name, fm.path, unit
+                );
+            }
+            emit.insert(
+                (dev.id, id),
+                Emit {
+                    path: fm.path.clone(),
+                    conv,
+                    invert: fm.invert,
+                },
+            );
+        }
     }
-    group == "cluster"
+    emit
 }
 
 fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Result<()> {
@@ -214,108 +296,41 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         });
     }
 
-    // Discover the monitoring menu of every device, recording each field with its
-    // (sanitized) group so the mapping file can gate it.
-    let devices = bus.devices_all();
-    let mut fields: Vec<FieldRec> = Vec::new();
-    let mut device_metas: Vec<DeviceMetaRec> = Vec::new();
-    let mut groups_by_instance: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for dev in &devices {
-        let name = dev.name().unwrap_or_default();
-        let class = name.split_whitespace().next().unwrap_or("").to_string();
-        // Instance id = the device name without its leading class word (already
-        // implied by the SK path category), lowercased/sanitized.
-        let label = name
-            .split_whitespace()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let instance = if !label.is_empty() {
-            sanitize(&label)
-        } else if !name.is_empty() {
-            sanitize(&name)
-        } else {
-            dev.id().to_string()
-        };
+    let devices = discover(&bus);
 
-        device_metas.push(DeviceMetaRec {
-            device: dev.id(),
-            class: class.clone(),
-            instance: instance.clone(),
-            name: name.clone(),
-            article: dev.article_number().unwrap_or_default(),
-        });
-
-        let Ok(groups) = dev.tab(Menu::Monitoring) else {
-            continue;
-        };
-        for group in groups {
-            let gname = sanitize(&group.name().unwrap_or_default());
-            groups_by_instance
-                .entry(instance.clone())
-                .or_default()
-                .insert(gname.clone());
-            for field in group.fields().unwrap_or_default() {
-                fields.push(FieldRec {
-                    device: dev.id(),
-                    index: field.index(),
-                    class: class.clone(),
-                    instance: instance.clone(),
-                    group: gname.clone(),
-                    name: field.name().unwrap_or_default(),
-                    unit: field.unit().unwrap_or_default(),
-                });
-            }
+    // Load the curated mapping; seed one on first run so there is something to
+    // publish and, more importantly, something to edit.
+    let mut mapping = match mapping_path {
+        Some(p) => Mapping::load(p).unwrap_or_else(|e| {
+            eprintln!("masterbus-signalk: {e}; starting from an empty mapping");
+            Mapping::new()
+        }),
+        None => Mapping::new(),
+    };
+    if mapping.is_empty() {
+        mapping = seed_mapping(&devices);
+        match mapping_path {
+            Some(p) if !mapping.is_empty() => match mapping.save(p) {
+                Ok(()) => eprintln!(
+                    "masterbus-signalk: no mapping yet — seeded {} field(s) from the built-in \
+                     heuristics and wrote {}. Review it with `masterbus-tui --mapping`.",
+                    mapping.len(),
+                    p.display()
+                ),
+                Err(e) => eprintln!("masterbus-signalk: could not write {}: {e}", p.display()),
+            },
+            _ => eprintln!(
+                "masterbus-signalk: no mapping file; using {} heuristic field(s) for this run",
+                mapping.len()
+            ),
         }
     }
 
-    // Load / auto-fill / rewrite the mapping file (if configured).
-    let mut mapping = mapping_path.map(load_mapping).unwrap_or_default();
-    if let Some(path) = mapping_path {
-        use std::collections::btree_map::Entry;
-        let mut added = false;
-        for (instance, groups) in &groups_by_instance {
-            // Menu-level toggle defaults off.
-            if let Entry::Vacant(e) = mapping.entry(format!("{instance}.{MENU}")) {
-                e.insert(false);
-                added = true;
-            }
-            // The battery cluster group defaults on.
-            if groups.contains("cluster") {
-                if let Entry::Vacant(e) = mapping.entry(format!("{instance}.{MENU}.cluster")) {
-                    e.insert(true);
-                    added = true;
-                }
-            }
-        }
-        if added || !path.exists() {
-            if let Err(e) = save_mapping(path, &mapping, &groups_by_instance) {
-                eprintln!("masterbus-signalk: could not write {}: {e}", path.display());
-            }
-        }
-    }
-
-    // Build the emit metadata + per-device subscription list for enabled fields.
-    let gated = mapping_path.is_some();
-    let mut meta: HashMap<(DeviceId, FieldId), FieldMeta> = HashMap::new();
+    let emit = resolve(&devices, &mapping);
     let mut per_device: HashMap<DeviceId, Vec<FieldId>> = HashMap::new();
-    for f in &fields {
-        let on = !gated || enabled(&mapping, &f.instance, MENU, &f.group);
-        if on {
-            meta.insert(
-                (f.device, f.index),
-                FieldMeta {
-                    class: f.class.clone(),
-                    instance: f.instance.clone(),
-                    name: f.name.clone(),
-                    unit: f.unit.clone(),
-                },
-            );
-            per_device.entry(f.device).or_default().push(f.index);
-        }
+    for (device, field) in emit.keys() {
+        per_device.entry(*device).or_default().push(*field);
     }
-    // Devices with at least one published field carry SK nodes; those are the
-    // ones whose static name/manufacturer metadata is worth emitting.
     let published: HashSet<DeviceId> = per_device.keys().copied().collect();
     let mut subs = Vec::new();
     for (device, indices) in per_device {
@@ -324,19 +339,19 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
 
     // Render the static metadata batch and hand it to the accept thread (for
     // future clients) and to any client already connected during discovery.
-    let sb = static_meta_batch(&device_metas, &published);
+    let sb = static_meta_batch(&devices, &emit, &published);
     *static_batch.lock().unwrap() = sb.clone();
     if !sb.is_empty() {
         let mut cs = clients.lock().unwrap();
         cs.retain_mut(|c| c.write_all(&sb).and_then(|()| c.flush()).is_ok());
     }
 
+    let total: usize = devices.iter().map(|d| d.fields.len()).sum();
     eprintln!(
-        "masterbus-signalk: streaming {} of {} fields from {} device(s){}",
-        meta.len(),
-        fields.len(),
+        "masterbus-signalk: streaming {} of {total} monitoring fields from {} of {} device(s)",
+        emit.len(),
+        published.len(),
         devices.len(),
-        if gated { " (mapping-gated)" } else { "" },
     );
 
     // Paths whose unit `meta` has already been published. Meta is emitted inline
@@ -356,18 +371,17 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             let mut latest: HashMap<String, serde_json::Value> = HashMap::new();
             while let Some(u) = sub.try_recv() {
                 if have_clients
-                    && let Some(m) = meta.get(&(u.device, u.field))
-                    && let Some((path, value)) =
-                        map_field(&m.class, &m.instance, &m.name, &m.unit, &u.value)
+                    && let Some(e) = emit.get(&(u.device, u.field))
+                    && let Some(value) = signalk::encode(&u.value, e.conv, e.invert)
                 {
-                    latest.insert(path, value);
+                    latest.insert(e.path.clone(), value);
                 }
             }
             if !latest.is_empty() {
                 // First sighting of a path → publish its unit metadata once.
                 for path in latest.keys() {
                     if !meta_sent.contains(path)
-                        && let Some(units) = sk_units(path)
+                        && let Some(units) = signalk::leaf_unit(path)
                     {
                         new_meta.push(json!({ "path": path, "value": { "units": units } }));
                         meta_sent.insert(path.clone());
@@ -413,48 +427,39 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     }
 }
 
-/// SI unit for a published Signal K path, keyed on its leaf segment. Signal K's
-/// own metadata already carries units for the standard leaves (`voltage`,
-/// `temperature`, …), but our non-standard nested leaves (`battery.temperature`,
-/// `field.current`, `input.voltage`, `voltageSense`, …) are unknown to the
-/// server, so it can't unit-convert them without a `meta` delta. We publish meta
-/// for *every* known leaf (re-affirming the standard ones is harmless); `None`
-/// leaves (`chargingMode`, `deviceMode`, `enabled`, `name`) carry no unit.
+/// The Signal K nodes a device publishes into, derived from the paths its
+/// mapping actually uses.
 ///
-/// The table itself lives in [`masterbus_tools::signalk`], because the mapping
-/// editor in `masterbus-tui` needs the same answers.
-fn sk_units(path: &str) -> Option<&'static str> {
-    masterbus_tools::signalk::leaf_unit(path)
+/// This replaces the old per-class table: with arbitrary curated paths there is
+/// no class to look up, and a device that publishes into two categories (a
+/// CombiMaster is both an inverter and a charger) names both by itself.
+fn nodes_of(device: DeviceId, emit: &HashMap<(DeviceId, FieldId), Emit>) -> Vec<String> {
+    let mut nodes: Vec<String> = emit
+        .iter()
+        .filter(|((d, _), _)| *d == device)
+        .filter_map(|(_, e)| signalk::node_of(&e.path))
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    nodes
 }
 
-/// Signal K base path(s) for a device class — the node(s) that carry this
-/// device's values, and thus its static `name` / `manufacturer` metadata. The
-/// CombiMaster spans two categories. Keep this in sync with [`map_field`]'s
-/// per-class path prefixes.
-fn sk_bases(class: &str, id: &str) -> Vec<String> {
-    match class {
-        "BAT" => vec![format!("electrical.batteries.{id}")],
-        "CMR" => vec![
-            format!("electrical.inverters.{id}"),
-            format!("electrical.chargers.{id}"),
-        ],
-        "MAC" => vec![format!("electrical.chargers.{id}")],
-        "APR" => vec![format!("electrical.alternators.{id}")],
-        _ => vec![],
-    }
-}
-
-/// Build the one-shot Signal K metadata batch: for every published device with a
-/// mapped category, its `name` and `manufacturer` (name + model). Values are
-/// static, so this is emitted once per client rather than on the poll loop.
-fn static_meta_batch(devs: &[DeviceMetaRec], published: &HashSet<DeviceId>) -> Vec<u8> {
+/// Build the one-shot Signal K metadata batch: for every published device, its
+/// `name` and `manufacturer` (name + model) on each node it publishes into.
+/// Values are static, so this is emitted once per client rather than on the
+/// poll loop.
+fn static_meta_batch(
+    devices: &[DeviceRec],
+    emit: &HashMap<(DeviceId, FieldId), Emit>,
+    published: &HashSet<DeviceId>,
+) -> Vec<u8> {
     let mut batch = Vec::new();
-    for d in devs {
-        if !published.contains(&d.device) {
+    for d in devices {
+        if !published.contains(&d.id) {
             continue;
         }
         let mut values = Vec::new();
-        for base in sk_bases(&d.class, &d.instance) {
+        for base in nodes_of(d.id, emit) {
             if !d.name.is_empty() {
                 values.push(json!({ "path": format!("{base}.name"), "value": d.name }));
             }
@@ -479,204 +484,6 @@ fn static_meta_batch(devs: &[DeviceMetaRec], published: &HashSet<DeviceId>) -> V
     batch
 }
 
-/// Map a (device-class, field) pair to a Signal K path and SI value.
-///
-/// Returns `None` for fields without a mapping (they are simply not emitted).
-/// Extend per device class; the matched names/units are exactly those the device
-/// reports for its monitoring fields.
-fn map_field(
-    class: &str,
-    id: &str,
-    name: &str,
-    unit: &str,
-    value: &Value,
-) -> Option<(String, serde_json::Value)> {
-    let celsius = match value {
-        Value::Float(x) if x.is_finite() => Some(*x as f64),
-        _ => None,
-    };
-    let float = celsius;
-    let boolean = match value {
-        Value::Boolean(b) => Some(*b),
-        _ => None,
-    };
-    let seconds = match value {
-        Value::Time(t) => Some(
-            t.days as f64 * 86400.0 + t.hour as f64 * 3600.0 + t.min as f64 * 60.0 + t.sec as f64,
-        ),
-        _ => None,
-    };
-    // Selected label of a list/enum field (e.g. the charge-state name), lowercased.
-    let list_label = value.label().map(|s| s.to_ascii_lowercase());
-    let num = |v: f64| serde_json::Value::from(v);
-    let text = |s: String| serde_json::Value::String(s);
-
-    match class {
-        // Battery monitors → electrical.batteries.<id>
-        "BAT" => {
-            let b = format!("electrical.batteries.{id}");
-            match (name, unit) {
-                ("State of charge", _) => {
-                    float.map(|v| (format!("{b}.capacity.stateOfCharge"), num(v / 100.0)))
-                }
-                ("Battery", "V") => float.map(|v| (format!("{b}.voltage"), num(v))),
-                ("Battery", "A") => float.map(|v| (format!("{b}.current"), num(v))),
-                ("Battery", "\u{b0}C") => {
-                    celsius.map(|c| (format!("{b}.temperature"), num(c + 273.15)))
-                }
-                ("Time remaining", _) => {
-                    seconds.map(|s| (format!("{b}.capacity.timeRemaining"), num(s)))
-                }
-                ("Cap. consumed", _) => {
-                    float.map(|ah| (format!("{b}.capacity.dischargeSinceFull"), num(ah * 3600.0)))
-                }
-                _ => None,
-            }
-        }
-        // CombiMaster (inverter/charger) → electrical.inverters/chargers.<id>
-        "CMR" => {
-            let inv = format!("electrical.inverters.{id}");
-            let chg = format!("electrical.chargers.{id}");
-            match (name, unit) {
-                ("Battery voltage", "V") => float.map(|v| (format!("{inv}.dc.voltage"), num(v))),
-                ("Battery current", "A") => float.map(|v| (format!("{inv}.dc.current"), num(v))),
-                ("Battery temp.", "\u{b0}C") => {
-                    celsius.map(|c| (format!("{inv}.dc.temperature"), num(c + 273.15)))
-                }
-                ("Output voltage", "V") => float.map(|v| (format!("{inv}.ac.voltage"), num(v))),
-                ("Output power", "W") => float.map(|v| (format!("{inv}.ac.power"), num(v))),
-                ("Output frequency", "Hz") => {
-                    float.map(|v| (format!("{inv}.ac.frequency"), num(v)))
-                }
-                ("Input voltage", "V") => float.map(|v| (format!("{chg}.acin.voltage"), num(v))),
-                ("Input current", "A") => float.map(|v| (format!("{chg}.acin.current"), num(v))),
-                ("Input frequency", "Hz") => {
-                    float.map(|v| (format!("{chg}.acin.frequency"), num(v)))
-                }
-                ("AC IN limit", "A") => float.map(|v| (format!("{chg}.acin.currentLimit"), num(v))),
-                ("Inverter", _) => {
-                    boolean.map(|b| (format!("{inv}.enabled"), serde_json::Value::Bool(b)))
-                }
-                ("Charger", _) => {
-                    boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(b)))
-                }
-                _ => None,
-            }
-        }
-        // MAC — DC-DC battery charger (e.g. "MAC Plus 12/24"): a DC source on the
-        // input steps up/down to charge the battery on the output. Canonical
-        // charger `voltage`/`current`/`temperature` describe the output (battery)
-        // side; the DC input side hangs off `.input.*`.
-        //
-        // Unlike the other classes, the MAC schema leaves the unit empty on some
-        // monitoring fields (observed on MAC Plus 12/24: output voltage, output
-        // current, input current, battery voltage sense), so a strict (name,
-        // unit) match drops them silently. Those arms accept the unit *or* the
-        // empty string. The rest keep the strict match on purpose: "Device" and
-        // "Battery" are generic names that only °C tells apart, and wildcarding
-        // them would publish any same-named float as a kelvin temperature.
-        "MAC" => {
-            let chg = format!("electrical.chargers.{id}");
-            match (name, unit.trim()) {
-                ("Output voltage", "V" | "") => float.map(|v| (format!("{chg}.voltage"), num(v))),
-                ("Output current", "A" | "") => float.map(|v| (format!("{chg}.current"), num(v))),
-                ("Input voltage", "V" | "") => {
-                    float.map(|v| (format!("{chg}.input.voltage"), num(v)))
-                }
-                ("Input current", "A" | "") => {
-                    float.map(|v| (format!("{chg}.input.current"), num(v)))
-                }
-                ("Bat. volt sense", "V" | "") => {
-                    float.map(|v| (format!("{chg}.voltageSense"), num(v)))
-                }
-                ("Device", "\u{b0}C") => {
-                    celsius.map(|c| (format!("{chg}.temperature"), num(c + 273.15)))
-                }
-                ("Battery", "\u{b0}C") => {
-                    celsius.map(|c| (format!("{chg}.battery.temperature"), num(c + 273.15)))
-                }
-                // "Device state" (Standby/Charging/Fault/…) → deviceMode: the
-                // device-level state, orthogonal to the charge stage below.
-                ("Device state", _) => list_label.map(|s| (format!("{chg}.deviceMode"), text(s))),
-                // "Charge state" (Bulk/Absorption/Float/…) → chargingMode.
-                ("Charge state", _) => list_label.map(|s| (format!("{chg}.chargingMode"), text(s))),
-                // "Standby" off = charger active.
-                ("Standby", _) => {
-                    boolean.map(|b| (format!("{chg}.enabled"), serde_json::Value::Bool(!b)))
-                }
-                _ => None,
-            }
-        }
-        // APR — Alpha Pro alternator regulator ("APR Alternator"): a
-        // mechanically-driven alternator plus an external shunt/battery monitor.
-        // Canonical alternator `voltage`/`temperature`/`revolutions` describe the
-        // alternator; the battery it charges (sensed both directly and via the
-        // shunt) hangs off `.battery.*`, the engine drive off `.engine.*`.
-        //
-        // Note: "Battery voltage"/"Battery temp." occur in both the Battery and
-        // Shunt groups (same name+unit, different field index); since `map_field`
-        // sees no group they share one path and coalesce to the last sample of
-        // the cycle — harmless, they read the same battery.
-        "APR" => {
-            let alt = format!("electrical.alternators.{id}");
-            match (name, unit) {
-                ("Alternator volt.", "V") => float.map(|v| (format!("{alt}.voltage"), num(v))),
-                ("Sense voltage", "V") => float.map(|v| (format!("{alt}.voltageSense"), num(v))),
-                ("Field current", "A") => float.map(|v| (format!("{alt}.field.current"), num(v))),
-                ("Alternator temp.", "\u{b0}C") => {
-                    celsius.map(|c| (format!("{alt}.temperature"), num(c + 273.15)))
-                }
-                // Shaft speeds → revolutions (Signal K wants Hz, i.e. rpm / 60).
-                ("Alternator shaft", "rpm") => {
-                    float.map(|r| (format!("{alt}.revolutions"), num(r / 60.0)))
-                }
-                ("Engine shaft", "rpm") => {
-                    float.map(|r| (format!("{alt}.engine.revolutions"), num(r / 60.0)))
-                }
-                // "Charger state" (Off/Bulk/Absorption/Float/…) → chargingMode.
-                ("Charger state", _) => {
-                    list_label.map(|s| (format!("{alt}.chargingMode"), text(s)))
-                }
-                // Battery being charged (direct sense + external shunt).
-                ("State of charge", "%") => {
-                    float.map(|v| (format!("{alt}.battery.stateOfCharge"), num(v / 100.0)))
-                }
-                ("Battery voltage", "V") => {
-                    float.map(|v| (format!("{alt}.battery.voltage"), num(v)))
-                }
-                ("Battery current", "A") => {
-                    float.map(|v| (format!("{alt}.battery.current"), num(v)))
-                }
-                ("Battery temp.", "\u{b0}C") => {
-                    celsius.map(|c| (format!("{alt}.battery.temperature"), num(c + 273.15)))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Lowercase and keep only Signal K path-segment-safe characters in an instance
-/// id (lowercase reads more idiomatically in Signal K paths).
-fn sanitize(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "0".into()
-    } else {
-        cleaned
-    }
-}
-
 /// Current UTC time as an ISO-8601 / RFC-3339 string (no date dependency).
 fn now_rfc3339() -> String {
     let d = SystemTime::now()
@@ -689,167 +496,215 @@ fn now_rfc3339() -> String {
     format!("{y:04}-{mo:02}-{day:02}T{h:02}:{m:02}:{s:02}.{millis:03}Z")
 }
 
-/// Days since 1970-01-01 → (year, month, day). Howard Hinnant's algorithm.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
+/// Days since the Unix epoch → (year, month, day). Howard Hinnant's
+/// `civil_from_days`, proleptic Gregorian.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if month <= 2 { y + 1 } else { y }, month, day)
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `map_field` for a float monitoring value.
-    fn f(class: &str, name: &str, unit: &str, v: f32) -> Option<(String, serde_json::Value)> {
-        map_field(class, "1", name, unit, &Value::Float(v))
+    fn dev(serial: &str, name: &str, fields: &[(FieldId, &str, &str)]) -> DeviceRec {
+        DeviceRec {
+            id: 0x100000 + serial.len() as u32,
+            serial: serial.into(),
+            article: "66026000".into(),
+            name: name.into(),
+            firmware: "2.14".into(),
+            instance: seed::instance_of(name, 0x100000),
+            fields: fields
+                .iter()
+                .map(|(i, n, u)| (*i, n.to_string(), u.to_string()))
+                .collect(),
+        }
     }
 
-    /// The path `map_field` produced, for assertions that only care about routing.
-    fn path(r: Option<(String, serde_json::Value)>) -> Option<String> {
-        r.map(|(p, _)| p)
+    /// The MLI Ultra field names that the old per-class table silently dropped.
+    fn mli() -> DeviceRec {
+        dev(
+            "MLI-1",
+            "BAT 24V Service",
+            &[
+                (0x000, "State of charge", "%"),
+                (0x001, "Voltage", "V"),
+                (0x002, "Current", "A"),
+                (0x005, "Temperature", "\u{b0}C"),
+                (0x022, "Relay close", ""),
+            ],
+        )
     }
 
-    /// The MAC schema reports an empty unit on several monitoring fields; they
-    /// must still map, onto the same paths as when the unit is present.
     #[test]
-    fn mac_maps_fields_with_a_missing_unit() {
-        for (name, unit) in [
-            ("Output voltage", "V"),
-            ("Output current", "A"),
-            ("Input current", "A"),
-            ("Bat. volt sense", "V"),
-        ] {
-            assert_eq!(
-                path(f("MAC", name, unit, 1.0)),
-                path(f("MAC", name, "", 1.0)),
-                "{name}"
+    fn seeding_covers_the_battery_names_the_old_table_missed() {
+        let m = seed_mapping(&[mli()]);
+        let d = &m.devices["MLI-1"];
+        assert_eq!(
+            d.fields[&field_key(0x001)].path,
+            "electrical.batteries.24v-service.voltage"
+        );
+        assert_eq!(
+            d.fields[&field_key(0x005)].path,
+            "electrical.batteries.24v-service.temperature"
+        );
+        // A relay has no Signal K home, so it is simply absent.
+        assert!(!d.fields.contains_key(&field_key(0x022)));
+    }
+
+    #[test]
+    fn seeding_records_identity_for_later_editing() {
+        let m = seed_mapping(&[mli()]);
+        let d = &m.devices["MLI-1"];
+        assert_eq!(d.article, "66026000");
+        assert_eq!(d.firmware, "2.14");
+        assert_eq!(d.name, "BAT 24V Service");
+        assert_eq!(d.instance, "24v-service");
+    }
+
+    #[test]
+    fn a_device_with_no_serial_cannot_be_keyed_and_is_skipped() {
+        let mut d = mli();
+        d.serial = String::new();
+        assert!(seed_mapping(&[d]).is_empty());
+    }
+
+    #[test]
+    fn resolve_derives_the_conversion_from_the_units() {
+        let devices = vec![mli()];
+        let m = seed_mapping(&devices);
+        let emit = resolve(&devices, &m);
+        let id = devices[0].id;
+        // Celsius into a kelvin leaf.
+        let t = &emit[&(id, 0x005)];
+        assert!((t.conv.apply(20.0) - 293.15).abs() < 1e-9);
+        // Percent into a ratio leaf.
+        let soc = &emit[&(id, 0x000)];
+        assert!((soc.conv.apply(87.0) - 0.87).abs() < 1e-9);
+        // Volts into a volts leaf.
+        assert!(emit[&(id, 0x001)].conv.is_identity());
+    }
+
+    #[test]
+    fn resolve_skips_entries_the_bus_cannot_honour() {
+        let devices = vec![mli()];
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        // A field this device does not have.
+        dm.fields.insert(
+            field_key(0x0FF),
+            FieldMapping {
+                path: "electrical.batteries.x.voltage".into(),
+                invert: false,
+            },
+        );
+        // A field whose unit cannot reach the target leaf.
+        dm.fields.insert(
+            field_key(0x002),
+            FieldMapping {
+                path: "electrical.batteries.x.temperature".into(),
+                invert: false,
+            },
+        );
+        m.devices.insert("MLI-1".into(), dm);
+        // An entire device that is not on the bus.
+        m.devices.insert("GHOST".into(), DeviceMapping::default());
+
+        let emit = resolve(&devices, &m);
+        assert!(emit.is_empty(), "nothing publishable should survive");
+    }
+
+    #[test]
+    fn nodes_come_from_the_paths_a_device_actually_uses() {
+        let devices = vec![mli()];
+        let m = seed_mapping(&devices);
+        let emit = resolve(&devices, &m);
+        assert_eq!(
+            nodes_of(devices[0].id, &emit),
+            vec!["electrical.batteries.24v-service".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_device_spanning_two_categories_names_both() {
+        let d = dev(
+            "CMR-1",
+            "CMR Combi",
+            &[
+                (0x001, "Battery voltage", "V"),
+                (0x002, "Input voltage", "V"),
+            ],
+        );
+        let devices = vec![d];
+        let emit = resolve(&devices, &seed_mapping(&devices));
+        assert_eq!(
+            nodes_of(devices[0].id, &emit),
+            vec![
+                "electrical.chargers.combi".to_string(),
+                "electrical.inverters.combi".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_published_leaf_carries_unit_metadata() {
+        let devices = vec![mli()];
+        let emit = resolve(&devices, &seed_mapping(&devices));
+        for e in emit.values() {
+            // Either the leaf has a unit, or it is a string/boolean leaf.
+            let unitless = matches!(
+                e.path.rsplit('.').next().unwrap_or(""),
+                "chargingMode" | "deviceMode" | "enabled" | "name"
             );
             assert!(
-                path(f("MAC", name, "", 1.0)).is_some(),
-                "{name} dropped with an empty unit"
+                signalk::leaf_unit(&e.path).is_some() || unitless,
+                "{} has neither unit metadata nor a known unitless leaf",
+                e.path
             );
         }
     }
 
-    /// The MAC output is the battery side, and lands on the canonical Signal K
-    /// charger leaves — not on nested `output.*` / `device.*` ones the server
-    /// has no metadata for.
+    /// Issue #3 asked for per-installation path overrides. In this design every
+    /// path *is* an override, so the thing left to guarantee is that pointing a
+    /// field somewhere unusual still works and still converts correctly.
     #[test]
-    fn mac_publishes_canonical_charger_paths() {
-        assert_eq!(
-            path(f("MAC", "Output voltage", "", 27.4)).as_deref(),
-            Some("electrical.chargers.1.voltage")
+    fn a_custom_path_is_honoured_not_second_guessed() {
+        let devices = vec![mli()];
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        // Move the battery out of its canonical category entirely.
+        dm.fields.insert(
+            field_key(0x005),
+            FieldMapping {
+                path: "electrical.converters.house.temperature".into(),
+                invert: false,
+            },
         );
+        m.devices.insert("MLI-1".into(), dm);
+        let emit = resolve(&devices, &m);
+        let e = &emit[&(devices[0].id, 0x005)];
+        assert_eq!(e.path, "electrical.converters.house.temperature");
+        // The conversion still follows from the leaf, not from the category.
+        assert!((e.conv.apply(20.0) - 293.15).abs() < 1e-9);
+        // And the identity metadata follows the device to its new home.
         assert_eq!(
-            path(f("MAC", "Output current", "", 42.0)).as_deref(),
-            Some("electrical.chargers.1.current")
-        );
-        assert_eq!(
-            path(f("MAC", "Device", "\u{b0}C", 20.0)).as_deref(),
-            Some("electrical.chargers.1.temperature")
+            nodes_of(devices[0].id, &emit),
+            vec!["electrical.converters.house".to_string()]
         );
     }
 
-    /// Relaxing the unit match must not leak to the temperature fields: "Device"
-    /// and "Battery" are generic names that only °C tells apart, so a same-named
-    /// field in another unit must not be published as a kelvin temperature.
     #[test]
-    fn mac_temperatures_still_require_degrees_celsius() {
-        assert_eq!(f("MAC", "Device", "", 20.0), None);
-        assert_eq!(f("MAC", "Battery", "V", 12.8), None);
-        assert_eq!(f("MAC", "Battery", "A", 3.0), None);
-    }
-
-    /// Celsius → kelvin on the way out.
-    #[test]
-    fn mac_temperature_is_converted_to_kelvin() {
-        let (_, v) = f("MAC", "Battery", "\u{b0}C", 25.0).unwrap();
-        assert_eq!(v.as_f64().unwrap(), 298.15);
-    }
-
-    /// "Standby" is the inverse of Signal K's `enabled`.
-    #[test]
-    fn mac_standby_inverts_into_enabled() {
-        let on = map_field("MAC", "1", "Standby", "", &Value::Boolean(false));
-        assert_eq!(
-            on,
-            Some((
-                "electrical.chargers.1.enabled".into(),
-                serde_json::Value::Bool(true)
-            ))
-        );
-        let off = map_field("MAC", "1", "Standby", "", &Value::Boolean(true));
-        assert_eq!(
-            off,
-            Some((
-                "electrical.chargers.1.enabled".into(),
-                serde_json::Value::Bool(false)
-            ))
-        );
-    }
-
-    /// Enum fields publish their lowercased label.
-    #[test]
-    fn mac_enum_states_publish_their_label() {
-        let list = |i: i32| Value::List {
-            index: i,
-            options: vec!["Off".into(), "Bulk".into()],
-        };
-        assert_eq!(
-            map_field("MAC", "1", "Charge state", "", &list(1)),
-            Some((
-                "electrical.chargers.1.chargingMode".into(),
-                serde_json::Value::String("bulk".into())
-            ))
-        );
-        assert_eq!(
-            path(map_field("MAC", "1", "Device state", "", &list(0))).as_deref(),
-            Some("electrical.chargers.1.deviceMode")
-        );
-    }
-
-    /// The other classes keep the strict (name, unit) match — BAT reports three
-    /// different quantities all named "Battery", told apart only by their unit.
-    #[test]
-    fn other_classes_still_disambiguate_on_unit() {
-        assert_eq!(
-            path(f("BAT", "Battery", "V", 12.8)).as_deref(),
-            Some("electrical.batteries.1.voltage")
-        );
-        assert_eq!(
-            path(f("BAT", "Battery", "A", -5.0)).as_deref(),
-            Some("electrical.batteries.1.current")
-        );
-        assert_eq!(
-            path(f("BAT", "Battery", "\u{b0}C", 20.0)).as_deref(),
-            Some("electrical.batteries.1.temperature")
-        );
-        assert_eq!(f("BAT", "Battery", "", 12.8), None);
-    }
-
-    /// Every leaf MAC publishes a number on must carry unit metadata, or Signal
-    /// K cannot unit-convert it.
-    #[test]
-    fn mac_numeric_leaves_have_unit_metadata() {
-        for (name, unit) in [
-            ("Output voltage", ""),
-            ("Output current", ""),
-            ("Input voltage", "V"),
-            ("Input current", ""),
-            ("Bat. volt sense", ""),
-            ("Device", "\u{b0}C"),
-            ("Battery", "\u{b0}C"),
-        ] {
-            let p = path(f("MAC", name, unit, 1.0)).unwrap();
-            assert!(sk_units(&p).is_some(), "{p} has no unit metadata");
-        }
+    fn civil_from_days_matches_known_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
     }
 }

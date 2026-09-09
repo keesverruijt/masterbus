@@ -142,9 +142,10 @@ field (booleans toggle, numbers / lists / text open a centred edit modal),
 
 `masterbus-signalk` is a long-running service that publishes MasterBus monitoring
 values as **Signal K deltas** (newline-delimited JSON) over TCP (default
-`0.0.0.0:3009`), with SI-unit conversion. A `mapping.ini` controls which
-devices/menus/groups are published; new devices are auto-added with sane defaults.
-Ships with a hardened systemd unit.
+`0.0.0.0:3009`), with SI-unit conversion. A curated `mapping.json` beside
+`config.ini` says which field publishes to which Signal K path, keyed on device
+serial and field id; it is seeded from built-in heuristics on first run. Ships
+with a hardened systemd unit.
 
 ```sh
 masterbus-signalk [listen-addr]
