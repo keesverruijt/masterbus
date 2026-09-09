@@ -5,11 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Terminal UI, Signal K sidecar, and CLI writer for Mastervolt MasterBus"
+description = "Command-line tools for Mastervolt MasterBus: terminal UI, Signal K sidecar, field writer, bus dump"
 readme = "README.md"
 keywords = ["mastervolt", "masterbus", "canbus", "marine"]
 categories = ["command-line-utilities", "hardware-support"]
 
+# Internal only: it exists so the binaries below can share the Signal K
+# mapping format, unit conversion and suggestion tables. Cargo cannot ship a
+# package's binaries without its library, so this is published, but it carries
+# no stability guarantee and is hidden from the rendered docs. The stable
+# surface of this project is the `masterbus` library and these tools' own
+# arguments and file formats.
 [lib]
 name = "masterbus_tools"
 path = "src/lib.rs"
