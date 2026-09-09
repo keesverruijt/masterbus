@@ -125,6 +125,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   curated — but to seed a scratch copy via `MAPPING` on a spare port.
   `ENDUSER.md` gained the detail that moved out of it, and the README now
   routes non-developers to `ENDUSER.md` rather than to the contributor guide.
+  What remains is rebalanced around the library rather than the mapping data:
+  a new **Working on the library** section says where a decode bug, a stalled
+  enumeration or a transport problem actually lives, points at
+  `docs/PROTOCOL.md` as part of the deliverable, and treats the frame trace as
+  something you read yourself rather than only attach to an issue. The map of
+  the codebase moves up ahead of both. Teaching the shipped guesses stays, as
+  one later section, described as a table of data rather than the main event.
 - **`ENDUSER.md` said the sidecar publishes everything it finds, and told
   people to open an issue and wait.** Both were true before the curated
   mapping landed and neither is now: `masterbus-signalk` publishes exactly what

@@ -1,7 +1,7 @@
 # Contributing — you do not need to know Rust
 
 This file is for people who want to improve the project itself. An AI
-assistant can do the typing; section 3 is about that.
+assistant can do the typing; section 5 is about that.
 
 **If you just want your own MasterBus devices in Signal K, you are in the
 wrong file.** That needs no build, no Rust and nothing from here: download
@@ -10,22 +10,14 @@ a release, run `masterbus-tui --mapping`, and map your devices. See
 to the bus. You do not have to change this project's code and you do not
 have to wait for anyone.
 
-What is worth contributing is everything *around* that. The core library
-discovers every device on the bus generically, so there is no per-model
-code to add for a device to appear in the TUI. What reaches Signal K is a
-per-installation file, `mapping.json`, which its owner curates. The part
-this project ships, and the part you can improve, is the **guesses** that
-file is seeded from on a first run: a bundled table of known models keyed
-on article number, and a weaker fallback matching device-class prefixes
-against field names. Teaching those is section 4, and it is the most
-useful thing most people can do here.
+What is left, once every installation curates its own mapping, is the
+software underneath: the transports, the protocol decoding, discovery, the
+terminal UI, the C ABI. That is section 4, and it is where the real work
+is. The bundled *guesses* a fresh mapping is seeded from are worth
+improving too, but they are a table of data rather than an engineering
+problem — section 6, and the smaller job.
 
-The other job is the library itself — a field that decodes wrong, a menu
-that never finishes discovering, a protocol gap. Section 6 covers
-capturing what that needs.
-
-If you *are* a developer: the short version is `make precommit` before you
-open a PR, and section 7 tells you where things live.
+Section 3 is a map of the codebase. Read it before either.
 
 ## 1. Install git and the Rust toolchain
 
@@ -125,48 +117,110 @@ The cheat sheet:
 If `make` is not installed, the Makefile header lists the `cargo`
 commands each target expands to.
 
-## 3. Let an AI do the typing
+## 3. Where things live
 
-The maintainer wrote most of this project with Claude Code, and teaching
-the shipped guesses is exactly the kind of bounded, well-specified task an
-AI assistant is good at. Any agentic coding tool works: Claude Code,
-Codex, Cursor, Copilot's agent mode, Aider. Install one, open it in the
-cloned `masterbus` directory, and talk to it.
+| Path | What |
+|------|------|
+| `crates/masterbus/` | the library: transports, protocol, discovery, value cache, the `MasterBus`/`Device`/`Group`/`Field` API |
+| `crates/masterbus/src/protocol/` | frame encoding and decoding |
+| `crates/masterbus/src/runtime/discovery.rs` | how a device's menus, groups and fields are enumerated |
+| `crates/masterbus/src/strings/catalog.json` | bundled string tables that make discovery fast for known firmware images |
+| `crates/masterbus-tools/src/bin/masterbus-tui/` | the terminal UI |
+| `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar |
+| `crates/masterbus-tools/src/mapping.rs` | the `mapping.json` format |
+| `crates/masterbus-tools/src/seed.rs` | per-class path suggestions used to seed a new mapping |
+| `crates/masterbus-tools/src/database.rs` | per-model path suggestions, keyed on article number |
+| `crates/masterbus-tools/src/suggestions/catalog.json` | the bundled per-model data |
+| `crates/masterbus-tools/src/units.rs` | device-unit → SI conversion, derived from the unit pair |
+| `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
+| `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |
+| `crates/masterbus-tools/etc/` | the systemd unit |
+| `crates/masterbus-ffi/` | C ABI wrapper and C demos |
+| `docs/PROTOCOL.md` | the wire protocol, as reverse engineered |
+## 4. Working on the library
 
-Note what the job is now. You are not asking it to write the mapping for
-your boat — you did that yourself in the editor, in minutes, per
-[ENDUSER.md](ENDUSER.md).
-You are asking it to fold what you learned into the data this project
-ships, so the next owner of that model does not have to repeat it.
+Most of what there is to build is in `crates/masterbus`. The tools on top
+are deliberately thin — the TUI browses whatever discovery found, and the
+sidecar publishes whatever a file names — so the interesting problems are
+underneath them.
+
+**A value that decodes wrong** is almost always in
+`src/protocol/decode.rs`, which turns a frame's bytes into a typed
+`Value`, paired with `encode.rs` on the write path. Both have unit tests
+beside them and neither needs hardware to work on: a failing case is a
+byte array and an expected value.
+
+**A device that never finishes enumerating**, or whose menus come back
+wrong, is `src/runtime/discovery.rs`. It walks group counts, then groups,
+then per-field metadata, with a schema cache on disk so the second run is
+fast. This is where most of the protocol's surprises live, and
+[docs/PROTOCOL.md](docs/PROTOCOL.md) records the ones already understood.
+
+**Bus plumbing** is `src/transport/` (SocketCAN and the USB link) and
+`src/runtime/` (the reader thread, the scheduler that paces requests, the
+value cache). `src/runtime/framelog.rs` is the candump-style trace.
+
+**The protocol document is part of the deliverable.** Anything you work
+out about the wire belongs in `docs/PROTOCOL.md` in the same PR. It was
+reverse engineered from traces and it is the reason the next person does
+not have to start over.
+
+If you want a defined task rather than a bug, the **TODO** list at the
+bottom of the [README](README.md) is honest about what is missing.
+
+### Getting a trace
+
+Whatever you are chasing, start by watching the wire:
+
+```sh
+RUST_LOG=masterbus=debug,masterbus::frame=trace \
+    ./target/release/masterbus-tui 2> trace.log
+```
+
+Reproduce the problem, quit, and read `trace.log`. The `masterbus::frame`
+target is every frame sent and received, in a candump-compatible format,
+with a tag saying whether it was a read, a write or a schema query.
+
+**If you would rather not chase it yourself**, that trace is exactly what
+someone else needs. Attach it to an issue with the device's article number
+and firmware version from the TUI's Summary tab. Nothing in it is secret
+beyond your devices' serial numbers.
+
+## 5. Let an AI do the typing
+
+The maintainer wrote most of this project with Claude Code, and it suits
+the work: bounded problems, a documented protocol, tests that do not need
+hardware. Any agentic coding tool works — Claude Code, Codex, Cursor,
+Copilot's agent mode, Aider. Install one, open it in the cloned
+`masterbus` directory, and talk to it.
 
 Three things make this go well:
 
-**Start with the data, not the code.** The most valuable contribution is
-usually an entry in `crates/masterbus-tools/src/suggestions/catalog.json`,
-which is a table of article number and field id to Signal K path. No Rust
-at all, and it is the tier that can tell two models apart when they share
-a class code. Only reach for `seed.rs` when a whole class genuinely names
-its fields the same way across models.
-
 **Give it the right context.** Point it at this file, at
-[README.md](README.md), and at the files it will edit
-(`crates/masterbus-tools/src/suggestions/catalog.json`, or
-`crates/masterbus-tools/src/seed.rs`). For anything touching the wire
-protocol, [docs/PROTOCOL.md](docs/PROTOCOL.md). These are written to be
-read by an AI as much as by a human.
+[README.md](README.md), and at the code it will change. For anything
+touching the wire, [docs/PROTOCOL.md](docs/PROTOCOL.md) is the reference
+and is written to be read by an AI as much as by a human. Section 3 says
+what lives where; paste the relevant row.
 
-**Give it the facts from your bus.** The AI cannot see your devices. You
-can. The quickest way is one command:
+**Give it evidence, not a description.** A frame trace for a protocol
+problem, a failing byte sequence for a decode bug, a `masterbus-dump` for
+anything about a specific device. "The voltage looks wrong" is not
+something an assistant can act on; forty lines of `trace.log` is.
+
+**Make it prove the change.** Every crate has tests beside the code and
+`make precommit` runs the lot, plus rustfmt, clippy and the doc build. Ask
+for a failing test first where that is possible. If it claims the tests
+pass, run `make precommit` yourself and look.
+
+The AI cannot see your bus. One command gives it everything about a
+device:
 
 ```sh
 ./target/release/masterbus-dump -o mybus.json
 ```
 
-That writes every device, group and field — id, name, unit, range, enum
-options — plus the live monitoring values, as JSON. Point the AI at the
-file. Failing that, open `masterbus-tui`, select the device, go to the
-**Monitoring** tab and screenshot it; the field id in the left column is
-the part that matters most.
+That is every device, group and field — id, name, unit, range, enum
+options — plus live values and your own mapping, as JSON.
 
 An example prompt that has everything it needs:
 
@@ -204,7 +258,7 @@ look.
 Ask the AI to explain any change you do not understand before you send
 it in. You are the one signing the pull request.
 
-## 4. Teaching the shipped guesses
+## 6. Teaching the shipped guesses
 
 Optional, and only worth doing for a model several boats will have.
 Suggestions come in two tiers and you want the right one.
@@ -261,7 +315,7 @@ Either way, remember what a suggestion is for: it is a starting point a human th
 never the last word. Suggesting nothing is always better than suggesting
 something wrong.
 
-## 5. Sending it back
+## 7. Sending it back
 
 You need a free GitHub account.
 
@@ -269,68 +323,30 @@ You need a free GitHub account.
 2. Point your clone at it (or clone the fork instead), and make a branch:
    ```sh
    git remote add fork git@github.com:<you>/masterbus.git
-   git checkout -b msh-signalk
+   git checkout -b decode-devicelist-index
    ```
 3. Make the change, run `make precommit` until it is green.
 4. Commit and push:
    ```sh
    git add -A
-   git commit -m "signalk: add MSH battery-shunt class"
-   git push fork msh-signalk
+   git commit -m "protocol: decode DeviceList from the f32 index"
+   git push fork decode-devicelist-index
    ```
 5. GitHub shows a banner offering to open a **pull request**. Do that. In
-   the description, say which device (article number and firmware
-   version from the TUI's Summary tab) you tested against and paste a
-   few lines of the resulting Signal K output.
+   the description, say what you tested against — the device's article
+   number and firmware version from the TUI's Summary tab if it is
+   hardware-specific — and paste the evidence: the trace line that
+   changed, the values before and after, or the Signal K output.
 
 Your AI assistant can do steps 2 through 4 for you if you ask; the `gh`
-command-line tool can even open the PR. Small PRs, one model at a time, are
-easier to review than one PR for five.
+command-line tool can even open the PR. Small PRs, one topic at a time,
+are easier to review than one PR for five.
 
 Not up for a PR at all? Open an issue and attach the `mybus.json` from
-section 3. It carries your mapping alongside the bus, so it is enough for
+section 5. It carries your mapping alongside the bus, so it is enough for
 someone else to turn your work into a bundled suggestion without your
 hardware. It contains your devices' names, serial numbers and current
 readings — nothing secret, but if you would rather not publish serial
 numbers, edit them out first, or use `--device <address>` to dump only
 the one device.
 
-## 6. When the device itself misbehaves
-
-If a device is missing from the TUI, a value looks like garbage, or
-discovery of a menu never completes, the fix is in the core library and
-needs a trace of the actual bus traffic. Capture it like this:
-
-```sh
-RUST_LOG=masterbus=debug,masterbus::frame=trace \
-    ./target/release/masterbus-tui 2> trace.log
-```
-
-Reproduce the problem (select the device, open the offending tab), quit,
-and attach `trace.log` to an issue together with the device's article
-number and firmware version. The `masterbus::frame` target is a
-candump-style dump of every frame sent and received, which is what the
-protocol notes in [docs/PROTOCOL.md](docs/PROTOCOL.md) were reverse
-engineered from. Nothing in it is secret beyond your devices' serial
-numbers.
-
-## 7. Where things live
-
-| Path | What |
-|------|------|
-| `crates/masterbus/` | the library: transports, protocol, discovery, value cache, the `MasterBus`/`Device`/`Group`/`Field` API |
-| `crates/masterbus/src/protocol/` | frame encoding and decoding |
-| `crates/masterbus/src/runtime/discovery.rs` | how a device's menus, groups and fields are enumerated |
-| `crates/masterbus/src/strings/catalog.json` | bundled string tables that make discovery fast for known firmware images |
-| `crates/masterbus-tools/src/bin/masterbus-tui/` | the terminal UI |
-| `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar |
-| `crates/masterbus-tools/src/mapping.rs` | the `mapping.json` format |
-| `crates/masterbus-tools/src/seed.rs` | per-class path suggestions used to seed a new mapping |
-| `crates/masterbus-tools/src/database.rs` | per-model path suggestions, keyed on article number |
-| `crates/masterbus-tools/src/suggestions/catalog.json` | the bundled per-model data |
-| `crates/masterbus-tools/src/units.rs` | device-unit → SI conversion, derived from the unit pair |
-| `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
-| `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |
-| `crates/masterbus-tools/etc/` | the systemd unit |
-| `crates/masterbus-ffi/` | C ABI wrapper and C demos |
-| `docs/PROTOCOL.md` | the wire protocol, as reverse engineered |
