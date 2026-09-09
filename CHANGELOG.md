@@ -112,26 +112,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
-- **`CONTRIBUTING.md` sent readers through a toolchain they did not need.**
-  It opened by explaining that you build from source "typically to add a
-  device class", installed Rust, built the workspace, and only afterwards
-  revealed that fixing your own devices needs no code at all. Everything about
-  not compiling is gone from it: the file is now for improving the project,
-  and it points anyone who wants their own bus in Signal K at `ENDUSER.md` in
-  its second paragraph. Ten sections become seven. The AI section leads with
-  `suggestions/catalog.json` (data) rather than `masterbus-signalk.rs`, which
-  no longer holds any mapping, and its verification step no longer tells
-  readers to **delete `mapping.json`** to re-seed it — the file they had just
-  curated — but to seed a scratch copy via `MAPPING` on a spare port.
-  `ENDUSER.md` gained the detail that moved out of it, and the README now
-  routes non-developers to `ENDUSER.md` rather than to the contributor guide.
-  What remains is rebalanced around the library rather than the mapping data:
-  a new **Working on the library** section says where a decode bug, a stalled
-  enumeration or a transport problem actually lives, points at
-  `docs/PROTOCOL.md` as part of the deliverable, and treats the frame trace as
-  something you read yourself rather than only attach to an issue. The map of
-  the codebase moves up ahead of both. Teaching the shipped guesses stays, as
-  one later section, described as a table of data rather than the main event.
+- **`CONTRIBUTING.md` was a guide to the wrong thing.** It opened by
+  explaining that you build from source "typically to add a device class",
+  installed Rust, built the workspace, and only afterwards revealed that
+  fixing your own devices needs no code at all — while the one section about
+  the library told you to capture a trace and let someone else fix it. It is
+  now four sections for people changing the project: toolchain, build, a map
+  of the codebase, and **Working on the library**, which says where a decode
+  bug, a stalled enumeration or a transport problem actually lives, treats
+  `docs/PROTOCOL.md` as part of the deliverable, and treats a frame trace as
+  something you read rather than only attach to an issue. Anyone who wants
+  their own bus in Signal K is sent to `ENDUSER.md` in the second paragraph.
+  `ENDUSER.md` gained the detail that moved out, and the README now routes
+  non-developers there rather than to the contributor guide.
 - **`ENDUSER.md` said the sidecar publishes everything it finds, and told
   people to open an issue and wait.** Both were true before the curated
   mapping landed and neither is now: `masterbus-signalk` publishes exactly what
