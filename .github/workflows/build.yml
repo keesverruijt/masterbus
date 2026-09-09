@@ -60,11 +60,16 @@ jobs:
           key: ${{ matrix.target }}
 
       # Lint and test once, on the native Linux target.
-      - name: Clippy & tests
+      - name: Clippy, tests & docs
         if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          # Intra-doc links rot silently when an item is renamed or moves
+          # between modules; nothing else in the build notices.
+          RUSTDOCFLAGS: -D warnings
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
+          cargo doc --workspace --no-deps
 
       - name: Build release (whole workspace)
         env:

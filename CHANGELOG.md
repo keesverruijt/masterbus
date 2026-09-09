@@ -112,6 +112,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **`ENDUSER.md` said the sidecar publishes everything it finds, and told
+  people to open an issue and wait.** Both were true before the curated
+  mapping landed and neither is now: `masterbus-signalk` publishes exactly what
+  `mapping.json` names, and the owner can fill that in themselves with
+  `masterbus-tui --mapping` in a couple of minutes. The guide now leads with
+  that step and says plainly that skipping it means no Signal K data,
+  explains why it cannot be automatic, and keeps the dump-and-report flow as
+  the way to help the *next* owner of a model rather than the way to help
+  yourself. The `masterbus` crate README's platform table also still listed
+  three tools.
+- **`cargo doc` failed with warnings denied.** Two intra-doc links had rotted
+  (`DeviceList` in the protocol module, `MasterBus::device_ids` in the TUI),
+  which nothing else in the build notices. Fixed, and `make precommit` and CI
+  now run `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` so they cannot
+  rot again.
 - **The mapping editor records the instance a path actually uses.** Curated
   paths are typed by hand and often do not contain the instance proposed for
   the device: an `INT Nav Chg` gets mapped onto

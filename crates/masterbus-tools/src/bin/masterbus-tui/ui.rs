@@ -647,7 +647,8 @@ fn command_label(index: Option<i32>, target: Option<u32>, app: &App) -> String {
 
 /// Resolve an event-target device reference to a name. The stored value is a
 /// 0-based index into the bus device list sorted by device address — the same
-/// canonical order [`MasterBus::device_ids`] returns (see FINDINGS) — so
+/// canonical order [`masterbus::MasterBus::devices_all`] returns (see FINDINGS)
+/// — so
 /// `devices[index]` is the target device id, and `names` maps it to a name.
 /// Falls back to the hex id (name not yet backfilled) or `[index]` (index out
 /// of range, e.g. a referenced device currently offline).

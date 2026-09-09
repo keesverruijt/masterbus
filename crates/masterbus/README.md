@@ -21,7 +21,7 @@ Two transports ship out of the box:
 | Crate / OS | Linux | macOS | Windows |
 |---|---|---|---|
 | `masterbus` library | ✅ SocketCAN **and** USB link | ✅ USB link | ✅ USB link |
-| `masterbus-tools` binaries (`-tui`, `-signalk`, `-set-field`) | ✅ | ✅ (USB link only) | ✅ (USB link only) |
+| `masterbus-tools` binaries (`-tui`, `-signalk`, `-set-field`, `-dump`) | ✅ | ✅ (USB link only) | ✅ (USB link only) |
 | `masterbus-ffi` C ABI | ✅ | ✅ | ✅ |
 
 SocketCAN is compiled in only when `target_os = "linux"`; the USB transport is

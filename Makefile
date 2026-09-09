@@ -11,7 +11,7 @@
 #   make test          - Run the workspace test suite
 #   make fmt           - `cargo fmt --all`
 #   make clippy        - Workspace clippy at `-D warnings` (what CI enforces)
-#   make precommit     - fmt-check + clippy + test — run this before pushing
+#   make precommit     - fmt-check + clippy + test + doc — run before pushing
 #   make tools         - Release build of just the command-line tools
 #   make release       - Bump version, tag, push (VERSION=X.Y.Z)
 #   make publish       - Publish masterbus + masterbus-tools to crates.io
@@ -24,7 +24,7 @@
 
 CARGO ?= cargo
 
-.PHONY: all build debug check test fmt fmt-check clippy precommit \
+.PHONY: all build debug check test fmt fmt-check clippy doc precommit \
         tools release publish-dry publish \
         clean help
 
@@ -65,13 +65,19 @@ fmt-check:
 clippy:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
-# Everything you'd want green before opening a PR — mirrors CI (rustfmt +
-# clippy + tests). Uses fmt-check (read-only); run `make fmt` to fix.
-precommit: fmt-check clippy test
+# Documentation build with warnings denied. Catches intra-doc links that
+# rot when an item is renamed or moved between modules — the compiler will
+# not tell you otherwise, and two of them had gone unnoticed.
+doc:
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
 
-# Release build of just the three command-line tools (masterbus-tui,
-# masterbus-signalk, masterbus-set-field) — handy when you don't need the
-# core crate's tests or the FFI demos.
+# Everything you'd want green before opening a PR — mirrors CI (rustfmt +
+# clippy + tests + docs). Uses fmt-check (read-only); run `make fmt` to fix.
+precommit: fmt-check clippy test doc
+
+# Release build of just the command-line tools (masterbus-tui,
+# masterbus-signalk, masterbus-set-field, masterbus-dump) — handy when you
+# don't need the core crate's tests or the FFI demos.
 tools:
 	$(CARGO) build --release -p masterbus-tools
 
@@ -146,7 +152,8 @@ help:
 	@echo "  make fmt            cargo fmt --all"
 	@echo "  make fmt-check      cargo fmt --all --check (CI shape)"
 	@echo "  make clippy         Workspace clippy at -D warnings (CI shape)"
-	@echo "  make precommit      fmt-check + clippy + test (mirrors CI)"
+	@echo "  make doc            rustdoc with warnings denied"
+	@echo "  make precommit      fmt-check + clippy + test + doc (mirrors CI)"
 	@echo ""
 	@echo "  make tools          Release build of just the command-line tools"
 	@echo ""

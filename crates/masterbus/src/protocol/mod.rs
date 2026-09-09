@@ -149,7 +149,7 @@ pub enum VisualizationType {
     DeviceList,
     /// Event command: selects which of the target device's eventable outputs an
     /// event drives. The value is an index into the *target's* ordered
-    /// eventable fields (the target is the sibling [`DeviceList`] field).
+    /// eventable fields (the target is the sibling [`Self::DeviceList`] field).
     EventCommand,
     /// Free text.
     Text,

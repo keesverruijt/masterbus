@@ -55,15 +55,61 @@ TUI feels instant.
 ## Reading data continuously
 
 For pulling data off the bus in a long-running stream, use
-`masterbus-signalk`. It connects to the bus, subscribes to every field,
-and emits Signal K deltas (newline-delimited JSON) on a TCP socket.
+`masterbus-signalk`. It connects to the bus and emits Signal K deltas
+(newline-delimited JSON) on a TCP socket.
 
-    masterbus-signalk 0.0.0.0:3009
+    masterbus-signalk
 
 Then `nc localhost 3009` shows the live stream. Any language that can
 read a TCP socket and parse JSON can consume this — Python, Node,
 shell, anything. Despite the name it works fine without a Signal K
 server: it's just JSON lines.
+
+It does **not** publish everything it finds. What goes out is a list you
+control, one entry per field, and the next section is about building it.
+Read that before you conclude the thing is broken.
+
+## Telling it what to publish
+
+**You have to do this.** Nothing else in this guide matters if you skip
+it: a device that is not in your mapping produces no Signal K data, no
+matter how happily it shows up in the TUI.
+
+    masterbus-tui --mapping
+
+That is the same browser as before with an editor attached. The device
+list gains a count of how many of each device's fields are published, so
+the ones producing nothing are obvious. Open a device, go to the
+**Monitoring** tab, and:
+
+- `+` publishes the selected field. A box opens with the Signal K path
+  filled in where the program has a good guess, and shows the unit
+  conversion it will apply — this is your chance to notice that °C is
+  about to become kelvin, which is what Signal K wants.
+- `-` stops publishing it.
+- `a` copies this device's whole setup to every other device of the same
+  model. Ten identical batteries become one minute of work instead of
+  ten.
+- `w` saves. Stop `masterbus-signalk` before you edit, and start it
+  again afterwards.
+
+Paths are yours to choose. If a charger really feeds the bow thruster
+bank, call it that. Pick names from the
+[Signal K specification](https://signalk.org/specification/1.7.0/doc/vesselsBranch.html)
+where one fits (`electrical.batteries`, `electrical.chargers`,
+`electrical.inverters`, `electrical.alternators`, `electrical.solar`).
+
+### Why it isn't automatic
+
+The first time `masterbus-signalk` runs with no mapping it guesses one
+from a built-in list of common models and field names, so a fresh
+install is not silent. Treat that as a starting point, not an answer. On
+a real fourteen-device installation the guesses covered three devices;
+the other eleven needed a human. Mastervolt gives two completely
+different chargers the same class code, installers rename fields freely,
+and two models of the same battery call their voltage different things.
+Guessing wrong and publishing it anyway would put bad numbers on your
+dashboard, so the program guesses, shows you, and waits.
 
 ## Writing values
 
@@ -117,22 +163,22 @@ The TUI shows the *device id* (title bar, e.g. `[188EA2]`) and the
 *field id* on every editable row, so picking the right ids is a
 copy-paste away.
 
-## Reporting a device that isn't mapped yet
+## Helping the next person
 
-Every device on your bus shows up in the TUI, because the library
-discovers them generically. The Signal K sidecar is the part that knows
-only some device classes, so a device can be perfectly visible in the
-TUI and still publish nothing to Signal K.
-
-To get yours added, run the dump and attach the file to an issue:
+Once you have mapped a device, the guesses can be taught to cover it, so
+the next owner of that model gets it filled in for free. That needs one
+file from you:
 
     masterbus-dump --values all --menus all -o mybus.json
 
-That records every device, group and field with its id, name, unit,
-range and current value. It is enough for someone without your hardware
-to write the mapping. If the bus is large, `--device <id>` limits the
-dump to the one device you care about.
+It records every device, group and field with its id, name, unit, range
+and current value, **and your mapping alongside it** — the bus and what
+you decided it means, together. Attach it to an issue. If the bus is
+large, `--device <id>` limits the dump to the one device you care about.
 
 The file contains your devices' names, serial numbers and whatever they
 were reading at the time. Nothing secret, but edit it first if you would
 rather not publish serial numbers.
+
+The same file is what to attach if a device misbehaves rather than
+merely being unmapped.
