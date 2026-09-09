@@ -43,10 +43,11 @@ falls back to the OS-native per-user cache directory.
 
 ## `masterbus-tui`
 
-Terminal UI for browsing devices, viewing live values, and editing
-writable fields.
+Terminal UI for browsing devices, viewing live values, editing writable
+fields, and curating the Signal K mapping.
 
     masterbus-tui
+    masterbus-tui --mapping   # also edit mapping.json; see the sidecar below
 
 Devices are listed on the left with liveness; the selected device's
 groups and fields are on the right. `Tab` / `Shift-Tab` switch between
@@ -161,6 +162,39 @@ purpose: it is the same executable an unprivileged user runs from a
 shell to try things out, `cargo install` puts it on the user's `PATH`
 alongside `masterbus-tui`, and one location for all four tools keeps
 the instructions short.
+
+### Editing it: `masterbus-tui --mapping`
+
+Editing JSON by hand is nobody's idea of a good time, and the TUI already
+knows every device, field id and live value. `--mapping` turns it into
+the editor:
+
+    masterbus-tui --mapping
+
+- The device list gains a count of that device's mapped fields, so an
+  unmapped device is visible without opening it.
+- The Monitoring tab gains a Signal K column showing where each field
+  publishes.
+- `+` maps the selected field. The prompt is pre-filled from the existing
+  mapping, or from the built-in heuristics, and shows the conversion the
+  path implies — the only moment anyone can check that `°C` is about to
+  become kelvin, since the file stores no scale factor. `^N` toggles
+  `invert`.
+- `-` unmaps the selected field.
+- `a` copies this device's mapping to every other device with the same
+  article, substituting each one's own instance into the paths. Fields a
+  target does not have are skipped, so a cluster master's extra fields
+  are not forced onto a plain member. With ten batteries on a bus this is
+  the difference between a five-minute job and an hour.
+- `w` writes the file. Quitting with unsaved changes asks once.
+
+A path whose units cannot be reconciled is refused with an explanation
+rather than saved, because the sidecar would only skip it later. An
+unfamiliar leaf is accepted, with a note that it will carry no unit
+metadata.
+
+Devices that are switched off or off the bus keep their entries: the file
+is loaded whole and only the fields you touch are changed.
 
 ## `masterbus-set-field`
 

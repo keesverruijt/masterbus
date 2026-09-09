@@ -129,6 +129,7 @@ cache, edit the file (or delete it and let auto-detection re-create it).
 
 ```sh
 masterbus-tui
+masterbus-tui --mapping   # also edit the Signal K mapping file
 ```
 
 Browse devices on the left; the selected device's tabs are on the right —
@@ -137,6 +138,13 @@ discovered on demand. `Tab` / `Shift-Tab` switch tabs, `Enter` edits a writable
 field (booleans toggle, numbers / lists / text open a centred edit modal),
 `l` opens the access-level (login) modal — higher levels unlock more fields,
 `q` quits.
+
+With `--mapping` the same screen curates `mapping.json`: the device list shows
+how many of each device's fields publish, the Monitoring tab gains a Signal K
+column, `+` and `-` map and unmap the selected field, `a` copies a device's
+mapping to every other device with the same article, and `w` writes the file.
+The `+` prompt pre-fills a suggestion and shows the unit conversion the path
+implies.
 
 ### Signal K sidecar
 

@@ -48,6 +48,76 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.values_modal.is_some() {
         draw_values_modal(f, app, f.area());
     }
+    if app.path_editor.is_some() {
+        draw_path_modal(f, app, f.area());
+    }
+}
+
+/// The mapping editor's path prompt: the field being mapped, the path being
+/// typed, and the conversion that path implies.
+///
+/// Showing the conversion is the point. The mapping file stores no scale
+/// factor, so the only moment a human can check that °C is about to become
+/// kelvin is while they are choosing the path.
+fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
+    use crate::app::Origin;
+    let Some(ed) = app.path_editor.as_ref() else {
+        return;
+    };
+    let w = area.width.saturating_sub(8).clamp(40, 84);
+    let h = 8u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+    f.render_widget(ratatui::widgets::Clear, rect);
+
+    let origin = match ed.origin {
+        Origin::Existing => "editing the existing mapping",
+        Origin::Heuristic => "suggested from the device class and field name",
+        Origin::Blank => "no suggestion for this field",
+    };
+    let (hint, hint_style) = match ed.conversion_hint() {
+        Some(h) => (h, Style::new().fg(Color::Green)),
+        None => (
+            format!("{:?} cannot be converted for this path", ed.unit),
+            Style::new().fg(Color::Red),
+        ),
+    };
+    let unit = if ed.unit.trim().is_empty() {
+        "no unit".to_string()
+    } else {
+        format!("in {}", ed.unit)
+    };
+    let body = vec![
+        Line::from(Span::styled(
+            format!("  {} ({unit})", ed.field_name),
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  {origin}"),
+            Style::new().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{}\u{2588}", ed.buf), Style::new().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![Span::raw("  "), Span::styled(hint, hint_style)]),
+        Line::from(Span::styled(
+            format!(
+                "  invert: {}  (^N toggles)",
+                if ed.invert { "yes" } else { "no" }
+            ),
+            Style::new().fg(Color::DarkGray),
+        )),
+    ];
+    let p = Paragraph::new(body).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Signal K path for {} ", field_id_tag(ed.field)))
+            .title_bottom(" Enter save · Esc cancel "),
+    );
+    f.render_widget(p, rect);
 }
 
 fn draw_logs(f: &mut Frame, area: Rect) {
@@ -87,11 +157,23 @@ fn draw_devices(f: &mut Frame, app: &App, area: Rect) {
             {
                 label.push_str(&format!(" ({})", crate::app::level_label(lvl)));
             }
-            Line::from(vec![
+            // In mapping mode each device carries how many of its fields
+            // publish, so an unmapped device is visible without opening it.
+            let mut spans = vec![
                 Span::styled(format!("{sym} "), Style::new().fg(color)),
                 Span::raw(label),
-            ])
-            .into()
+            ];
+            if let Some(n) = app.mapped_count(id) {
+                spans.push(Span::styled(
+                    format!(" [{n}]"),
+                    Style::new().fg(if n == 0 {
+                        Color::DarkGray
+                    } else {
+                        Color::Green
+                    }),
+                ));
+            }
+            Line::from(spans).into()
         })
         .collect();
 
@@ -232,12 +314,25 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
                 // time) can't push the unit column out of alignment.
                 let val = truncate(&val, VALUE_COL);
                 let rw = if field.writeable { "rw" } else { "ro" };
-                ListItem::new(Line::raw(format!(
-                    "  {} {:<22} {rw} {val:>VALUE_COL$} {}",
+                let head = format!(
+                    "  {} {:<22} {rw} {val:>VALUE_COL$} {:<4}",
                     field_id_tag(field.index),
                     truncate(&field.name, 22),
                     field.unit,
-                )))
+                );
+                // In mapping mode, show where this field publishes. The path is
+                // the point of the mode, so it gets the rest of the line.
+                match app.mapped_path(field.index) {
+                    Some(path) => ListItem::new(Line::from(vec![
+                        Span::raw(head),
+                        Span::styled(format!(" {path}"), Style::new().fg(Color::Green)),
+                    ])),
+                    None if app.mapping_mode() => ListItem::new(Line::from(vec![
+                        Span::raw(head),
+                        Span::styled(" —", Style::new().fg(Color::DarkGray)),
+                    ])),
+                    None => ListItem::new(Line::raw(head)),
+                }
             }
         };
         items.push(item);

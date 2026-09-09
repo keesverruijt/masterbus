@@ -4,11 +4,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::path::PathBuf;
+
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 use masterbus::{
     AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus, Menu,
     Subscription, Value, VisualizationType, field_id,
 };
+use masterbus_tools::mapping::{DeviceMapping, FieldMapping, Mapping, field_key, parse_field_key};
+use masterbus_tools::{seed, signalk, units};
 
 /// Live-poll rate for the selected device's monitoring fields.
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
@@ -54,6 +58,11 @@ pub enum TabKind {
 
 /// Device id → name, shared with the background name-backfill thread.
 pub type Names = Arc<Mutex<HashMap<u32, String>>>;
+
+/// Device id → full identity, filled by the same backfill thread. The mapping
+/// editor keys on serial number, and matches "apply to this article" on the
+/// article number, so it needs more than the name.
+pub type Idents = Arc<Mutex<HashMap<u32, DeviceIdentity>>>;
 
 /// A line in the field pane: either a group header or a field.
 pub enum Row {
@@ -179,12 +188,29 @@ pub struct App {
     /// Whether `tui-logger` is the active backend (and thus the pane is
     /// useful at all). Drives the status hint and the `~` key handler.
     pub logs_in_tui: bool,
+    /// Identity of every device seen, for the mapping editor's serial and
+    /// article lookups.
+    pub idents: Idents,
+    /// The mapping-editor session; `None` unless started with `--mapping`.
+    pub mapping: Option<MappingSession>,
+    /// Open path-editor modal.
+    pub path_editor: Option<PathEditor>,
+    /// Serial number of the open device, cached when it is opened.
+    pub cur_serial: Option<String>,
+    /// Signal K instance proposed for the open device.
+    pub cur_instance: String,
 }
 
 impl App {
     /// Construct without blocking: seed from whatever devices have been heard so
     /// far; the rest arrive via `note_alive`, and names via the backfill thread.
-    pub fn new(bus: MasterBus, names: Names, logs_in_tui: bool) -> App {
+    pub fn new(
+        bus: MasterBus,
+        names: Names,
+        idents: Idents,
+        mapping: Option<MappingSession>,
+        logs_in_tui: bool,
+    ) -> App {
         let device_ids: Vec<u32> = bus.devices().iter().map(|d| d.id()).collect();
         App {
             bus,
@@ -215,6 +241,11 @@ impl App {
             should_quit: false,
             show_logs: false,
             logs_in_tui,
+            idents,
+            mapping,
+            path_editor: None,
+            cur_serial: None,
+            cur_instance: String::new(),
         }
     }
 
@@ -302,6 +333,13 @@ impl App {
         self.rows.clear();
         self.row_sel = 0;
         self.cur_info = self.bus.device(id).identity().ok();
+        // The mapping editor keys on serial, so cache it (and the proposed
+        // Signal K instance) whenever identity is refreshed.
+        if let Some(i) = &self.cur_info {
+            self.cur_serial = Some(i.serial.clone()).filter(|x| !x.is_empty());
+            self.cur_instance = seed::instance_of(&i.name, id);
+            self.idents.lock().unwrap().insert(id, i.clone());
+        }
         self.cur_access_level = self.bus.device(id).access_level().ok();
         self.status = format!(
             "{} / Summary — Tab switch · Esc back",
@@ -470,9 +508,14 @@ impl App {
         self.row_sel = 0;
         self.select_first_field();
         self.status = format!(
-            "{} / {} — Tab switch · Enter edit · ? values · Esc back",
+            "{} / {} — Tab switch · Enter edit · ? values{} · Esc back",
             self.device_label(id),
-            menu_label(menu)
+            menu_label(menu),
+            if self.mapping_mode() {
+                " · + map · - unmap · a apply to article · w write"
+            } else {
+                ""
+            }
         );
     }
 
@@ -981,5 +1024,572 @@ pub fn level_label(level: AccessLevel) -> &'static str {
         AccessLevel::Installer => "Installer",
         AccessLevel::Distributor => "Distributor",
         AccessLevel::MvService => "MV Service",
+    }
+}
+
+// ---- mapping editor ------------------------------------------------------
+
+/// The mapping-editor session, present only when the TUI was started with
+/// `--mapping`.
+///
+/// The whole file is held in memory and written back on demand. That is what
+/// preserves entries for devices which are switched off or off the bus today:
+/// nothing is rebuilt from the live bus, only the entries the user touches are
+/// changed. Issue #3 called that out as a hazard of the old rewrite-everything
+/// mapping file.
+pub struct MappingSession {
+    /// Where the file lives; also where `w` writes it back.
+    pub path: PathBuf,
+    /// The whole file, including devices that are not on this bus.
+    pub map: Mapping,
+    /// Unsaved changes.
+    pub dirty: bool,
+    /// Set once the user has been warned about quitting with unsaved changes.
+    pub quit_armed: bool,
+}
+
+/// Where a pre-filled path suggestion came from, so the editor can say.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Already mapped; this is an edit.
+    Existing,
+    /// Proposed by the built-in per-class heuristics.
+    Heuristic,
+    /// Nothing to go on; the user is typing from scratch.
+    Blank,
+}
+
+/// An in-progress edit of one field's Signal K path.
+pub struct PathEditor {
+    /// Which field is being mapped.
+    pub field: FieldId,
+    /// Its name, for the modal title.
+    pub field_name: String,
+    /// Its unit, to derive and display the conversion.
+    pub unit: String,
+    /// The path being typed.
+    pub buf: String,
+    /// Whether to publish the boolean negated.
+    pub invert: bool,
+    /// Where `buf` was seeded from.
+    pub origin: Origin,
+}
+
+impl PathEditor {
+    /// The conversion the current path implies, and a human description.
+    /// `None` means the units cannot be reconciled — the entry would be
+    /// skipped at runtime, so the editor says so before it is saved.
+    pub fn conversion_hint(&self) -> Option<String> {
+        let leaf = signalk::leaf_unit(&self.buf);
+        let conv = units::conversion(&self.unit, leaf)?;
+        Some(match (leaf, conv.is_identity()) {
+            (None, _) => "no unit metadata for this leaf".into(),
+            (Some(u), true) => format!("{u}, unchanged"),
+            (Some(u), false) => format!(
+                "→ {u} (×{} {}{})",
+                conv.scale,
+                if conv.offset >= 0.0 { "+" } else { "−" },
+                conv.offset.abs()
+            ),
+        })
+    }
+}
+
+impl App {
+    /// Whether the mapping editor is active.
+    pub fn mapping_mode(&self) -> bool {
+        self.mapping.is_some()
+    }
+
+    /// Whether the path editor modal is open.
+    pub fn path_editing(&self) -> bool {
+        self.path_editor.is_some()
+    }
+
+    /// Serial number of a device, once identity discovery has reached it.
+    pub fn serial_of(&self, id: u32) -> Option<String> {
+        self.idents
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|i| i.serial.clone())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// How many fields of a device the mapping publishes. `None` when there is
+    /// no mapping session or the device's serial is not known yet.
+    pub fn mapped_count(&self, id: u32) -> Option<usize> {
+        let s = self.mapping.as_ref()?;
+        let serial = self.serial_of(id)?;
+        Some(s.map.devices.get(&serial).map_or(0, |d| d.fields.len()))
+    }
+
+    /// The Signal K path a field currently publishes to, if any.
+    pub fn mapped_path(&self, field: FieldId) -> Option<&str> {
+        let s = self.mapping.as_ref()?;
+        let serial = self.cur_serial.as_ref()?;
+        s.map.field(serial, field).map(|f| f.path.as_str())
+    }
+
+    /// Open the path editor on the selected field, pre-filled with the existing
+    /// mapping, else with a heuristic suggestion, else empty.
+    pub fn begin_map(&mut self) {
+        if self.mapping.is_none() {
+            return;
+        }
+        let Some(field) = self.selected_field().cloned() else {
+            return;
+        };
+        let Some(serial) = self.cur_serial.clone() else {
+            self.status = "this device has not reported a serial number yet".into();
+            return;
+        };
+        let existing = self
+            .mapping
+            .as_ref()
+            .and_then(|s| s.map.field(&serial, field.index))
+            .cloned();
+        let (buf, invert, origin) = match existing {
+            Some(fm) => (fm.path, fm.invert, Origin::Existing),
+            None => {
+                let name = self
+                    .cur_info
+                    .as_ref()
+                    .map(|i| i.name.clone())
+                    .unwrap_or_default();
+                let instance = self.cur_instance.clone();
+                match seed::suggest(seed::class_of(&name), &instance, &field.name, &field.unit) {
+                    Some(s) => (s.path, s.invert, Origin::Heuristic),
+                    None => (String::new(), false, Origin::Blank),
+                }
+            }
+        };
+        self.path_editor = Some(PathEditor {
+            field: field.index,
+            field_name: field.name.clone(),
+            unit: field.unit.clone(),
+            buf,
+            invert,
+            origin,
+        });
+    }
+
+    /// Remove the selected field's mapping.
+    pub fn unmap_selected(&mut self) {
+        let Some(field) = self.selected_field().map(|f| f.index) else {
+            return;
+        };
+        let Some(serial) = self.cur_serial.clone() else {
+            return;
+        };
+        let key = field_key(field);
+        let Some(s) = self.mapping.as_mut() else {
+            return;
+        };
+        if let Some(d) = s.map.devices.get_mut(&serial)
+            && d.fields.remove(&key).is_some()
+        {
+            s.dirty = true;
+            self.status = format!("unmapped {key}");
+        }
+    }
+
+    /// Commit the path editor.
+    pub fn commit_map(&mut self) {
+        let Some(ed) = self.path_editor.take() else {
+            return;
+        };
+        let path = ed.buf.trim().to_string();
+        let Some(serial) = self.cur_serial.clone() else {
+            return;
+        };
+        if path.is_empty() {
+            self.status = "empty path; nothing changed".into();
+            return;
+        }
+        // Refuse only what cannot work at runtime. An unknown leaf is allowed
+        // (a custom path is a legitimate choice) but a unit pair that cannot be
+        // reconciled would be skipped by the sidecar, so it is rejected here
+        // where the user can see why.
+        if units::conversion(&ed.unit, signalk::leaf_unit(&path)).is_none() {
+            self.status = format!(
+                "{:?} cannot be converted to what {path} expects — not saved",
+                ed.unit
+            );
+            self.path_editor = Some(ed);
+            return;
+        }
+        let identity = self.cur_info.clone();
+        let instance = self.cur_instance.clone();
+        let Some(s) = self.mapping.as_mut() else {
+            return;
+        };
+        let entry = s.map.devices.entry(serial).or_default();
+        if let Some(i) = &identity {
+            entry.article = i.article.clone();
+            entry.firmware = i.firmware.clone();
+            entry.name = i.name.clone();
+        }
+        if entry.instance.is_empty() {
+            entry.instance = instance;
+        }
+        entry.fields.insert(
+            field_key(ed.field),
+            FieldMapping {
+                path: path.clone(),
+                invert: ed.invert,
+            },
+        );
+        s.dirty = true;
+        self.status = format!("{} → {path}", field_key(ed.field));
+    }
+
+    pub fn cancel_map(&mut self) {
+        self.path_editor = None;
+    }
+
+    pub fn map_editor_char(&mut self, c: char) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.buf.push(c);
+        }
+    }
+
+    pub fn map_editor_backspace(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.buf.pop();
+        }
+    }
+
+    /// Toggle the invert flag from inside the editor.
+    pub fn map_editor_toggle_invert(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.invert = !ed.invert;
+        }
+    }
+
+    /// Copy the open device's mapping onto every other device with the same
+    /// article, substituting each target's own instance into the paths.
+    ///
+    /// Without this nobody finishes the job: the bus in #6 has ten batteries on
+    /// two articles and four identical chargers. Fields the target device does
+    /// not have are skipped, which is what keeps a cluster master's extra
+    /// fields from being forced onto a plain member.
+    pub fn apply_to_article(&mut self) {
+        let Some(src_serial) = self.cur_serial.clone() else {
+            return;
+        };
+        let Some(src) = self
+            .mapping
+            .as_ref()
+            .and_then(|s| s.map.devices.get(&src_serial).cloned())
+        else {
+            self.status = "map at least one field on this device first".into();
+            return;
+        };
+        if src.article.is_empty() {
+            self.status = "this device reports no article number to match on".into();
+            return;
+        }
+
+        // Collect the targets: same article, different serial, known fields.
+        let mut targets: Vec<CopyTarget> = Vec::new();
+        {
+            let idents = self.idents.lock().unwrap();
+            for id in &self.device_ids {
+                let Some(ident) = idents.get(id) else {
+                    continue;
+                };
+                if ident.article != src.article
+                    || ident.serial == src_serial
+                    || ident.serial.is_empty()
+                {
+                    continue;
+                }
+                let have: HashSet<FieldId> = self
+                    .bus
+                    .device(*id)
+                    .tab_info(Menu::Monitoring)
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|g| g.fields.iter().map(|f| f.index))
+                    .collect();
+                targets.push(CopyTarget {
+                    instance: seed::instance_of(&ident.name, *id),
+                    have,
+                    ident: ident.clone(),
+                });
+            }
+        }
+        if targets.is_empty() {
+            self.status = format!("no other device with article {}", src.article);
+            return;
+        }
+
+        let Some(s) = self.mapping.as_mut() else {
+            return;
+        };
+        let (copied, skipped) = copy_to_targets(&mut s.map, &src, &targets);
+        s.dirty = true;
+        self.status = format!(
+            "copied {copied} mapping(s) to devices with article {}{}",
+            src.article,
+            if skipped > 0 {
+                format!("; {skipped} field(s) absent on some targets")
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    /// Write the mapping file.
+    pub fn save_mapping(&mut self) {
+        let Some(s) = self.mapping.as_mut() else {
+            return;
+        };
+        match s.map.save(&s.path) {
+            Ok(()) => {
+                s.dirty = false;
+                self.status = format!("wrote {} ({} field(s))", s.path.display(), s.map.len());
+            }
+            Err(e) => self.status = format!("could not write {}: {e}", s.path.display()),
+        }
+    }
+
+    /// Quit, refusing once if there are unsaved changes.
+    pub fn quit_checked(&mut self) {
+        let unsaved = self.mapping.as_ref().is_some_and(|s| s.dirty);
+        let armed = self.mapping.as_ref().is_some_and(|s| s.quit_armed);
+        if unsaved && !armed {
+            if let Some(s) = self.mapping.as_mut() {
+                s.quit_armed = true;
+            }
+            self.status = "unsaved mapping changes — w to write, q again to discard".into();
+            return;
+        }
+        self.should_quit = true;
+    }
+}
+
+/// A device the open device's mapping can be copied onto.
+pub struct CopyTarget {
+    /// Signal K instance proposed for it, used when it has no entry yet.
+    pub instance: String,
+    /// The monitoring field ids it actually has.
+    pub have: HashSet<FieldId>,
+    /// Its identity, recorded into the new entry.
+    pub ident: DeviceIdentity,
+}
+
+/// Copy one device's field mappings onto every target, substituting each
+/// target's own Signal K instance into the paths. Returns (copied, skipped).
+///
+/// Fields the target does not have are skipped rather than written blind. That
+/// is what keeps a cluster master's extra fields off a plain member of the same
+/// article, which is the case the bus in #6 actually contains.
+fn copy_to_targets(
+    map: &mut Mapping,
+    src: &DeviceMapping,
+    targets: &[CopyTarget],
+) -> (usize, usize) {
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+    for t in targets {
+        let entry = map.devices.entry(t.ident.serial.clone()).or_default();
+        entry.article = t.ident.article.clone();
+        entry.firmware = t.ident.firmware.clone();
+        entry.name = t.ident.name.clone();
+        if entry.instance.is_empty() {
+            entry.instance = t.instance.clone();
+        }
+        let target_instance = entry.instance.clone();
+        for (key, fm) in &src.fields {
+            match parse_field_key(key) {
+                Some(id) if t.have.contains(&id) => {
+                    entry.fields.insert(
+                        key.to_string(),
+                        FieldMapping {
+                            path: retarget(&fm.path, &src.instance, &target_instance),
+                            invert: fm.invert,
+                        },
+                    );
+                    copied += 1;
+                }
+                _ => skipped += 1,
+            }
+        }
+    }
+    (copied, skipped)
+}
+
+/// Swap one instance segment for another inside a Signal K path.
+///
+/// Only whole segments are replaced, so an instance that happens to be a
+/// substring of a leaf (`house` in `household`) is left alone. An empty source
+/// instance means there is nothing to substitute and the path is copied as-is.
+fn retarget(path: &str, from: &str, to: &str) -> String {
+    if from.is_empty() || from == to {
+        return path.to_string();
+    }
+    path.split('.')
+        .map(|seg| if seg == from { to } else { seg })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    fn ident(serial: &str, name: &str) -> DeviceIdentity {
+        DeviceIdentity {
+            article: "66026000".into(),
+            serial: serial.into(),
+            revision: "A".into(),
+            name: name.into(),
+            firmware: "2.14".into(),
+        }
+    }
+
+    fn src_mapping() -> DeviceMapping {
+        let mut d = DeviceMapping {
+            article: "66026000".into(),
+            firmware: "2.14".into(),
+            name: "BAT 24V Service".into(),
+            instance: "24v-service".into(),
+            ..Default::default()
+        };
+        for (id, leaf) in [
+            (0x001u16, "voltage"),
+            (0x002, "current"),
+            (0x071, "voltage"),
+        ] {
+            d.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: format!("electrical.batteries.24v-service.{leaf}"),
+                    invert: false,
+                },
+            );
+        }
+        d
+    }
+
+    fn target(serial: &str, name: &str, have: &[FieldId]) -> CopyTarget {
+        CopyTarget {
+            instance: seed::instance_of(name, 0x1000),
+            have: have.iter().copied().collect(),
+            ident: ident(serial, name),
+        }
+    }
+
+    #[test]
+    fn copying_rewrites_the_instance_segment_per_target() {
+        let mut map = Mapping::new();
+        let t = target("MLI-2", "BAT 24V Service2", &[0x001, 0x002, 0x071]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src_mapping(), &[t]);
+        assert_eq!((copied, skipped), (3, 0));
+        let d = &map.devices["MLI-2"];
+        assert_eq!(d.instance, "24v-service2");
+        assert_eq!(
+            d.fields[&field_key(0x001)].path,
+            "electrical.batteries.24v-service2.voltage"
+        );
+    }
+
+    /// The cluster case from the bus in #6: two units share an article, but the
+    /// master has fields the members do not. Copying must not invent them.
+    #[test]
+    fn fields_the_target_lacks_are_skipped_not_invented() {
+        let mut map = Mapping::new();
+        let member = target("MLI-2", "BAT 24V Service2", &[0x001, 0x002]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src_mapping(), &[member]);
+        assert_eq!((copied, skipped), (2, 1));
+        let d = &map.devices["MLI-2"];
+        assert!(!d.fields.contains_key(&field_key(0x071)));
+    }
+
+    #[test]
+    fn copying_records_the_target_identity_not_the_sources() {
+        let mut map = Mapping::new();
+        let mut t = target("MLI-2", "BAT 24V Service2", &[0x001]);
+        t.ident.firmware = "2.15".into();
+        copy_to_targets(&mut map, &src_mapping(), &[t]);
+        let d = &map.devices["MLI-2"];
+        assert_eq!(d.name, "BAT 24V Service2");
+        assert_eq!(d.firmware, "2.15");
+    }
+
+    /// An instance the user already chose is authoritative; copying must not
+    /// silently rename a device's Signal K node underneath them.
+    #[test]
+    fn an_existing_instance_on_the_target_is_kept() {
+        let mut map = Mapping::new();
+        map.devices.insert(
+            "MLI-2".into(),
+            DeviceMapping {
+                instance: "port-bank".into(),
+                ..Default::default()
+            },
+        );
+        let t = target("MLI-2", "BAT 24V Service2", &[0x001]);
+        copy_to_targets(&mut map, &src_mapping(), &[t]);
+        let d = &map.devices["MLI-2"];
+        assert_eq!(d.instance, "port-bank");
+        assert_eq!(
+            d.fields[&field_key(0x001)].path,
+            "electrical.batteries.port-bank.voltage"
+        );
+    }
+
+    #[test]
+    fn retarget_replaces_whole_segments_only() {
+        assert_eq!(
+            retarget("electrical.batteries.house.voltage", "house", "port"),
+            "electrical.batteries.port.voltage"
+        );
+        // A leaf that merely contains the instance as a substring is untouched.
+        assert_eq!(
+            retarget("electrical.batteries.house.household", "house", "port"),
+            "electrical.batteries.port.household"
+        );
+        // Nothing to substitute.
+        assert_eq!(retarget("a.b.c", "", "port"), "a.b.c");
+        assert_eq!(retarget("a.b.c", "b", "b"), "a.b.c");
+    }
+
+    #[test]
+    fn the_editor_reports_the_conversion_it_will_apply() {
+        let ed = PathEditor {
+            field: 0x005,
+            field_name: "Temperature".into(),
+            unit: "\u{b0}C".into(),
+            buf: "electrical.batteries.house.temperature".into(),
+            invert: false,
+            origin: Origin::Heuristic,
+        };
+        let hint = ed.conversion_hint().expect("celsius reaches kelvin");
+        assert!(hint.contains('K'), "{hint}");
+
+        // Pointing amps at a kelvin leaf has no conversion, and the editor must
+        // say so rather than let it be saved.
+        let bad = PathEditor {
+            unit: "A".into(),
+            ..ed
+        };
+        assert!(bad.conversion_hint().is_none());
+    }
+
+    #[test]
+    fn an_unknown_leaf_is_allowed_but_flagged_as_unitless() {
+        let ed = PathEditor {
+            field: 0x005,
+            field_name: "Temperature".into(),
+            unit: "\u{b0}C".into(),
+            buf: "electrical.converters.house.somethingNew".into(),
+            invert: false,
+            origin: Origin::Blank,
+        };
+        let hint = ed.conversion_hint().expect("a custom path is allowed");
+        assert!(hint.contains("no unit metadata"), "{hint}");
     }
 }

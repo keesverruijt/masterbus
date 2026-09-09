@@ -9,6 +9,16 @@
 //! Left pane: devices (with liveness). Right pane: the selected device's groups
 //! and fields with live monitoring values. Writable fields can be edited:
 //! booleans toggle, numbers open a text editor, lists cycle with ←/→.
+//!
+//! # Mapping editor
+//!
+//! `masterbus-tui --mapping` additionally edits `mapping.json`, the file that
+//! decides what `masterbus-signalk` publishes (see `masterbus_tools::mapping`).
+//! The device list shows how many of each device's fields are mapped, the
+//! Monitoring tab gains a Signal K column, and `+` / `-` add and remove a
+//! mapping on the selected field. `+` pre-fills a suggestion; `a` copies the
+//! open device's mapping to every other device with the same article; `w`
+//! writes the file.
 
 mod app;
 mod ui;
@@ -19,16 +29,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use app::{App, Focus, Names};
+use app::{App, Focus, Idents, MappingSession, Names};
 use masterbus::{Config, MasterBus};
+use masterbus_tools::mapping::Mapping;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logging_in_tui = init_logger();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: masterbus-tui");
+        eprintln!("usage: masterbus-tui [--mapping]");
+        eprintln!();
+        eprintln!("  --mapping   edit the Signal K mapping file alongside browsing:");
+        eprintln!("              + map the selected field, - unmap, a apply to every");
+        eprintln!("              device with the same article, w write the file.");
+        eprintln!();
         eprintln!("transport, heartbeat-master role, and schema cache come from");
         eprintln!("the config file (see `masterbus::FileConfig`)");
         eprintln!();
@@ -36,9 +52,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("set MASTERBUS_TUI_LOG=<path> to redirect to a file instead.");
         return Ok(());
     }
+    let want_mapping = args.iter().any(|a| a == "--mapping");
+
+    // Resolve and load the mapping before taking over the terminal, so a
+    // malformed file is reported plainly rather than behind a TUI.
+    let mapping = if want_mapping {
+        let path = std::env::var_os("MAPPING")
+            .map(std::path::PathBuf::from)
+            .map_or_else(
+                || masterbus::FileConfig::load_or_create().map(|c| c.mapping_path()),
+                Ok,
+            )?;
+        // A hand-edited file is the normal case, so a syntax error has to read
+        // like a syntax error rather than a debug-printed io::Error.
+        let map = match Mapping::load(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("masterbus-tui: {e}");
+                eprintln!("fix the file, or move it aside to start over.");
+                std::process::exit(2);
+            }
+        };
+        println!("mapping: {} ({} field(s))", path.display(), map.len());
+        Some(MappingSession {
+            path,
+            map,
+            dirty: false,
+            quit_armed: false,
+        })
+    } else {
+        None
+    };
+
     let bus = MasterBus::auto(Config::default())?;
     println!("connected; scanning the bus…");
-    run_tui(bus, logging_in_tui)?;
+    run_tui(bus, mapping, logging_in_tui)?;
     Ok(())
 }
 
@@ -69,13 +117,18 @@ fn init_logger() -> bool {
     true
 }
 
-fn run_tui(bus: MasterBus, logs_in_tui: bool) -> std::io::Result<()> {
+fn run_tui(
+    bus: MasterBus,
+    mapping: Option<MappingSession>,
+    logs_in_tui: bool,
+) -> std::io::Result<()> {
     let device_events = bus.device_events();
     let names: Names = Arc::new(Mutex::new(HashMap::new()));
+    let idents: Idents = Arc::new(Mutex::new(HashMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
-    spawn_name_backfill(bus.clone(), names.clone(), stop.clone());
+    spawn_name_backfill(bus.clone(), names.clone(), idents.clone(), stop.clone());
 
-    let mut app = App::new(bus, names, logs_in_tui);
+    let mut app = App::new(bus, names, idents, mapping, logs_in_tui);
     let keys = spawn_key_reader();
 
     let mut terminal = ratatui::init();
@@ -105,7 +158,7 @@ fn run_tui(bus: MasterBus, logs_in_tui: bool) -> std::io::Result<()> {
 
 /// Background thread: resolve device names (cheap identity discovery) as devices
 /// appear, so the device list fills in with names over the first seconds.
-fn spawn_name_backfill(bus: MasterBus, names: Names, stop: Arc<AtomicBool>) {
+fn spawn_name_backfill(bus: MasterBus, names: Names, idents: Idents, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             for dev in bus.devices() {
@@ -113,13 +166,17 @@ fn spawn_name_backfill(bus: MasterBus, names: Names, stop: Arc<AtomicBool>) {
                     return;
                 }
                 let id = dev.id();
-                if names.lock().unwrap().contains_key(&id) {
+                if idents.lock().unwrap().contains_key(&id) {
                     continue;
                 }
-                if let Ok(name) = dev.name()
-                    && !name.is_empty()
-                {
-                    names.lock().unwrap().insert(id, name);
+                // One identity fetch feeds both maps: `name()` would do the
+                // same round trip and throw the rest away, and the mapping
+                // editor needs the serial and article.
+                if let Ok(ident) = dev.identity() {
+                    if !ident.name.is_empty() {
+                        names.lock().unwrap().insert(id, ident.name.clone());
+                    }
+                    idents.lock().unwrap().insert(id, ident);
                 }
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -149,6 +206,24 @@ fn spawn_key_reader() -> Receiver<KeyEvent> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // The path editor owns every key while open: a Signal K path is free text
+    // and may contain any of the letters the browse-mode bindings use.
+    if app.path_editing() {
+        match key.code {
+            KeyCode::Enter => app.commit_map(),
+            KeyCode::Esc => app.cancel_map(),
+            KeyCode::Backspace => app.map_editor_backspace(),
+            // Ctrl-N toggles the inverted-boolean flag; a bare letter would be
+            // swallowed by the text field.
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.map_editor_toggle_invert()
+            }
+            KeyCode::Char(c) => app.map_editor_char(c),
+            _ => {}
+        }
+        return;
+    }
+
     // Read-only values modal absorbs any key and just closes.
     if app.values_open() {
         match key.code {
@@ -206,9 +281,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     match key.code {
-        KeyCode::Char('q') => app.quit(),
+        KeyCode::Char('q') => app.quit_checked(),
         KeyCode::Char('l') | KeyCode::Char('L') => app.open_login(),
         KeyCode::Char('~') => app.toggle_logs(),
+        KeyCode::Char('w') if app.mapping_mode() => app.save_mapping(),
         _ => match app.focus {
             Focus::Devices => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => app.move_device(-1),
@@ -224,6 +300,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 KeyCode::Enter | KeyCode::Char('e') => app.begin_edit(),
                 KeyCode::Char('r') => app.reread_selected(),
                 KeyCode::Char('?') => app.open_values(),
+                KeyCode::Char('+') | KeyCode::Char('=') if app.mapping_mode() => app.begin_map(),
+                KeyCode::Char('-') if app.mapping_mode() => app.unmap_selected(),
+                KeyCode::Char('a') if app.mapping_mode() => app.apply_to_article(),
                 KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => app.back_to_devices(),
                 _ => {}
             },

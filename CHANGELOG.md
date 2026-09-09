@@ -46,6 +46,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key, and delete the old directory. (#12)
 
 ### Added
+- **`masterbus-tui --mapping` edits the Signal K mapping.** The device list
+  shows how many of each device's fields publish, the Monitoring tab gains a
+  Signal K column, `+` and `-` map and unmap the selected field, `a` copies a
+  device's mapping onto every other device with the same article, and `w`
+  writes the file. The `+` prompt pre-fills from the existing mapping or the
+  built-in heuristics and shows the conversion the path implies, which is the
+  only place a human can check it, since the file stores no scale factor. A
+  path whose units cannot be reconciled is refused rather than saved; an
+  unfamiliar leaf is accepted with a note that it publishes without unit
+  metadata. Copying skips fields the target device does not have, so a cluster
+  master's extra fields are not forced onto a plain member, and it keeps an
+  instance the user already chose. Entries for devices that are off the bus are
+  preserved. (#12)
 - **A library target for `masterbus-tools`.** The crate was binaries only,
   which left `masterbus-signalk` and `masterbus-tui` unable to share code. Two
   modules to start: `signalk` (the SI unit each Signal K path leaf carries) and

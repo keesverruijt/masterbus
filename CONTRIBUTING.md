@@ -218,11 +218,32 @@ it in. You are the one signing the pull request.
 
 ## 6. Two ways to fix an unmapped device
 
-### The one that fixes your boat: edit `mapping.json`
+### The one that fixes your boat: `masterbus-tui --mapping`
+
+You do not have to write JSON. Stop the service, then:
+
+```sh
+masterbus-tui --mapping
+```
+
+The device list shows how many of each device's fields publish, so an
+unmapped device stands out. Open one, go to the Monitoring tab, and press
+`+` on a field. The prompt arrives pre-filled with a suggestion where the
+built-in heuristics have one, and shows the unit conversion the path
+implies, which is the moment to check that °C is about to become kelvin.
+`-` unmaps. `a` copies the whole device's mapping to every other device
+with the same article, which is what makes ten identical batteries a
+one-minute job. `w` writes the file.
+
+A path whose units cannot be reconciled is refused with an explanation.
+An unfamiliar leaf is accepted, with a note that it will publish without
+unit metadata.
+
+### The same thing by hand
 
 The file sits beside `config.ini` (`/etc/default/masterbus/` on a Linux
 system install; see the **Configuration** table in the README for the
-other platforms). Stop the service before editing it.
+other platforms).
 
 ```json
 {
@@ -243,9 +264,9 @@ other platforms). Stop the service before editing it.
 }
 ```
 
-Everything you need is in the TUI, on the device's Monitoring tab: the
-serial on the Summary tab, and the field id in the left column of every
-row. `masterbus-dump` gives you the same thing as one file.
+Everything you need is in the TUI: the serial on the device's Summary
+tab, and the field id in the left column of every Monitoring row.
+`masterbus-dump` gives you the same thing as one file.
 
 Three things to know:
 
