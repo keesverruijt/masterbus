@@ -1,27 +1,38 @@
 # Contributing — even if you are not a developer
 
-This file is for the boat owner who has a MasterBus network with devices
-this project does not (fully) understand yet, and who wants to help fix
-that. Maybe you wrote software twenty years ago, maybe never. You do not
-need to know Rust. You need a computer that can reach the bus, an hour
-to set up a toolchain, and — optionally but highly recommended — an AI
-coding assistant to do the typing.
+This file is for the boat owner whose MasterBus network has devices this
+project does not publish to Signal K yet. Maybe you wrote software twenty
+years ago, maybe never.
+
+Read section 1 before anything else. It decides whether you need a
+toolchain at all, and for most people the answer is no.
 
 If you *are* a developer: the short version is `make precommit` before you
 open a PR, and the rest of this file will still tell you where things live.
 
 ## 1. First: do you even need to build anything?
 
-Probably not for *using* the project. Prebuilt binaries for every release
-are attached to <https://github.com/keesverruijt/masterbus/releases> —
-Linux (x86_64, armv7, aarch64 — the last two cover every Raspberry Pi),
-macOS (Intel and Apple Silicon) and Windows. Unpack the tarball for your
-platform and run `masterbus-tui`. See [ENDUSER.md](ENDUSER.md) for that
-path and [HARDWARE.md](HARDWARE.md) for how to connect to the bus.
+There are two different jobs here and they need very different amounts of
+effort. Work out which one you are doing.
 
-You need to build from source when you want to *change* something:
-typically add a device class to the Signal K sidecar, or fix a field that
-decodes wrong. Read on.
+**Getting your own devices into Signal K.** No build, no Rust, no
+toolchain. Download the release binaries from
+<https://github.com/keesverruijt/masterbus/releases> — Linux (x86_64,
+armv7, aarch64, the last two covering every Raspberry Pi), macOS (Intel
+and Apple Silicon), Windows — and use the mapping editor. That is section
+3, and for most people it is the whole story. [ENDUSER.md](ENDUSER.md)
+covers the same ground from scratch, and [HARDWARE.md](HARDWARE.md)
+explains how to connect to the bus.
+
+**Improving what everyone else gets out of the box.** The program ships
+with guesses about common models, so a fresh install is not silent. If you
+have a model it guesses badly, or not at all, you can teach it — and *that*
+needs the toolchain in sections 4 and 5. It is optional, it helps the next
+owner rather than you, and it is genuinely the smaller job of the two once
+you have done section 3.
+
+The rarer case is a device that misbehaves in the TUI itself, which is a
+protocol problem rather than a mapping one. Section 9 says what to capture.
 
 ## 2. What "not supported" usually means
 
@@ -44,181 +55,31 @@ mapping file points at them yet", and the fix is on your own boat, in
 your own file. You do not need to change this project's code, and you do
 not have to wait for anyone.
 
-On the first run with no mapping file, the sidecar seeds one from
-built-in per-class name heuristics, so common devices arrive already
-mapped. Those heuristics are a *guess*: they match on the first word of
-the device name (`BAT`, `CMR`, `MAC`, `APR`) and on field names, and real
-bus surveys show both of those vary between models and get renamed by
-installers. A guess that misses simply leaves a field out of the seed for
-you to add.
-
-That gives two different contributions, and it is worth knowing which one
-you are making. Editing your own `mapping.json` fixes your boat today.
-Improving the seed heuristics (section 6) makes the next person's file
-start closer to right. The second is optional and strictly a bonus.
+On the first run with no mapping file, the sidecar seeds one, so common
+devices arrive already mapped. It looks first in a bundled table of known
+models, keyed on the article number the firmware reports, and falls back
+to matching the first word of the device name (`BAT`, `CMR`, `MAC`, `APR`)
+against field names. Both are *guesses*, and the second is the weaker one:
+real bus surveys show field names vary between models of the same class
+and get renamed by installers. A guess that misses simply leaves the field
+out of the seed for you to add.
 
 The other, rarer case is a device that misbehaves in the TUI itself (a
 field with a nonsense value, a menu that never finishes discovering). That
-is a protocol issue and section 8 tells you how to capture what the
+is a protocol issue and section 9 tells you how to capture what the
 maintainer needs.
 
-## 3. Install git and the Rust toolchain
+## 3. Map your own bus
 
-You need two things: **git**, to fetch the code and send changes back,
-and the Rust toolchain. Rust installs with one tool, `rustup`, which
-manages the compiler (`rustc`), the build tool and package manager
-(`cargo`), and updates. Everything below is a one-time setup.
+This needs no Rust, no build, and nothing else from this guide. If all you
+want is your own devices in Signal K, do this and stop.
 
-### Linux, including Raspberry Pi
+Every device already appears in the TUI, because discovery is generic.
+What reaches Signal K is a separate list you control, one entry per field,
+in `mapping.json`. A device missing from that list publishes nothing,
+however healthy it looks in the TUI.
 
-```sh
-sudo apt install git build-essential pkg-config     # Debian / Ubuntu / Raspberry Pi OS
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-The first line installs git plus the C compiler and linker Rust needs.
-On Fedora it is `sudo dnf install git gcc`, on Arch `sudo pacman -S git
-base-devel`. Check with `git --version`.
-
-For the rustup line, accept the defaults. Then either open a new shell or run
-`source "$HOME/.cargo/env"`. Check with `cargo --version`.
-
-You can build directly on a Pi 4 or 5. The first release build takes a
-coffee break (the project uses link-time optimisation); later builds only
-recompile what you changed and are much faster. A `cargo build` without
-`--release` is quicker still and fine for testing.
-
-### macOS
-
-```sh
-xcode-select --install       # Apple's command-line tools: git, compiler, linker
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-The first command pops up a dialog; confirm it and wait for the download.
-It includes git, so there is nothing separate to install. (If you use
-Homebrew, `brew install git` gives a newer git, but the Apple one is
-fine.) Check with `git --version`.
-
-The Mastervolt USB link works on macOS; SocketCAN does not exist there.
-
-### Windows
-
-Install **Git for Windows** from <https://git-scm.com/download/win>.
-Accept the defaults; the only choice that matters is to keep "Git from
-the command line and also from 3rd-party software" so `git` works in
-PowerShell. (Alternatively `winget install Git.Git` from a PowerShell
-window does the same.) Open a new PowerShell window afterwards and check
-with `git --version`.
-
-Then download and run `rustup-init.exe` from <https://rustup.rs>. Rust on
-Windows needs Microsoft's C++ linker; the installer notices when it is
-missing and offers to install the **Visual Studio Build Tools** for you
-("Quick install via the Visual Studio Community installer"). Say yes. It
-is a large download and it is the least pleasant part of the whole
-process, but it is automatic.
-
-Use the Mastervolt USB link; SocketCAN is Linux-only. Run the commands
-below from a regular PowerShell or "Command Prompt" window, not from WSL,
-because WSL cannot see the USB HID device.
-
-### Minimum version
-
-The project needs Rust 1.85 or later (`rust-version` in `Cargo.toml`).
-`rustup update` brings you to the current stable release.
-
-## 4. Get the code and build it
-
-```sh
-git clone https://github.com/keesverruijt/masterbus.git
-cd masterbus
-cargo build --release
-```
-
-That builds everything. The binaries land in `target/release/`:
-`masterbus-tui`, `masterbus-signalk`, `masterbus-set-field`,
-`masterbus-dump`. Run one straight away:
-
-```sh
-./target/release/masterbus-tui
-```
-
-The first run auto-creates a config file with the detected transport
-(see **Configuration** in the [README](README.md)).
-
-The cheat sheet:
-
-| Command | What it does |
-|---------|--------------|
-| `cargo build` | debug build (fast to compile, slower to run) |
-| `cargo build --release` | optimised build, what you deploy |
-| `cargo run --release --bin masterbus-tui` | build if needed, then run |
-| `cargo test --workspace` | run every unit test |
-| `make precommit` | format check, lints, tests — what CI runs on a PR |
-| `make fmt` | reformat your code so the format check passes |
-
-If `make` is not installed, the Makefile header lists the `cargo`
-commands each target expands to.
-
-## 5. Let an AI do the typing
-
-The maintainer wrote most of this project with Claude Code, and adding a
-device class is exactly the kind of bounded, well-specified task an AI
-assistant is good at. Any agentic coding tool works: Claude Code, Codex,
-Cursor, Copilot's agent mode, Aider. Install one, open it in the cloned
-`masterbus` directory, and talk to it.
-
-Two things make this go well:
-
-**Give it the right context.** Point it at this file, at
-[README.md](README.md), and at the file it will edit
-(`crates/masterbus-tools/src/bin/masterbus-signalk.rs`). For anything
-touching the wire protocol, [docs/PROTOCOL.md](docs/PROTOCOL.md). These
-are written to be read by an AI as much as by a human.
-
-**Give it the facts from your bus.** The AI cannot see your devices. You
-can. The quickest way is one command:
-
-```sh
-./target/release/masterbus-dump -o mybus.json
-```
-
-That writes every device, group and field — id, name, unit, range, enum
-options — plus the live monitoring values, as JSON. Point the AI at the
-file. Failing that, open `masterbus-tui`, select the device, go to the
-**Monitoring** tab and screenshot it; the field id in the left column is
-the part that matters most.
-
-An example prompt that has everything it needs:
-
-> Read CONTRIBUTING.md and crates/masterbus-tools/src/seed.rs.
-> Add seed suggestions for the Mastervolt `MSH` device class (a battery
-> shunt / monitor). The TUI shows these monitoring fields:
->
-> group "Battery": "Battery" V (13.2), "Battery" A (-4.5),
-> "State of charge" % (87), "Time remaining" (a Time value),
-> "Battery" °C (21)
->
-> group "Shunt": "Consumed" Ah (-32)
->
-> Map them onto `electrical.batteries.<instance>` like the existing `BAT`
-> class does. Add tests in the same style as the existing ones, then run
-> `make precommit` and fix anything it reports.
-
-Then **check the result yourself**, which needs no Rust: delete your
-`mapping.json` so it is seeded afresh, run `masterbus-signalk`, and look
-at the stream with `nc localhost 3009` (or a Signal K server). Do the
-values match what the TUI shows, in SI units? Volts stay volts, but
-temperatures must be Kelvin, percentages ratios 0..1, rpm becomes Hz. If
-a value is wrong, tell the AI what you saw and what you expected. If it
-claims the tests pass, run `make precommit` yourself and look.
-
-Ask the AI to explain any change you do not understand before you send
-it in. You are the one signing the pull request.
-
-## 6. Two ways to fix an unmapped device
-
-### The one that fixes your boat: `masterbus-tui --mapping`
+### The editor
 
 You do not have to write JSON. Stop the service, then:
 
@@ -287,7 +148,185 @@ Where Signal K has no standard leaf, nest it under the device node with a
 descriptive camelCase name, the way the `APR` seed does with
 `.battery.voltage` and `.engine.revolutions`.
 
-### The one that helps everyone: teach the suggestions
+## 4. Install git and the Rust toolchain
+
+*Only if you are doing the second job from section 1.* Section 3 needs
+none of this.
+
+You need two things: **git**, to fetch the code and send changes back,
+and the Rust toolchain. Rust installs with one tool, `rustup`, which
+manages the compiler (`rustc`), the build tool and package manager
+(`cargo`), and updates. Everything below is a one-time setup.
+
+### Linux, including Raspberry Pi
+
+```sh
+sudo apt install git build-essential pkg-config     # Debian / Ubuntu / Raspberry Pi OS
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+The first line installs git plus the C compiler and linker Rust needs.
+On Fedora it is `sudo dnf install git gcc`, on Arch `sudo pacman -S git
+base-devel`. Check with `git --version`.
+
+For the rustup line, accept the defaults. Then either open a new shell or run
+`source "$HOME/.cargo/env"`. Check with `cargo --version`.
+
+You can build directly on a Pi 4 or 5. The first release build takes a
+coffee break (the project uses link-time optimisation); later builds only
+recompile what you changed and are much faster. A `cargo build` without
+`--release` is quicker still and fine for testing.
+
+### macOS
+
+```sh
+xcode-select --install       # Apple's command-line tools: git, compiler, linker
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+The first command pops up a dialog; confirm it and wait for the download.
+It includes git, so there is nothing separate to install. (If you use
+Homebrew, `brew install git` gives a newer git, but the Apple one is
+fine.) Check with `git --version`.
+
+The Mastervolt USB link works on macOS; SocketCAN does not exist there.
+
+### Windows
+
+Install **Git for Windows** from <https://git-scm.com/download/win>.
+Accept the defaults; the only choice that matters is to keep "Git from
+the command line and also from 3rd-party software" so `git` works in
+PowerShell. (Alternatively `winget install Git.Git` from a PowerShell
+window does the same.) Open a new PowerShell window afterwards and check
+with `git --version`.
+
+Then download and run `rustup-init.exe` from <https://rustup.rs>. Rust on
+Windows needs Microsoft's C++ linker; the installer notices when it is
+missing and offers to install the **Visual Studio Build Tools** for you
+("Quick install via the Visual Studio Community installer"). Say yes. It
+is a large download and it is the least pleasant part of the whole
+process, but it is automatic.
+
+Use the Mastervolt USB link; SocketCAN is Linux-only. Run the commands
+below from a regular PowerShell or "Command Prompt" window, not from WSL,
+because WSL cannot see the USB HID device.
+
+### Minimum version
+
+The project needs Rust 1.85 or later (`rust-version` in `Cargo.toml`).
+`rustup update` brings you to the current stable release.
+
+## 5. Get the code and build it
+
+```sh
+git clone https://github.com/keesverruijt/masterbus.git
+cd masterbus
+cargo build --release
+```
+
+That builds everything. The binaries land in `target/release/`:
+`masterbus-tui`, `masterbus-signalk`, `masterbus-set-field`,
+`masterbus-dump`. Run one straight away:
+
+```sh
+./target/release/masterbus-tui
+```
+
+The first run auto-creates a config file with the detected transport
+(see **Configuration** in the [README](README.md)).
+
+The cheat sheet:
+
+| Command | What it does |
+|---------|--------------|
+| `cargo build` | debug build (fast to compile, slower to run) |
+| `cargo build --release` | optimised build, what you deploy |
+| `cargo run --release --bin masterbus-tui` | build if needed, then run |
+| `cargo test --workspace` | run every unit test |
+| `make precommit` | format check, lints, tests — what CI runs on a PR |
+| `make fmt` | reformat your code so the format check passes |
+
+If `make` is not installed, the Makefile header lists the `cargo`
+commands each target expands to.
+
+## 6. Let an AI do the typing
+
+The maintainer wrote most of this project with Claude Code, and teaching
+the shipped guesses is exactly the kind of bounded, well-specified task an
+AI assistant is good at. Any agentic coding tool works: Claude Code,
+Codex, Cursor, Copilot's agent mode, Aider. Install one, open it in the
+cloned `masterbus` directory, and talk to it.
+
+Note what the job is now. You are not asking it to write the mapping for
+your boat — you did that yourself in section 3, in a text UI, in minutes.
+You are asking it to fold what you learned into the data this project
+ships, so the next owner of that model does not have to repeat it.
+
+Three things make this go well:
+
+**Start with the data, not the code.** The most valuable contribution is
+usually an entry in `crates/masterbus-tools/src/suggestions/catalog.json`,
+which is a table of article number and field id to Signal K path. No Rust
+at all, and it is the tier that can tell two models apart when they share
+a class code. Only reach for `seed.rs` when a whole class genuinely names
+its fields the same way across models.
+
+**Give it the right context.** Point it at this file, at
+[README.md](README.md), and at the files it will edit
+(`crates/masterbus-tools/src/suggestions/catalog.json`, or
+`crates/masterbus-tools/src/seed.rs`). For anything touching the wire
+protocol, [docs/PROTOCOL.md](docs/PROTOCOL.md). These are written to be
+read by an AI as much as by a human.
+
+**Give it the facts from your bus.** The AI cannot see your devices. You
+can. The quickest way is one command:
+
+```sh
+./target/release/masterbus-dump -o mybus.json
+```
+
+That writes every device, group and field — id, name, unit, range, enum
+options — plus the live monitoring values, as JSON. Point the AI at the
+file. Failing that, open `masterbus-tui`, select the device, go to the
+**Monitoring** tab and screenshot it; the field id in the left column is
+the part that matters most.
+
+An example prompt that has everything it needs:
+
+> Read CONTRIBUTING.md and
+> crates/masterbus-tools/src/suggestions/catalog.json. Add an entry for
+> Mastervolt article 66025000 (an MLI Ultra battery), firmware 1.37, from
+> the attached mybus.json and mapping.json. Use the field ids, not the
+> field names — the names differ between models. Set `source` to say the
+> entry came from one boat's dump. Then run `make precommit` and fix
+> anything it reports.
+
+If the model really does belong to a class whose field *names* are
+consistent, say so and point it at `seed.rs` instead, asking for tests in
+the style of the ones already there.
+
+Then **check the result yourself**, which needs no Rust. Do not delete
+your `mapping.json` to do it — that is the file you built in section 3.
+Point the program at a scratch copy instead, so a fresh one gets seeded
+somewhere harmless:
+
+```sh
+MAPPING=/tmp/try.json ./target/release/masterbus-signalk 0.0.0.0:3010
+```
+
+With `masterbus-signalk` stopped, that seeds `/tmp/try.json` from the
+guesses your change just edited and streams the result on a spare port.
+Look at it with `nc localhost 3010`, or open `/tmp/try.json` and read the
+paths. Do the values match what the TUI shows, in SI units? Volts stay
+volts, but temperatures must be kelvin, percentages ratios 0..1, rpm
+becomes Hz. If a value is wrong, tell the AI what you saw and what you
+expected. If it claims the tests pass, run `make precommit` yourself and
+look.
+
+Ask the AI to explain any change you do not understand before you send
+it in. You are the one signing the pull request.
+
+## 7. Teaching the shipped guesses
 
 Optional, and only worth doing for a model several boats will have.
 Suggestions come in two tiers and you want the right one.
@@ -344,7 +383,7 @@ Either way, remember what a suggestion is for: it is a starting point a human th
 never the last word. Suggesting nothing is always better than suggesting
 something wrong.
 
-## 7. Sending it back
+## 8. Sending it back
 
 You need a free GitHub account.
 
@@ -367,17 +406,18 @@ You need a free GitHub account.
    few lines of the resulting Signal K output.
 
 Your AI assistant can do steps 2 through 4 for you if you ask; the `gh`
-command-line tool can even open the PR. Small, one-class PRs are easier
-to review than one PR for five classes.
+command-line tool can even open the PR. Small PRs, one model at a time, are
+easier to review than one PR for five.
 
 Not up for a PR at all? Open an issue and attach the `mybus.json` from
-section 5. It carries your mapping alongside the bus, so it is enough to
-turn your work into a bundled suggestion for the next person. That is enough for someone else to write the mapping blind.
-It contains your devices' names, serial numbers and current readings —
-nothing secret, but if you would rather not publish serial numbers, edit
-them out first, or use `--device <address>` to dump only the one device.
+section 6. It carries your mapping alongside the bus, so it is enough for
+someone else to turn your work into a bundled suggestion without your
+hardware. It contains your devices' names, serial numbers and current
+readings — nothing secret, but if you would rather not publish serial
+numbers, edit them out first, or use `--device <address>` to dump only
+the one device.
 
-## 8. When the device itself misbehaves
+## 9. When the device itself misbehaves
 
 If a device is missing from the TUI, a value looks like garbage, or
 discovery of a menu never completes, the fix is in the core library and
@@ -396,7 +436,7 @@ protocol notes in [docs/PROTOCOL.md](docs/PROTOCOL.md) were reverse
 engineered from. Nothing in it is secret beyond your devices' serial
 numbers.
 
-## 9. Where things live
+## 10. Where things live
 
 | Path | What |
 |------|------|
