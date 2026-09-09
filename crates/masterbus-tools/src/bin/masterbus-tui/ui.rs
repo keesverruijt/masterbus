@@ -72,9 +72,9 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(ratatui::widgets::Clear, rect);
 
     let origin = match ed.origin {
-        Origin::Existing => "editing the existing mapping",
-        Origin::Heuristic => "suggested from the device class and field name",
-        Origin::Blank => "no suggestion for this field",
+        Origin::Existing => "editing the existing mapping".to_string(),
+        Origin::Suggested(t) => t.describe().to_string(),
+        Origin::Blank => "no suggestion for this field".to_string(),
     };
     let (hint, hint_style) = match ed.conversion_hint() {
         Some(h) => (h, Style::new().fg(Color::Green)),

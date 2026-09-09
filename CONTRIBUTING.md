@@ -287,10 +287,38 @@ Where Signal K has no standard leaf, nest it under the device node with a
 descriptive camelCase name, the way the `APR` seed does with
 `.battery.voltage` and `.engine.revolutions`.
 
-### The one that helps everyone: improve the seed
+### The one that helps everyone: teach the suggestions
 
-Optional, and only worth doing for a class several boats will have. It is
-one file, `crates/masterbus-tools/src/seed.rs`.
+Optional, and only worth doing for a model several boats will have.
+Suggestions come in two tiers and you want the right one.
+
+**A specific model → the bundled database.** Add an entry to
+`crates/masterbus-tools/src/suggestions/catalog.json`, keyed on the
+device's article number and field ids, with `{instance}` standing in for
+the Signal K instance:
+
+```json
+"40021006": {
+  "model": "Mastervolt Mass Charger (single output)",
+  "source": "issue #6, 28-device dump, firmware 7.9",
+  "fields": {
+    "0x00E": { "path": "electrical.chargers.{instance}.voltage" },
+    "0x00F": { "path": "electrical.chargers.{instance}.current" }
+  }
+}
+```
+
+This is the better tier and usually the right one. It cannot be confused
+by a rename, and it tells apart models that share a class code — two
+charger articles both call themselves `CHG` with completely different
+field sets. A `masterbus-dump` from the device gives you everything you
+need. Fill in `source` honestly: "one boat reported this" is different
+evidence from "the vendor documents it", and that difference should
+survive into review.
+
+**A whole class, by field name → the heuristics.** Only where the names
+are genuinely consistent across models. It is one file,
+`crates/masterbus-tools/src/seed.rs`.
 
 1. **`suggest`** — a `match` arm per class. Inside, a `match` on
    `(name, unit)` pairs, the *exact* strings the device reports, each
@@ -312,7 +340,7 @@ one file, `crates/masterbus-tools/src/seed.rs`.
 
 4. A line in [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]`.
 
-Remember what a seed is for: it is a starting point a human then edits,
+Either way, remember what a suggestion is for: it is a starting point a human then edits,
 never the last word. Suggesting nothing is always better than suggesting
 something wrong.
 
@@ -343,7 +371,8 @@ command-line tool can even open the PR. Small, one-class PRs are easier
 to review than one PR for five classes.
 
 Not up for a PR at all? Open an issue and attach the `mybus.json` from
-section 5. That is enough for someone else to write the mapping blind.
+section 5. It carries your mapping alongside the bus, so it is enough to
+turn your work into a bundled suggestion for the next person. That is enough for someone else to write the mapping blind.
 It contains your devices' names, serial numbers and current readings —
 nothing secret, but if you would rather not publish serial numbers, edit
 them out first, or use `--device <address>` to dump only the one device.
@@ -379,6 +408,8 @@ numbers.
 | `crates/masterbus-tools/src/bin/masterbus-signalk.rs` | the Signal K sidecar |
 | `crates/masterbus-tools/src/mapping.rs` | the `mapping.json` format |
 | `crates/masterbus-tools/src/seed.rs` | per-class path suggestions used to seed a new mapping |
+| `crates/masterbus-tools/src/database.rs` | per-model path suggestions, keyed on article number |
+| `crates/masterbus-tools/src/suggestions/catalog.json` | the bundled per-model data |
 | `crates/masterbus-tools/src/units.rs` | device-unit → SI conversion, derived from the unit pair |
 | `crates/masterbus-tools/src/bin/masterbus-set-field.rs` | one-shot field writer |
 | `crates/masterbus-tools/src/bin/masterbus-dump.rs` | whole-bus JSON snapshot |

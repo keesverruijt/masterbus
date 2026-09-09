@@ -121,9 +121,12 @@ category and it is honoured; the device's `name` and `manufacturer`
 metadata follow it there. A leaf this build knows no unit for is still
 published, with a warning that it will carry no unit metadata.
 
-**First run.** With no mapping file, the service seeds one from built-in
-per-class name heuristics and writes it out, so an install keeps working
-and has something to edit. Curate it while the service is stopped, then
+**First run.** With no mapping file, the service seeds one and writes it
+out, so an install keeps working and has something to edit. Suggestions
+come from a bundled per-model database keyed on the device's article
+number, falling back to per-class field-name heuristics. The database is
+the tier that can tell apart two models sharing a class code, and the
+tier a renamed field cannot fool. Curate it while the service is stopped, then
 restart.
 
 ### Run as a systemd service
@@ -241,9 +244,14 @@ Examples:
     masterbus-dump --values all --menus all -o mybus.json
     masterbus-dump --device 286CA9 --probe            # one device, to stdout
 
+It also includes your `mapping.json` when you have one, both whole and as
+a `signalk` path beside each mapped field, so the file shows the bus and
+the decisions made about it together.
+
 This is the tool to run when reporting a device the Signal K sidecar
 does not yet map: the dump gives someone without your hardware
-everything needed to write the mapping. Field ids print in the same
+everything needed to write the mapping, and everything needed to fold
+your work back into the bundled suggestions. Field ids print in the same
 three-digit hex `masterbus-set-field` accepts. Device, group and field
 *names* are installer-editable strings held in device EEPROM, so a
 mapping table should key on the ids and read the names as documentation.

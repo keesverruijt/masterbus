@@ -23,9 +23,10 @@
 //! #12 has the bus that proves matching on them cannot work.
 //!
 //! The file is meant to be curated by a human in `masterbus-tui`. When it is
-//! missing or empty, this service seeds one from
-//! [`masterbus_tools::seed`]'s per-class name heuristics and writes it out, so
-//! an install that worked before keeps working and has something to edit.
+//! missing or empty, this service seeds one from [`masterbus_tools::seed`] —
+//! the bundled per-model database first, then the per-class name heuristics —
+//! and writes it out, so an install that worked before keeps working and has
+//! something to edit.
 //!
 //! Unit conversion is **derived**, never stored: the factor follows from the
 //! field's unit and the unit the target Signal K leaf wants. A mapping entry
@@ -174,7 +175,15 @@ fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
             ..Default::default()
         };
         for (id, fname, unit) in &d.fields {
-            if let Some(s) = seed::suggest(&class, &d.instance, fname, unit) {
+            if let Some((s, _tier)) = seed::suggest_best(
+                &d.article,
+                &d.firmware,
+                &class,
+                &d.instance,
+                *id,
+                fname,
+                unit,
+            ) {
                 dm.fields.insert(
                     field_key(*id),
                     FieldMapping {
@@ -543,6 +552,41 @@ mod tests {
                 (0x022, "Relay close", ""),
             ],
         )
+    }
+
+    /// Two devices that both advertise as `CHG` with unrelated field sets. The
+    /// class-and-name table maps neither; the article-keyed database maps both,
+    /// differently, which is the case that motivated #12.
+    #[test]
+    fn seeding_tells_the_two_charger_articles_apart() {
+        let mut mass = dev(
+            "MASS-1",
+            "CHG 24V Ch.U4-1",
+            &[
+                (0x00E, "Battery voltage", "V"),
+                (0x00F, "Battery current", "A"),
+            ],
+        );
+        mass.article = "40021006".into();
+        mass.firmware = "7.9".into();
+        // The renamed outputs from the boat in #6.
+        let mut cm = dev(
+            "CM-1",
+            "CHG 12V ChargerE",
+            &[(0x002, "Eng.batt", "V"), (0x004, "Gen.batt", "V")],
+        );
+        cm.article = "44010250".into();
+        cm.firmware = "0.5".into();
+
+        let m = seed_mapping(&[mass, cm]);
+        assert_eq!(
+            m.devices["MASS-1"].fields[&field_key(0x00E)].path,
+            "electrical.chargers.24v-ch-u4-1.voltage"
+        );
+        assert_eq!(
+            m.devices["CM-1"].fields[&field_key(0x002)].path,
+            "electrical.chargers.12v-chargere.output.1.voltage"
+        );
     }
 
     #[test]

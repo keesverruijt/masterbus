@@ -152,7 +152,8 @@ implies.
 values as **Signal K deltas** (newline-delimited JSON) over TCP (default
 `0.0.0.0:3009`), with SI-unit conversion. A curated `mapping.json` beside
 `config.ini` says which field publishes to which Signal K path, keyed on device
-serial and field id; it is seeded from built-in heuristics on first run. Ships
+serial and field id; it is seeded on first run from a bundled per-model
+database, falling back to per-class name heuristics. Ships
 with a hardened systemd unit.
 
 ```sh
@@ -175,6 +176,9 @@ masterbus-dump -o mybus.json          # monitoring + configuration + service
 masterbus-dump --values all --menus all -o mybus.json
 masterbus-dump --device 286CA9        # just one device, to stdout
 ```
+
+The host's Signal K mapping is included when there is one, so a dump shows the
+bus and the decisions made about it together.
 
 Field ids appear as `0x000`..`0x1FF` — the same encoding the TUI shows and
 `masterbus-set-field` accepts. Names are installer-editable and ids are not, so

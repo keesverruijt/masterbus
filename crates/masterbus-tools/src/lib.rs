@@ -10,9 +10,12 @@
 //!   pair of units rather than stored per field.
 //! - [`signalk`] — the Signal K vocabulary: which SI unit each path leaf
 //!   carries, and how a device value is encoded for the wire.
-//! - [`seed`] — path *suggestions* from the old per-class name table, kept as
-//!   a proposal source with no authority.
+//! - [`seed`] — path *suggestions*: the bundled per-model database first, then
+//!   the old per-class name table, both proposals with no authority.
+//! - [`database`] — bundled per-model suggestions keyed on article and field
+//!   id, for the models a name table cannot tell apart.
 
+pub mod database;
 pub mod mapping;
 pub mod seed;
 pub mod signalk;

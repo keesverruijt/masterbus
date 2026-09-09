@@ -14,7 +14,9 @@
 //! are exactly the things a real bus was shown to vary. Treat every answer as
 //! a proposal to a human, never as a fact.
 
-use masterbus::DeviceId;
+use masterbus::{DeviceId, FieldId};
+
+use crate::database;
 
 /// A proposed mapping for one field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,9 +88,60 @@ pub fn sanitize(s: &str) -> String {
     }
 }
 
-/// Propose a Signal K path for a field, from its device class, name and unit.
+/// Where a suggestion came from, so the editor can say how much to trust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// An exact entry for this article *and* firmware in the bundled database.
+    ModelFirmware,
+    /// An entry for this article in the bundled database.
+    Model,
+    /// The per-class name heuristics below.
+    Name,
+}
+
+impl Tier {
+    /// A short phrase for the editor's prompt.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Tier::ModelFirmware => "known for this model and firmware",
+            Tier::Model => "known for this model",
+            Tier::Name => "guessed from the device class and field name",
+        }
+    }
+}
+
+/// Propose a Signal K path for a field, best evidence first.
+///
+/// The bundled per-model database is consulted before the name heuristics,
+/// because it is keyed on the article number and so can tell apart models the
+/// names cannot — two charger articles on the bus in #6 both advertise as
+/// `CHG` with unrelated field sets.
 ///
 /// `None` means "no idea", which is the common case and is not an error.
+pub fn suggest_best(
+    article: &str,
+    firmware: &str,
+    class: &str,
+    instance: &str,
+    field: FieldId,
+    name: &str,
+    unit: &str,
+) -> Option<(Suggestion, Tier)> {
+    if let Some(k) = database::lookup(article, firmware, field, instance) {
+        let tier = if k.exact_firmware {
+            Tier::ModelFirmware
+        } else {
+            Tier::Model
+        };
+        return Some((k.suggestion, tier));
+    }
+    suggest(class, instance, name, unit).map(|s| (s, Tier::Name))
+}
+
+/// Propose a Signal K path from the device class, field name and unit alone.
+///
+/// The weakest tier. Prefer [`suggest_best`], which consults the per-model
+/// database first.
 pub fn suggest(class: &str, instance: &str, name: &str, unit: &str) -> Option<Suggestion> {
     let deg = "\u{b0}C";
     let ut = unit.trim();
@@ -302,6 +355,31 @@ mod tests {
         assert_eq!(instance_of("Repeater", 0x123456), "repeater");
         // No name at all falls back to the address.
         assert_eq!(instance_of("", 0x123456), "123456");
+    }
+
+    /// The database must win over the name heuristics: on the ChargeMaster the
+    /// installer renamed 0x002 to "Eng.batt", which the name table would map to
+    /// nothing at all, while the article-keyed entry knows it is output 1.
+    #[test]
+    fn the_model_database_outranks_the_name_guess() {
+        let (s, tier) = suggest_best("44010250", "0.5", "CHG", "chargere", 0x002, "Eng.batt", "V")
+            .expect("the database knows this field");
+        assert_eq!(s.path, "electrical.chargers.chargere.output.1.voltage");
+        assert_eq!(tier, Tier::Model);
+    }
+
+    /// A model the database does not carry still gets the name heuristic.
+    #[test]
+    fn an_unknown_model_falls_through_to_the_name_guess() {
+        let (s, tier) = suggest_best("99999999", "1.0", "BAT", "house", 0x001, "Voltage", "V")
+            .expect("the name table knows this one");
+        assert_eq!(s.path, "electrical.batteries.house.voltage");
+        assert_eq!(tier, Tier::Name);
+    }
+
+    #[test]
+    fn a_field_neither_tier_knows_suggests_nothing() {
+        assert!(suggest_best("99999999", "1.0", "BAT", "x", 0x022, "Relay close", "").is_none());
     }
 
     #[test]

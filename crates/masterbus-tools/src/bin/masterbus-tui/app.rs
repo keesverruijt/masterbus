@@ -1048,13 +1048,15 @@ pub struct MappingSession {
     pub quit_armed: bool,
 }
 
-/// Where a pre-filled path suggestion came from, so the editor can say.
+/// Where a pre-filled path suggestion came from, so the editor can say how much
+/// to trust it. "Known for this model" and "guessed from a name" deserve
+/// different amounts of scrutiny from whoever is about to press Enter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// Already mapped; this is an edit.
     Existing,
-    /// Proposed by the built-in per-class heuristics.
-    Heuristic,
+    /// Proposed by the suggestion machinery, at the given confidence.
+    Suggested(seed::Tier),
     /// Nothing to go on; the user is typing from scratch.
     Blank,
 }
@@ -1152,14 +1154,22 @@ impl App {
         let (buf, invert, origin) = match existing {
             Some(fm) => (fm.path, fm.invert, Origin::Existing),
             None => {
-                let name = self
+                let (name, article, firmware) = self
                     .cur_info
                     .as_ref()
-                    .map(|i| i.name.clone())
+                    .map(|i| (i.name.clone(), i.article.clone(), i.firmware.clone()))
                     .unwrap_or_default();
                 let instance = self.cur_instance.clone();
-                match seed::suggest(seed::class_of(&name), &instance, &field.name, &field.unit) {
-                    Some(s) => (s.path, s.invert, Origin::Heuristic),
+                match seed::suggest_best(
+                    &article,
+                    &firmware,
+                    seed::class_of(&name),
+                    &instance,
+                    field.index,
+                    &field.name,
+                    &field.unit,
+                ) {
+                    Some((s, tier)) => (s.path, s.invert, Origin::Suggested(tier)),
                     None => (String::new(), false, Origin::Blank),
                 }
             }
@@ -1565,7 +1575,7 @@ mod mapping_tests {
             unit: "\u{b0}C".into(),
             buf: "electrical.batteries.house.temperature".into(),
             invert: false,
-            origin: Origin::Heuristic,
+            origin: Origin::Suggested(seed::Tier::Name),
         };
         let hint = ed.conversion_hint().expect("celsius reaches kelvin");
         assert!(hint.contains('K'), "{hint}");

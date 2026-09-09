@@ -46,6 +46,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key, and delete the old directory. (#12)
 
 ### Added
+- **A bundled per-model suggestion database.** Keyed on **article number** and
+  field id, so it reaches the models the class-and-name heuristics cannot: the
+  two charger articles in #6 both advertise as `CHG` with unrelated field sets,
+  and one has had its output fields renamed by the installer. Suggestions are
+  now tiered — an exact entry for this article and firmware, then one for the
+  article, then the name guess — and the TUI says which tier a proposal came
+  from, because "known for this model" and "guessed from a name" deserve
+  different scrutiny. Every entry records its provenance. Ships with the two
+  charger articles from #6; add more in
+  `crates/masterbus-tools/src/suggestions/catalog.json`. (#12)
+- **`masterbus-dump` includes the host's mapping.** Whole, and as a `signalk`
+  path beside each mapped field, so a reported dump shows the bus and the
+  decisions made about it together — which is what lets a user's curation
+  become a bundled suggestion for the next person. Absent when there is no
+  mapping file. (#12)
 - **`masterbus-tui --mapping` edits the Signal K mapping.** The device list
   shows how many of each device's fields publish, the Monitoring tab gains a
   Signal K column, `+` and `-` map and unmap the selected field, `a` copies a

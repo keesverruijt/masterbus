@@ -24,6 +24,12 @@
 //! come from the per-host config file (see [`masterbus::FileConfig`]); the file
 //! is created on first run.
 //!
+//! The host's Signal K mapping (`mapping.json`, see `masterbus_tools::mapping`)
+//! is included when there is one, both as a whole and as a `signalk` path
+//! beside each mapped field. A dump then shows the bus *and* the decisions
+//! someone made about it, which is what makes a report useful for improving
+//! the bundled suggestions.
+//!
 //! # Why the ids matter
 //!
 //! Device names, group names and field names are all installer-editable strings
@@ -41,6 +47,7 @@ use masterbus::{
     AccessLevel, Channel, Config, DeviceId, DeviceStatus, FieldId, FieldInfo, MasterBus, Menu,
     Value, VisualizationType, field_id,
 };
+use masterbus_tools::mapping::Mapping;
 use serde::Serialize;
 
 /// Version of the JSON document shape, so a consumer can tell dumps apart.
@@ -222,6 +229,16 @@ struct Dump {
     values: String,
     /// Whether the flat field-index probe ran.
     probed: bool,
+    /// The host's Signal K mapping, when there is one.
+    ///
+    /// A dump then carries both what the bus looks like and what a human
+    /// decided it means, which is what lets the bundled suggestion database
+    /// improve from a report. Omitted when no mapping file exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mapping: Option<Mapping>,
+    /// Where that mapping was read from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mapping_path: Option<String>,
     /// Every device, in bus-address order.
     devices: Vec<DeviceDump>,
 }
@@ -309,6 +326,11 @@ struct FieldDump {
     /// Why the value could not be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     value_error: Option<String>,
+    /// The Signal K path this field publishes to, from the host's mapping.
+    /// Put beside the field rather than only in the `mapping` block so a
+    /// reader can see the decision next to the evidence for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signalk: Option<String>,
 }
 
 /// Render a value the way `masterbus-tui` does, so a dump reads like the screen.
@@ -356,6 +378,7 @@ fn field_dump(f: &FieldInfo) -> FieldDump {
         value: None,
         value_text: None,
         value_error: None,
+        signalk: None,
     }
 }
 
@@ -442,6 +465,18 @@ fn collect(bus: &MasterBus, args: &Args) -> Dump {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    // The host's curated mapping, if any. A dump that carries it shows both the
+    // bus and the decisions made about it, which is what a bug report needs.
+    let mapping_path = std::env::var_os("MAPPING").map(PathBuf::from).or_else(|| {
+        masterbus::FileConfig::load_or_create()
+            .ok()
+            .map(|c| c.mapping_path())
+    });
+    let mapping = mapping_path
+        .as_deref()
+        .and_then(|p| Mapping::load(p).ok())
+        .filter(|m| !m.is_empty());
+
     let mut devices: Vec<_> = bus.devices_all();
     devices.sort_by_key(|d| d.id());
 
@@ -489,6 +524,10 @@ fn collect(bus: &MasterBus, args: &Args) -> Dump {
                 for f in &g.fields {
                     seen.insert(f.index);
                     let mut fd = field_dump(f);
+                    fd.signalk = mapping
+                        .as_ref()
+                        .and_then(|m| m.field(&identity.serial, f.index))
+                        .map(|fm| fm.path.clone());
                     if args.values.wants(menu) {
                         match dev.field(f.index).value() {
                             Ok(v) => {
@@ -516,6 +555,10 @@ fn collect(bus: &MasterBus, args: &Args) -> Dump {
                     for f in &all {
                         if seen.insert(f.index) {
                             let mut fd = field_dump(f);
+                            fd.signalk = mapping
+                                .as_ref()
+                                .and_then(|m| m.field(&identity.serial, f.index))
+                                .map(|fm| fm.path.clone());
                             if args.values == ValueMode::All {
                                 match dev.field(f.index).value() {
                                     Ok(v) => {
@@ -557,6 +600,11 @@ fn collect(bus: &MasterBus, args: &Args) -> Dump {
         menus: args.menus.iter().copied().map(menu_tag).collect(),
         values: args.values.name().to_string(),
         probed: args.probe,
+        mapping_path: mapping
+            .is_some()
+            .then(|| mapping_path.as_ref().map(|p| p.display().to_string()))
+            .flatten(),
+        mapping,
         devices: out,
     }
 }
@@ -627,6 +675,8 @@ mod tests {
             menus: vec![menu_tag(Menu::Monitoring)],
             values: ValueMode::Monitoring.name().into(),
             probed: false,
+            mapping: None,
+            mapping_path: None,
             devices: vec![DeviceDump {
                 id: "0x286CA9".into(),
                 address: 0x286CA9,
@@ -659,8 +709,53 @@ mod tests {
         // Absent rather than null, so a dump stays readable.
         assert!(field.get("value_error").is_none());
         assert!(field.get("options").is_none());
+        assert!(field.get("signalk").is_none());
         assert!(j["devices"][0].get("access_level").is_none());
         assert_eq!(j["devices"][0]["groups"][0]["menu"], "monitoring");
+    }
+
+    /// The mapping block and the per-field path are both optional, and a dump
+    /// from a host with no mapping must not sprout empty keys.
+    #[test]
+    fn the_mapping_is_absent_rather_than_null_when_there_is_none() {
+        let dump = Dump {
+            format: FORMAT,
+            tool: "masterbus-dump test".into(),
+            generated: iso8601_utc(0),
+            generated_unix: 0,
+            menus: vec![menu_tag(Menu::Monitoring)],
+            values: ValueMode::None.name().into(),
+            probed: false,
+            mapping: None,
+            mapping_path: None,
+            devices: vec![],
+        };
+        let j: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&dump).unwrap()).unwrap();
+        assert!(j.get("mapping").is_none());
+        assert!(j.get("mapping_path").is_none());
+    }
+
+    #[test]
+    fn a_mapped_field_carries_its_signalk_path() {
+        let f = FieldInfo {
+            index: field_id::btm1(0x00E),
+            name: "Battery voltage".into(),
+            unit: "V".into(),
+            viz_type: VisualizationType::Float,
+            writeable: false,
+            eventable: false,
+            min: 0.0,
+            max: 32.0,
+            step: 0.01,
+            options: vec![],
+        };
+        let mut fd = field_dump(&f);
+        assert!(fd.signalk.is_none());
+        fd.signalk = Some("electrical.chargers.ch1.voltage".into());
+        let j: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&fd).unwrap()).unwrap();
+        assert_eq!(j["signalk"], "electrical.chargers.ch1.voltage");
     }
 
     #[test]
