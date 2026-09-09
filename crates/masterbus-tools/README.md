@@ -65,7 +65,7 @@ units. The instance id is the device's name, lowercased and stripped of
 its leading class word (e.g. `BAT Main Batt 4` → `main-batt-4`).
 
     masterbus-signalk [listen-addr]
-    # e.g.: masterbus-signalk                # default port (0.0.0.0:3009)
+    # e.g.: masterbus-signalk                # config.ini's `listen`, else 0.0.0.0:3009
     #       masterbus-signalk 0.0.0.0:4000   # bind elsewhere
 
 Sample delta:
@@ -76,7 +76,8 @@ Sample delta:
 
 ### Filtering with `mapping.ini`
 
-If the `MAPPING` environment variable points at a file, output is gated
+The mapping file lives beside `config.ini` (the systemd unit points
+`MAPPING` at `/etc/default/masterbus/mapping.ini`). Output is gated
 per device/group. As devices are discovered the file is auto-populated
 and rewritten; **edit the `true`/`false` flags while the service is
 stopped**, then restart.
@@ -110,19 +111,21 @@ sudo systemctl enable --now masterbus-signalk
 ```
 
 Nothing else needs creating by hand: systemd makes
-`/etc/default/masterbus-signalk` and `/etc/default/masterbus` on the
-first start (`ConfigurationDirectory=` in the unit), the first run writes
-`/etc/default/masterbus/config.ini` with the auto-detected transport and
-master settings, and `mapping.ini` appears next to it in
-`/etc/default/masterbus-signalk` once devices are discovered. Review
-`config.ini` after the first start; `journalctl -u masterbus-signalk`
-shows what was detected.
+`/etc/default/masterbus` on the first start (`ConfigurationDirectory=`
+in the unit), the first run writes `config.ini` there with the
+auto-detected transport and master settings, and `mapping.ini` appears
+next to it once devices are discovered. Review `config.ini` after the
+first start; `journalctl -u masterbus-signalk` shows what was detected.
 
-Transport, master role, and the schema-cache directory are configured
-in `/etc/default/masterbus/config.ini` (see the **Configuration**
-section above) and the systemd unit's `LISTEN` env var (override it in
-`/etc/default/masterbus-signalk/config`). The service keeps a persistent
+That one directory holds everything: transport, master role,
+schema-cache directory and the `listen` address all live in
+`config.ini` (see the **Configuration** section above), so the unit
+needs no environment file of its own. The service keeps a persistent
 schema cache in `/var/lib/masterbus` and restarts on failure.
+
+Upgrading from a release that used `/etc/default/masterbus-signalk/`:
+move `mapping.ini` into `/etc/default/masterbus/`, copy any `LISTEN=`
+you set into `config.ini`'s `listen` key, and delete the old directory.
 
 The binary lives in `/usr/local/bin` rather than `/usr/local/sbin` on
 purpose: it is the same executable an unprivileged user runs from a

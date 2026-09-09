@@ -11,6 +11,11 @@
 //! - **macOS**: `$HOME/Library/Application Support/masterbus/config.ini`.
 //! - **Windows**: `%APPDATA%\masterbus\config.ini`.
 //!
+//! Everything else this project stores per host lives in that same directory.
+//! In particular the Signal K sidecar's field mapping is `mapping.json` beside
+//! `config.ini` — see [`FileConfig::mapping_path`]. There is deliberately no
+//! second configuration directory.
+//!
 //! The schema cache (`cache_dir`) follows the same convention:
 //!
 //! - **Linux**: `/var/lib/masterbus` (system) or `$XDG_CACHE_HOME/masterbus`
@@ -45,12 +50,14 @@
 
 use std::fs;
 use std::io::Write;
-#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 use crate::model::DeviceId;
+
+/// Name of the Signal K field-mapping file, kept beside `config.ini`.
+pub const MAPPING_FILE: &str = "mapping.json";
 
 /// Which transport the file selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,11 +80,27 @@ pub struct FileConfig {
     /// On-disk schema cache directory; `None` = caching disabled (the key is
     /// absent or commented out in the file).
     pub cache_dir: Option<PathBuf>,
+    /// Address `masterbus-signalk` listens on; `None` = the tool's own default.
+    /// Kept here so the systemd unit needs no environment file of its own.
+    pub listen: Option<String>,
     /// Path the file was loaded from / created at.
     pub path: PathBuf,
 }
 
 impl FileConfig {
+    /// The Signal K field mapping file, always beside `config.ini`.
+    ///
+    /// Keeping one configuration directory per host is deliberate: whichever
+    /// location [`Self::load_or_create`] settled on (system, per-user, or an
+    /// OS-native path) is the one the mapping is read from and written to, so
+    /// the TUI editor and the sidecar cannot disagree about where it lives.
+    pub fn mapping_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(MAPPING_FILE)
+    }
+
     /// Load the standard config file, creating one with auto-detected values
     /// on first run. Reasons for failure: no writable location to create the
     /// file, or ambiguous hardware (multiple CAN interfaces, no USB link).
@@ -295,6 +318,7 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
     let mut device_type: Option<DeviceType> = None;
     let mut device_name = String::new();
     let mut cache_dir: Option<PathBuf> = None;
+    let mut listen: Option<String> = None;
     for (lineno, line) in raw.lines().enumerate() {
         let lineno = lineno + 1;
         let stripped = line.split(['#', ';']).next().unwrap_or("").trim();
@@ -340,6 +364,7 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
             "cache_dir" if !value.is_empty() => {
                 cache_dir = Some(PathBuf::from(value));
             }
+            "listen" if !value.is_empty() => listen = Some(value.to_string()),
             _ => {} // forward-compat: ignore unknown keys + empty cache_dir
         }
     }
@@ -350,6 +375,7 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
         device_type,
         device_name,
         cache_dir,
+        listen,
         path,
     })
 }
@@ -363,6 +389,10 @@ fn render(cfg: &FileConfig) -> String {
     let cache = match &cfg.cache_dir {
         Some(p) => format!("cache_dir = {}\n", p.display()),
         None => "# cache_dir = /var/lib/masterbus\n".to_string(),
+    };
+    let listen = match &cfg.listen {
+        Some(a) => format!("listen = {a}\n"),
+        None => "# listen = 0.0.0.0:3009\n".to_string(),
     };
     format!(
         "# masterbus configuration.\n\
@@ -381,7 +411,10 @@ fn render(cfg: &FileConfig) -> String {
          # Where to persist discovered schemas (per device, by serial). If the\n\
          # path isn't writable by the running user, the engine falls back to\n\
          # $HOME/.cache/masterbus. Comment out to disable on-disk caching.\n\
-         {cache}",
+         {cache}\n\
+         # Address masterbus-signalk listens on. Comment out for its default\n\
+         # (0.0.0.0:3009). A command-line argument still wins over this.\n\
+         {listen}",
         dt = match cfg.device_type {
             DeviceType::Can => "can",
             DeviceType::Usb => "usb",
@@ -401,6 +434,7 @@ fn autodetect() -> Result<FileConfig> {
             device_type: DeviceType::Usb,
             device_name: serial,
             cache_dir: None,
+            listen: None,
             path: PathBuf::new(),
         });
     }
@@ -419,6 +453,7 @@ fn autodetect() -> Result<FileConfig> {
                 device_type: DeviceType::Can,
                 device_name: one.clone(),
                 cache_dir: None,
+                listen: None,
                 path: PathBuf::new(),
             }),
             many => Err(Error::Connection(format!(
@@ -474,6 +509,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mapping_lives_beside_config_wherever_that_is() {
+        // The point of the accessor: one configuration directory per host, so
+        // the TUI editor and the sidecar cannot disagree about the location.
+        for dir in [
+            "/etc/default/masterbus",
+            "/home/kees/.config/masterbus",
+            "/Users/kees/Library/Application Support/masterbus",
+        ] {
+            let cfg = parse(
+                "device_type = usb\ndevice_name =\n",
+                PathBuf::from(dir).join("config.ini"),
+            )
+            .unwrap();
+            assert_eq!(cfg.mapping_path(), PathBuf::from(dir).join("mapping.json"));
+        }
+    }
+
+    #[test]
+    fn listen_is_optional_and_round_trips() {
+        let cfg = parse("device_type = usb\ndevice_name =\n", PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.listen, None);
+        assert!(render(&cfg).contains("# listen = 0.0.0.0:3009"));
+
+        let raw = "device_type = usb\ndevice_name =\nlisten = 127.0.0.1:4000\n";
+        let cfg = parse(raw, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.listen.as_deref(), Some("127.0.0.1:4000"));
+        let again = parse(&render(&cfg), PathBuf::from("t.ini")).unwrap();
+        assert_eq!(again.listen.as_deref(), Some("127.0.0.1:4000"));
+    }
+
+    #[test]
     fn parses_valid_file() {
         let raw = "\
             # comment\n\
@@ -522,6 +588,7 @@ mod tests {
             device_type: DeviceType::Can,
             device_name: "can0".into(),
             cache_dir: Some(PathBuf::from("/var/lib/masterbus")),
+            listen: Some("0.0.0.0:3009".into()),
             path: PathBuf::from("t.ini"),
         };
         let s = render(&cfg);
@@ -530,6 +597,7 @@ mod tests {
         assert_eq!(back.device_type, DeviceType::Can);
         assert_eq!(back.device_name, "can0");
         assert_eq!(back.cache_dir, Some(PathBuf::from("/var/lib/masterbus")));
+        assert_eq!(back.listen.as_deref(), Some("0.0.0.0:3009"));
     }
 
     #[test]

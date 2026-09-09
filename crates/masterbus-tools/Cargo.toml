@@ -10,6 +10,10 @@ readme = "README.md"
 keywords = ["mastervolt", "masterbus", "canbus", "marine"]
 categories = ["command-line-utilities", "hardware-support"]
 
+[lib]
+name = "masterbus_tools"
+path = "src/lib.rs"
+
 [[bin]]
 name = "masterbus-tui"
 path = "src/bin/masterbus-tui/main.rs"

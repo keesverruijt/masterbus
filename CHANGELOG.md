@@ -6,7 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **One configuration directory per host.** `/etc/default/masterbus-signalk/`
+  is gone; everything lives beside `config.ini` in `/etc/default/masterbus/`
+  (and the OS-native per-user equivalent elsewhere). `config.ini` gained a
+  `listen` key for the Signal K sidecar's address, so the systemd unit no
+  longer needs an `EnvironmentFile=`, a second `ConfigurationDirectory=` or a
+  second `ReadWritePaths=`. A command-line address still overrides the file.
+  `FileConfig::mapping_path()` resolves the mapping file to that same
+  directory, so the sidecar and the coming TUI editor cannot disagree about
+  where it is. **Upgrading:** move `mapping.ini` into
+  `/etc/default/masterbus/`, copy any `LISTEN=` into `config.ini`'s `listen`
+  key, and delete the old directory. (#12)
+
 ### Added
+- **A library target for `masterbus-tools`.** The crate was binaries only,
+  which left `masterbus-signalk` and `masterbus-tui` unable to share code. Two
+  modules to start: `signalk` (the SI unit each Signal K path leaf carries) and
+  `units` (the device-unit → Signal K conversion, *derived* from the pair of
+  units rather than stored per field, so a curated mapping never has to record
+  a scale factor a human could get wrong). Groundwork for #12.
 - **`masterbus-dump`** — a fourth command-line tool that walks the whole bus and
   writes one JSON document: per device its identity and status, per group its id
   and menu, per field its channel-aware id, name, unit, range, enum options and
@@ -38,6 +57,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **Device property strings are trimmed.** At least one shipping charger
+  reports its article number with a trailing space (`"44010250 "`), which
+  silently defeats every lookup keyed on it — the bundled string catalog, and
+  any per-model mapping table. Article, serial, name and revision are now
+  trimmed at the point they are fetched. Schema caches keyed on an untrimmed
+  serial are re-fetched once.
 - **`masterbus-dump` was missing from the release artifacts.** The CI staging
   loop copied only `masterbus-tui` and `masterbus-set-field`, so the one tool
   that `CONTRIBUTING.md` asks people to run when reporting an unmapped device

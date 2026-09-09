@@ -112,7 +112,15 @@ device_name = can0
 # user-run tools share schemas when possible. Comment out to disable
 # on-disk caching.
 cache_dir = /var/lib/masterbus
+
+# Address masterbus-signalk listens on. Comment out for its default
+# (0.0.0.0:3009). A command-line argument still wins over this.
+# listen = 0.0.0.0:3009
 ```
+
+That directory is the only one this project configures per host. The Signal K
+sidecar's field mapping lives beside `config.ini` in the same directory, so
+there is nothing else to find or to keep in sync.
 
 To change the heartbeat-master behaviour, swap transports, or relocate the
 cache, edit the file (or delete it and let auto-detection re-create it).
@@ -142,6 +150,9 @@ Ships with a hardened systemd unit.
 masterbus-signalk [listen-addr]
 # e.g. masterbus-signalk 0.0.0.0:3009
 ```
+
+Without an argument it uses the `listen` key from `config.ini`, falling back to
+`0.0.0.0:3009`.
 
 ### Bus dump
 

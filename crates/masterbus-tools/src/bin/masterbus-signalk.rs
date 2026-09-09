@@ -9,9 +9,10 @@
 //! masterbus-signalk [listen-addr]
 //! ```
 //!
-//! Transport (USB / SocketCAN), master role, and the schema cache directory
-//! all come from the per-host config file (see `masterbus::FileConfig`); the
-//! file is created on first run.
+//! Transport (USB / SocketCAN), master role, the schema cache directory and
+//! the default listen address all come from the per-host config file (see
+//! `masterbus::FileConfig`); the file is created on first run. A listen
+//! address given on the command line overrides the file.
 //!
 //! The MasterBus-field → Signal K-path mapping (and unit conversion to SI) lives
 //! in [`map_field`]; it currently covers batteries, the CombiMaster, the MAC
@@ -51,9 +52,16 @@ const RATE: Duration = Duration::from_millis(1000);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let listen = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    // Listen address: command line wins, then `listen` in the per-host config
+    // file, then the built-in default. Having it in the config file is what
+    // lets the systemd unit drop its own environment file, so this project
+    // keeps exactly one configuration directory per host.
+    let listen = std::env::args().nth(1).unwrap_or_else(|| {
+        masterbus::FileConfig::load_or_create()
+            .ok()
+            .and_then(|c| c.listen)
+            .unwrap_or_else(|| DEFAULT_LISTEN.to_string())
+    });
     let mapping = std::env::var_os("MAPPING").map(PathBuf::from);
 
     let bus = match MasterBus::auto(Config::default()) {
@@ -412,18 +420,11 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
 /// server, so it can't unit-convert them without a `meta` delta. We publish meta
 /// for *every* known leaf (re-affirming the standard ones is harmless); `None`
 /// leaves (`chargingMode`, `deviceMode`, `enabled`, `name`) carry no unit.
+///
+/// The table itself lives in [`masterbus_tools::signalk`], because the mapping
+/// editor in `masterbus-tui` needs the same answers.
 fn sk_units(path: &str) -> Option<&'static str> {
-    Some(match path.rsplit('.').next().unwrap_or("") {
-        "stateOfCharge" => "ratio",
-        "timeRemaining" => "s",
-        "dischargeSinceFull" => "C",
-        "temperature" => "K",
-        "voltage" | "voltageSense" => "V",
-        "current" | "currentLimit" => "A",
-        "power" => "W",
-        "frequency" | "revolutions" => "Hz",
-        _ => return None,
-    })
+    masterbus_tools::signalk::leaf_unit(path)
 }
 
 /// Signal K base path(s) for a device class — the node(s) that carry this

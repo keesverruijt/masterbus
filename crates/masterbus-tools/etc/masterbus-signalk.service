@@ -6,19 +6,25 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now masterbus-signalk
 #
-# Transport + master role come from /etc/default/masterbus/config.ini
-# (auto-created on first run with detected defaults; review and edit as
-# needed — see `masterbus::FileConfig` for the format).
+# Everything this host is configured with lives in ONE directory,
+# /etc/default/masterbus/ (created by systemd on first start, see
+# ConfigurationDirectory= below):
 #
-# /etc/default/masterbus-signalk/ (created by systemd on first start, see
-# ConfigurationDirectory= below) optionally holds:
-#   config       environment overrides (e.g. LISTEN); read by systemd.
-#   mapping.ini  per-device publish toggles; the service auto-creates and updates
-#                it as devices are discovered. Edit the true/false flags while the
-#                service is stopped, then restart.
+#   config.ini   transport, master role, schema cache directory, and the
+#                `listen` address for this service. Auto-created on first run
+#                with detected defaults; review and edit — see
+#                `masterbus::FileConfig` for the format.
+#   mapping.ini  per-device publish toggles; the service auto-creates and
+#                updates it as devices are discovered. Edit the true/false
+#                flags while the service is stopped, then restart.
+#
+# Upgrading from a release that used /etc/default/masterbus-signalk/: move
+# mapping.ini into /etc/default/masterbus/, copy any LISTEN= you set in that
+# directory's `config` file into config.ini's `listen` key, and delete the old
+# directory. Nothing reads it any more.
 #
 # Then add a Signal K data connection of type "Signal K" over TCP pointing at
-# this host on the LISTEN port (default 3009).
+# this host on the listen port (default 3009).
 
 [Unit]
 Description=Mastervolt MasterBus to Signal K bridge
@@ -30,11 +36,10 @@ Wants=network-online.target
 Type=exec
 SyslogIdentifier=masterbus-signalk
 
-# Default listen address; override in /etc/default/masterbus-signalk/config.
-Environment=LISTEN=0.0.0.0:3009
-Environment=MAPPING=/etc/default/masterbus-signalk/mapping.ini
-EnvironmentFile=-/etc/default/masterbus-signalk/config
-ExecStart=/usr/local/bin/masterbus-signalk ${LISTEN}
+# The listen address comes from config.ini's `listen` key (default
+# 0.0.0.0:3009), so this unit needs no environment file of its own.
+Environment=MAPPING=/etc/default/masterbus/mapping.ini
+ExecStart=/usr/local/bin/masterbus-signalk
 
 Restart=on-failure
 RestartSec=5
@@ -44,22 +49,21 @@ RestartSec=5
 # which defaults to /var/lib/masterbus on first run).
 StateDirectory=masterbus
 
-# Create /etc/default/masterbus-signalk and /etc/default/masterbus before the
-# service starts. ReadWritePaths= below refuses to start the unit (exit code
-# 226/NAMESPACE) when a listed path does not exist, and on a fresh install
-# neither does: config.ini is only written by the first run, mapping.ini only
-# when MAPPING is set. Paths are relative to /etc.
-ConfigurationDirectory=default/masterbus-signalk default/masterbus
+# Create /etc/default/masterbus before the service starts. ReadWritePaths=
+# below refuses to start the unit (exit code 226/NAMESPACE) when a listed path
+# does not exist, and on a fresh install it does not: config.ini is only
+# written by the first run. Paths are relative to /etc.
+ConfigurationDirectory=default/masterbus
 
 # Hardening. The service auto-rewrites mapping.ini in /etc, which a DynamicUser
 # sandbox can't own, so it runs as root but is tightly confined: the only
-# writable paths are the config dirs and the state dir, the only capability is
+# writable paths are the config dir and the state dir, the only capability is
 # CAP_NET_RAW (for SocketCAN), and the syscall/address-family surface is limited.
 CapabilityBoundingSet=CAP_NET_RAW
 AmbientCapabilities=CAP_NET_RAW
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/default/masterbus-signalk /etc/default/masterbus
+ReadWritePaths=/etc/default/masterbus
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes

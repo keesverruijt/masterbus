@@ -275,9 +275,14 @@ pub(super) fn fetch_identity(disc: &mut Disc, addr: DeviceId) -> DeviceIdentity 
         let minor = r0.get(2).copied().unwrap_or(0) as u32 + r1.get(2).copied().unwrap_or(0) as u32;
         format!("{}.{}", major, minor)
     };
+    // Property strings are trimmed: at least one shipping charger reports its
+    // article number with a trailing space ("44010250 "), which silently
+    // defeats every lookup that keys on it — the bundled string catalog, and
+    // any per-model mapping table. Serial is trimmed for the same reason; it
+    // keys the schema cache file and the Signal K mapping.
     let fetch_prop = |disc: &mut Disc, n: u8| -> String {
         disc.prop_str_id(addr, n)
-            .map(|sid| disc.fetch_str(addr, sid))
+            .map(|sid| disc.fetch_str(addr, sid).trim().to_string())
             .unwrap_or_default()
     };
     let article = fetch_prop(disc, 1);
