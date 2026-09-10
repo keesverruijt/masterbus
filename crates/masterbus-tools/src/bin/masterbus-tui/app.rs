@@ -1,6 +1,6 @@
 //! TUI application state and the logic that mutates it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use masterbus::{
     Subscription, Value, VisualizationType, field_id,
 };
 use masterbus_tools::mapping::{DeviceMapping, FieldMapping, Mapping, field_key, parse_field_key};
-use masterbus_tools::{seed, signalk, units};
+use masterbus_tools::{seed, signalk};
 
 /// Live-poll rate for the selected device's monitoring fields.
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
@@ -1061,6 +1061,16 @@ pub enum Origin {
     Blank,
 }
 
+/// Which part of a mapping the editor is asking for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Typing the Signal K path.
+    Path,
+    /// Filling in the truth table for an enum on a boolean leaf; the cursor
+    /// is on the label at this index.
+    Truth(usize),
+}
+
 /// An in-progress edit of one field's Signal K path.
 pub struct PathEditor {
     /// Which field is being mapped.
@@ -1069,31 +1079,72 @@ pub struct PathEditor {
     pub field_name: String,
     /// Its unit, to derive and display the conversion.
     pub unit: String,
+    /// Its labels, if it is an enum; what a truth table is keyed on.
+    pub options: Vec<String>,
     /// The path being typed.
     pub buf: String,
     /// Whether to publish the boolean negated.
     pub invert: bool,
+    /// Label → boolean, for an enum published to a boolean leaf. Empty until
+    /// the path turns out to need one.
+    pub truth: BTreeMap<String, bool>,
     /// Where `buf` was seeded from.
     pub origin: Origin,
+    /// What the modal is currently asking for.
+    pub stage: Stage,
+}
+
+/// What the editor tells the user about the path as typed.
+pub enum Hint {
+    /// Publishable; describes the unit and conversion, or the truth table.
+    Ok(String),
+    /// Publishable, but worth a second look.
+    Warn(String),
+    /// Would be skipped by the sidecar; not saved.
+    Refuse(String),
 }
 
 impl PathEditor {
-    /// The conversion the current path implies, and a human description.
-    /// `None` means the units cannot be reconciled — the entry would be
-    /// skipped at runtime, so the editor says so before it is saved.
-    pub fn conversion_hint(&self) -> Option<String> {
-        let leaf = signalk::leaf_unit(&self.buf);
-        let conv = units::conversion(&self.unit, leaf)?;
-        Some(match (leaf, conv.is_identity()) {
-            (None, _) => "no unit metadata for this leaf".into(),
-            (Some(u), true) => format!("{u}, unchanged"),
-            (Some(u), false) => format!(
-                "→ {u} (×{} {}{})",
-                conv.scale,
-                if conv.offset >= 0.0 { "+" } else { "−" },
-                conv.offset.abs()
-            ),
-        })
+    /// What saving the path as typed would do, worked out the way the sidecar
+    /// will (see [`signalk::plan`]), so the one moment a human can check that
+    /// `°C` becomes kelvin is while choosing the path.
+    pub fn plan(&self) -> Result<signalk::Plan, signalk::Refusal> {
+        signalk::plan(self.buf.trim(), &self.unit, &self.options, &self.entry())
+    }
+
+    /// The mapping entry as it stands.
+    pub fn entry(&self) -> FieldMapping {
+        FieldMapping {
+            path: self.buf.trim().to_string(),
+            invert: self.invert,
+            truth: self.truth.clone(),
+        }
+    }
+
+    /// The conversion (or truth table) the current path implies, as a line
+    /// for the modal.
+    pub fn hint(&self) -> Hint {
+        match self.plan() {
+            Err(e) => Hint::Refuse(e.to_string()),
+            Ok(p) if !p.truth.is_empty() => Hint::Ok(format!(
+                "boolean: {}",
+                p.truth
+                    .iter()
+                    .map(|(k, v)| format!("{k}→{v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Ok(p) => match (p.unit, p.warning) {
+                (_, Some(w)) => Hint::Warn(w),
+                (None, None) => Hint::Ok("no unit: published as-is".into()),
+                (Some(u), None) => Hint::Ok(format!("→ {u} ({})", p.conv.describe())),
+            },
+        }
+    }
+
+    /// Whether the truth table names every label.
+    pub fn truth_complete(&self) -> bool {
+        self.options.iter().all(|l| self.truth.contains_key(l))
     }
 }
 
@@ -1151,8 +1202,8 @@ impl App {
             .as_ref()
             .and_then(|s| s.map.field(&serial, field.index))
             .cloned();
-        let (buf, invert, origin) = match existing {
-            Some(fm) => (fm.path, fm.invert, Origin::Existing),
+        let (buf, invert, truth, origin) = match existing {
+            Some(fm) => (fm.path, fm.invert, fm.truth, Origin::Existing),
             None => {
                 let (name, article, firmware) = self
                     .cur_info
@@ -1169,8 +1220,8 @@ impl App {
                     &field.name,
                     &field.unit,
                 ) {
-                    Some((s, tier)) => (s.path, s.invert, Origin::Suggested(tier)),
-                    None => (String::new(), false, Origin::Blank),
+                    Some((s, tier)) => (s.path, s.invert, BTreeMap::new(), Origin::Suggested(tier)),
+                    None => (self.path_prefix(), false, BTreeMap::new(), Origin::Blank),
                 }
             }
         };
@@ -1178,10 +1229,30 @@ impl App {
             field: field.index,
             field_name: field.name.clone(),
             unit: field.unit.clone(),
+            options: field.options.clone(),
             buf,
             invert,
+            truth,
             origin,
+            stage: Stage::Path,
         });
+    }
+
+    /// What to pre-fill when nothing is known about a field: the node of a
+    /// path already mapped on this device, so the second field of a solar
+    /// charger does not need `electrical.solar.solar-chg.` typed again, else
+    /// just `electrical.`.
+    fn path_prefix(&self) -> String {
+        let node = self
+            .mapping
+            .as_ref()
+            .zip(self.cur_serial.as_ref())
+            .and_then(|(s, serial)| s.map.devices.get(serial))
+            .and_then(|d| d.fields.values().find_map(|f| signalk::node_of(&f.path)));
+        match node {
+            Some(n) => format!("{n}."),
+            None => "electrical.".into(),
+        }
     }
 
     /// Remove the selected field's mapping.
@@ -1218,17 +1289,33 @@ impl App {
             return;
         }
         // Refuse only what cannot work at runtime. An unknown leaf is allowed
-        // (a custom path is a legitimate choice) but a unit pair that cannot be
-        // reconciled would be skipped by the sidecar, so it is rejected here
-        // where the user can see why.
-        if units::conversion(&ed.unit, signalk::leaf_unit(&path)).is_none() {
-            self.status = format!(
-                "{:?} cannot be converted to what {path} expects — not saved",
-                ed.unit
-            );
-            self.path_editor = Some(ed);
-            return;
-        }
+        // (a custom path is a legitimate choice, and its unit follows from the
+        // device) but a unit pair that cannot be reconciled would be skipped by
+        // the sidecar, so it is rejected here where the user can see why. An
+        // enum onto a boolean leaf whose labels this build cannot classify
+        // needs the user to say which labels mean true: the modal moves on
+        // to a truth table instead of saving.
+        let plan = match ed.plan() {
+            Ok(p) => p,
+            Err(signalk::Refusal::Truth { labels }) => {
+                let mut ed = ed;
+                for l in &labels {
+                    if let Some(b) = signalk::truth_of_label(l) {
+                        ed.truth.entry(l.clone()).or_insert(b);
+                    }
+                }
+                ed.stage = Stage::Truth(0);
+                self.status =
+                    "boolean leaf: say which labels mean true (Space toggles, Enter saves)".into();
+                self.path_editor = Some(ed);
+                return;
+            }
+            Err(e) => {
+                self.status = format!("{e} — not saved");
+                self.path_editor = Some(ed);
+                return;
+            }
+        };
         let identity = self.cur_info.clone();
         let instance = self.cur_instance.clone();
         let Some(s) = self.mapping.as_mut() else {
@@ -1251,15 +1338,78 @@ impl App {
             None if entry.instance.is_empty() => entry.instance = instance,
             None => {}
         }
+        // Record the truth table the sidecar will use, even when it was
+        // derived from the conventional label meanings, so the file says what
+        // it does and a future build cannot silently change its mind.
         entry.fields.insert(
             field_key(ed.field),
             FieldMapping {
                 path: path.clone(),
                 invert: ed.invert,
+                truth: plan.truth,
             },
         );
         s.dirty = true;
         self.status = format!("{} → {path}", field_key(ed.field));
+    }
+
+    /// Whether the editor is on the truth-table stage.
+    pub fn truth_editing(&self) -> bool {
+        matches!(
+            self.path_editor.as_ref().map(|e| e.stage),
+            Some(Stage::Truth(_))
+        )
+    }
+
+    /// Move the truth-table cursor.
+    pub fn truth_move(&mut self, delta: i32) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Stage::Truth(i) = ed.stage
+            && !ed.options.is_empty()
+        {
+            let n = ed.options.len() as i32;
+            ed.stage = Stage::Truth((i as i32 + delta).rem_euclid(n) as usize);
+        }
+    }
+
+    /// Cycle the selected label: unset → true → false → true …
+    pub fn truth_toggle(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Stage::Truth(i) = ed.stage
+            && let Some(label) = ed.options.get(i).cloned()
+        {
+            let next = !ed.truth.get(&label).copied().unwrap_or(false);
+            ed.truth.insert(label, next);
+        }
+    }
+
+    /// Set the selected label outright.
+    pub fn truth_set(&mut self, value: bool) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Stage::Truth(i) = ed.stage
+            && let Some(label) = ed.options.get(i).cloned()
+        {
+            ed.truth.insert(label, value);
+        }
+    }
+
+    /// Leave the truth table for the path, keeping what was filled in.
+    pub fn truth_back(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.stage = Stage::Path;
+        }
+    }
+
+    /// Save from the truth-table stage: every label needs a value first.
+    pub fn commit_truth(&mut self) {
+        let Some(ed) = self.path_editor.as_ref() else {
+            return;
+        };
+        if !ed.truth_complete() {
+            self.status = "every label needs true or false before saving".into();
+            return;
+        }
+        self.commit_map();
     }
 
     pub fn cancel_map(&mut self) {
@@ -1404,6 +1554,12 @@ pub struct CopyTarget {
 /// Fields the target does not have are skipped rather than written blind. That
 /// is what keeps a cluster master's extra fields off a plain member of the same
 /// article, which is the case the bus in #6 actually contains.
+///
+/// The instance substituted is the one each *path* uses, not the one recorded
+/// for the device. A cluster master publishes its aggregate under one node
+/// and its own cells under another, so its entries do not share an instance;
+/// substituting the device's single recorded one copied nothing at all when
+/// pressed on the master (#12).
 fn copy_to_targets(
     map: &mut Mapping,
     src: &DeviceMapping,
@@ -1423,7 +1579,9 @@ fn copy_to_targets(
         for (key, fm) in &src.fields {
             match parse_field_key(key) {
                 Some(id) if t.have.contains(&id) => {
-                    let path = retarget(&fm.path, &src.instance, &target_instance);
+                    let from =
+                        signalk::instance_of(&fm.path).unwrap_or_else(|| src.instance.clone());
+                    let path = retarget(&fm.path, &from, &target_instance);
                     // Nothing was substituted, so this target would publish to
                     // the source's own node. Two devices writing one path is
                     // never what "apply to this article" meant.
@@ -1436,6 +1594,7 @@ fn copy_to_targets(
                         FieldMapping {
                             path,
                             invert: fm.invert,
+                            truth: fm.truth.clone(),
                         },
                     );
                     copied += 1;
@@ -1493,7 +1652,7 @@ mod mapping_tests {
                 field_key(id),
                 FieldMapping {
                     path: format!("electrical.batteries.24v-service.{leaf}"),
-                    invert: false,
+                    ..Default::default()
                 },
             );
         }
@@ -1568,12 +1727,13 @@ mod mapping_tests {
     }
 
     /// From real use on a live boat: an `INT Nav Chg` was mapped by hand onto
-    /// `electrical.chargers.nav-battery`, because that is what it charges. The
-    /// device's proposed instance was `nav-chg`, which appears nowhere in that
-    /// path. Copying to a sibling would substitute nothing and hand both
-    /// devices the same Signal K node.
+    /// `electrical.chargers.nav-battery`, because that is what it charges,
+    /// while the device's recorded instance was still `nav-chg`. Substituting
+    /// on the recorded instance copied nothing; substituting on the instance
+    /// the path itself uses copies it correctly, so a stale record no longer
+    /// matters.
     #[test]
-    fn a_copy_that_would_substitute_nothing_is_skipped() {
+    fn a_stale_recorded_instance_does_not_block_a_copy() {
         let mut map = Mapping::new();
         let mut src = DeviceMapping {
             article: "77030450".into(),
@@ -1584,13 +1744,16 @@ mod mapping_tests {
             field_key(0x028),
             FieldMapping {
                 path: "electrical.chargers.nav-battery.voltage".into(),
-                invert: false,
+                ..Default::default()
             },
         );
         let t = target("X922S0096", "INT 24V DC/DC", &[0x028]);
         let (copied, skipped) = copy_to_targets(&mut map, &src, &[t]);
-        assert_eq!((copied, skipped), (0, 1));
-        assert!(map.devices["X922S0096"].fields.is_empty());
+        assert_eq!((copied, skipped), (1, 0));
+        assert_eq!(
+            map.devices["X922S0096"].fields[&field_key(0x028)].path,
+            "electrical.chargers.24v-dc-dc.voltage"
+        );
     }
 
     /// With the instance recorded from the path itself, the same copy works.
@@ -1607,7 +1770,7 @@ mod mapping_tests {
             field_key(0x028),
             FieldMapping {
                 path: "electrical.chargers.nav-battery.voltage".into(),
-                invert: false,
+                ..Default::default()
             },
         );
         let t = target("X922S0096", "INT 24V DC/DC", &[0x028]);
@@ -1635,39 +1798,132 @@ mod mapping_tests {
         assert_eq!(retarget("a.b.c", "b", "b"), "a.b.c");
     }
 
+    /// The cluster-master case from the field report on #12: the master maps
+    /// its aggregate under one instance and its own cell under another. A copy
+    /// from the master must substitute on what each path uses, or nothing
+    /// matches the device's single recorded instance and every field skips.
     #[test]
-    fn the_editor_reports_the_conversion_it_will_apply() {
-        let ed = PathEditor {
-            field: 0x005,
-            field_name: "Temperature".into(),
-            unit: "\u{b0}C".into(),
-            buf: "electrical.batteries.house.temperature".into(),
-            invert: false,
-            origin: Origin::Suggested(seed::Tier::Name),
+    fn a_copy_substitutes_on_each_paths_own_instance() {
+        let mut map = Mapping::new();
+        let mut master = DeviceMapping {
+            article: "66026000".into(),
+            // Recorded from the last path saved: the cell's.
+            instance: "li-ion-1".into(),
+            ..Default::default()
         };
-        let hint = ed.conversion_hint().expect("celsius reaches kelvin");
-        assert!(hint.contains('K'), "{hint}");
-
-        // Pointing amps at a kelvin leaf has no conversion, and the editor must
-        // say so rather than let it be saved.
-        let bad = PathEditor {
-            unit: "A".into(),
-            ..ed
-        };
-        assert!(bad.conversion_hint().is_none());
+        // Cluster group: aggregate node.
+        master.fields.insert(
+            field_key(0x001),
+            FieldMapping {
+                path: "electrical.batteries.li-ion.voltage".into(),
+                ..Default::default()
+            },
+        );
+        // Own battery group: the cell's node.
+        master.fields.insert(
+            field_key(0x071),
+            FieldMapping {
+                path: "electrical.batteries.li-ion-1.voltage".into(),
+                ..Default::default()
+            },
+        );
+        // A plain member only has the 0x000-range group.
+        let member = target("MLI-2", "BAT li-ion 2", &[0x001]);
+        let (copied, skipped) = copy_to_targets(&mut map, &master, &[member]);
+        assert_eq!((copied, skipped), (1, 1));
+        assert_eq!(
+            map.devices["MLI-2"].fields[&field_key(0x001)].path,
+            "electrical.batteries.li-ion-2.voltage"
+        );
     }
 
     #[test]
-    fn an_unknown_leaf_is_allowed_but_flagged_as_unitless() {
-        let ed = PathEditor {
+    fn a_copy_carries_the_truth_table() {
+        let mut map = Mapping::new();
+        let mut src = DeviceMapping {
+            article: "77010100".into(),
+            instance: "out-1".into(),
+            ..Default::default()
+        };
+        src.fields.insert(
+            field_key(0x001),
+            FieldMapping {
+                path: "electrical.switches.out-1.state".into(),
+                truth: [
+                    ("Standby".to_string(), false),
+                    ("Activated".to_string(), true),
+                ]
+                .into(),
+                ..Default::default()
+            },
+        );
+        let t = target("MCO-2", "INT Out 2", &[0x001]);
+        copy_to_targets(&mut map, &src, &[t]);
+        let f = &map.devices["MCO-2"].fields[&field_key(0x001)];
+        assert_eq!(f.path, "electrical.switches.out-2.state");
+        assert_eq!(f.truth.len(), 2);
+    }
+
+    fn editor(unit: &str, buf: &str) -> PathEditor {
+        PathEditor {
             field: 0x005,
             field_name: "Temperature".into(),
-            unit: "\u{b0}C".into(),
-            buf: "electrical.converters.house.somethingNew".into(),
+            unit: unit.into(),
+            options: Vec::new(),
+            buf: buf.into(),
             invert: false,
+            truth: BTreeMap::new(),
             origin: Origin::Blank,
+            stage: Stage::Path,
+        }
+    }
+
+    #[test]
+    fn the_editor_reports_the_conversion_it_will_apply() {
+        let ed = editor("\u{b0}C", "electrical.batteries.house.temperature");
+        let Hint::Ok(hint) = ed.hint() else {
+            panic!("celsius reaches kelvin")
         };
-        let hint = ed.conversion_hint().expect("a custom path is allowed");
-        assert!(hint.contains("no unit metadata"), "{hint}");
+        assert!(hint.contains("→ K"), "{hint}");
+
+        // Pointing amps at a kelvin leaf has no conversion, and the editor must
+        // say so rather than let it be saved.
+        let bad = editor("A", "electrical.batteries.house.temperature");
+        assert!(matches!(bad.hint(), Hint::Refuse(_)));
+    }
+
+    /// A custom or newer-spec leaf is allowed, and its unit still follows
+    /// from the device, so the editor shows the conversion rather than a
+    /// warning about missing metadata.
+    #[test]
+    fn an_unknown_leaf_still_shows_the_devices_unit() {
+        let ed = editor("\u{b0}C", "electrical.converters.house.somethingNew");
+        let Hint::Ok(hint) = ed.hint() else {
+            panic!("a custom path is allowed")
+        };
+        assert!(hint.contains("→ K"), "{hint}");
+        // Only a unit this build cannot convert is worth a warning.
+        let odd = editor("l/h", "electrical.converters.house.flow");
+        assert!(matches!(odd.hint(), Hint::Warn(_)));
+    }
+
+    #[test]
+    fn an_enum_on_a_boolean_leaf_shows_its_truth_table() {
+        let mut ed = editor("", "electrical.switches.out.state");
+        ed.options = vec!["Standby".into(), "Activated".into()];
+        let Hint::Ok(hint) = ed.hint() else {
+            panic!("conventional labels need no help")
+        };
+        assert!(hint.contains("Activated→true"), "{hint}");
+        // Alarm is anyone's guess: refused until the table says.
+        ed.options.push("Alarm".into());
+        assert!(matches!(ed.hint(), Hint::Refuse(_)));
+        assert!(!ed.truth_complete());
+        ed.truth = [("Standby", false), ("Activated", true), ("Alarm", false)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        assert!(ed.truth_complete());
+        assert!(matches!(ed.hint(), Hint::Ok(_)));
     }
 }

@@ -99,7 +99,9 @@ same class, so nothing here matches on a name.
       "instance": "inverter",
       "fields": {
         "0x006": { "path": "electrical.inverters.inverter.dc.voltage" },
-        "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true }
+        "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true },
+        "0x010": { "path": "electrical.switches.inverter.state",
+                   "truth": { "Standby": false, "On": true, "Alarm": false } }
       }
     }
   }
@@ -109,25 +111,35 @@ same class, so nothing here matches on a name.
 Presence is the toggle: a field that is not listed is not published.
 Field ids are the same three-digit hex the TUI shows next to every row.
 
-There are no scale factors, on purpose. The conversion to SI follows
-from the field's own unit and the unit the target path's leaf wants, so
-`°C` into a `temperature` leaf becomes kelvin without being told. A pair
-that cannot be reconciled is reported at startup and skipped rather than
-published as a wrong number. `invert` is the one transform no unit can
-express: a charger reporting `Standby` publishes to `enabled` negated.
+There are no scale factors, on purpose. The conversion to SI and the
+unit metadata follow from the field's own unit: Signal K has exactly one
+SI unit per quantity, so `°C` can only ever become kelvin and `kWh` can
+only ever become joules, whatever path they are published to. The leaf
+name only cross-checks: an ampere field pointed at a `voltage` leaf, or
+`kWh` at `.power`, is refused rather than published as a wrong number.
+A field whose unit this build cannot convert at all publishes as
+reported, with a warning and no metadata.
 
-The path is yours. Point a field at a non-standard leaf or a different
-category and it is honoured; the device's `name` and `manufacturer`
-metadata follow it there. A leaf this build knows no unit for is still
-published, with a warning that it will carry no unit metadata.
+Two things no unit can express are stored. `invert` negates a boolean: a
+charger reporting `Standby` publishes to `enabled` negated. `truth` turns
+an enum into a boolean: a contact output reporting `Standby` /
+`Activated` publishes `false` / `true` to `electrical.switches.<id>.state`.
+The editor fills the table in for conventional label pairs (`Off`/`On`,
+`Standby`/`On`, `Standby`/`Activated`) and asks about the rest (`Alarm`?).
+
+The path is yours. Point a field at a non-standard leaf, a spec leaf
+newer than this build, or a different category and it is honoured; the
+unit metadata comes from the device, and the device's `name` and
+`manufacturer` metadata follow it there.
 
 **First run.** With no mapping file, the service seeds one and writes it
 out, so an install keeps working and has something to edit. Suggestions
 come from a bundled per-model database keyed on the device's article
 number, falling back to per-class field-name heuristics. The database is
-the tier that can tell apart two models sharing a class code, and the
-tier a renamed field cannot fool. Curate it while the service is stopped, then
-restart.
+the tier that can tell apart two models sharing a class code, and the tier a renamed field cannot fool.
+
+**Edits take effect live.** The service re-reads the file within a couple
+of seconds of it changing, so `w` in the editor is enough; no restart.
 
 ### Run as a systemd service
 
@@ -179,10 +191,14 @@ the editor:
 - The Monitoring tab gains a Signal K column showing where each field
   publishes.
 - `+` maps the selected field. The prompt is pre-filled from the existing
-  mapping, or from the built-in heuristics, and shows the conversion the
-  path implies — the only moment anyone can check that `°C` is about to
-  become kelvin, since the file stores no scale factor. `^N` toggles
-  `invert`.
+  mapping, or from the built-in heuristics, or with the node of a path
+  already mapped on this device so a prefix is not retyped for every
+  field. It shows the conversion the path implies — the only moment
+  anyone can check that `°C` is about to become kelvin, since the file
+  stores no scale factor. `^N` toggles `invert`. An enum mapped onto a
+  boolean leaf (`enabled`, a switch's `state`) whose labels are not the
+  conventional ones goes on to a truth table: pick `true` or `false` for
+  each label, Enter saves.
 - `-` unmaps the selected field.
 - `a` copies this device's mapping to every other device with the same
   article, substituting each one's own instance into the paths. Fields a
@@ -193,8 +209,7 @@ the editor:
 
 A path whose units cannot be reconciled is refused with an explanation
 rather than saved, because the sidecar would only skip it later. An
-unfamiliar leaf is accepted, with a note that it will carry no unit
-metadata.
+unfamiliar leaf is accepted; its unit metadata comes from the device.
 
 Devices that are switched off or off the bus keep their entries: the file
 is loaded whole and only the fields you touch are changed.

@@ -2,9 +2,17 @@
 //!
 //! A hand-curated mapping file says which Signal K path a field publishes to.
 //! It deliberately does not say how to scale the number, because a stored
-//! factor is one more thing a human can get wrong, and because the pair of
-//! units already determines the answer: a field reporting `°C` into a leaf
-//! that wants `K` can only mean one thing.
+//! factor is one more thing a human can get wrong, and because the device's
+//! own unit already determines the answer: Signal K uses exactly one SI unit
+//! per quantity, so a field reporting `°C` can only ever become kelvin,
+//! whatever path it is published to.
+//!
+//! That is the whole idea of [`to_si`]: the Signal K unit and the arithmetic
+//! follow from the device unit alone. The name of the target leaf is not
+//! needed for it, which is what lets a mapping point at a spec path this build
+//! has never heard of, or at a custom one, and still carry correct unit
+//! metadata. The leaf table in [`crate::signalk`] only *cross-checks*: it
+//! catches an ampere field pointed at a `voltage` leaf.
 //!
 //! Device units are messy in the field. Observed on a single 28-device bus:
 //! `RPM` and `rpm` on different devices, a unit that is one space character,
@@ -37,6 +45,29 @@ impl Conversion {
     pub fn is_identity(self) -> bool {
         self.scale == 1.0 && self.offset == 0.0
     }
+
+    /// A human-readable form of the arithmetic, for the editor.
+    pub fn describe(self) -> String {
+        if self.is_identity() {
+            "unchanged".into()
+        } else {
+            format!(
+                "×{} {}{}",
+                self.scale,
+                if self.offset >= 0.0 { "+" } else { "−" },
+                self.offset.abs()
+            )
+        }
+    }
+}
+
+/// The SI form of a device unit: what Signal K calls it, and how to get there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Si {
+    /// The unit Signal K publishes, as it appears in `meta.units`.
+    pub unit: &'static str,
+    /// From the device's number to that unit.
+    pub conv: Conversion,
 }
 
 /// Canonical form of a unit string as a device reports it: trimmed, and
@@ -54,10 +85,63 @@ pub fn normalize(unit: &str) -> String {
     }
 }
 
+/// The Signal K unit and conversion a device unit implies, from the device
+/// unit alone.
+///
+/// `None` for an empty unit (nothing to say) and for a unit this table does
+/// not know, which is the one case worth a warning: the number will publish
+/// as the device reports it, with no unit metadata.
+pub fn to_si(device_unit: &str) -> Option<Si> {
+    let dev = normalize(device_unit);
+    let same = |u: &'static str| {
+        Some(Si {
+            unit: u,
+            conv: Conversion::IDENTITY,
+        })
+    };
+    let scaled = |u: &'static str, s: f64| {
+        Some(Si {
+            unit: u,
+            conv: Conversion {
+                scale: s,
+                offset: 0.0,
+            },
+        })
+    };
+    match dev.as_str() {
+        "" => None,
+        "V" => same("V"),
+        "A" => same("A"),
+        "W" => same("W"),
+        "Hz" => same("Hz"),
+        "s" => same("s"),
+        "K" => same("K"),
+        "ratio" => same("ratio"),
+        "\u{b0}C" => Some(Si {
+            unit: "K",
+            conv: Conversion {
+                scale: 1.0,
+                offset: 273.15,
+            },
+        }),
+        "%" => scaled("ratio", 0.01),
+        "Ah" => scaled("C", 3600.0),
+        "rpm" => scaled("Hz", 1.0 / 60.0),
+        "kWh" => scaled("J", 3_600_000.0),
+        "Wh" => scaled("J", 3600.0),
+        "kW" => scaled("W", 1000.0),
+        "mV" => scaled("V", 0.001),
+        "mA" => scaled("A", 0.001),
+        "min" => scaled("s", 60.0),
+        "h" => scaled("s", 3600.0),
+        _ => None,
+    }
+}
+
 /// The conversion from a device unit to a Signal K leaf unit, or `None` when
 /// the pair is not convertible.
 ///
-/// `None` is the signal to warn about a mapping entry rather than to publish a
+/// `None` is the signal to refuse a mapping entry rather than to publish a
 /// wrong number: it means a human pointed, say, an ampere field at a leaf that
 /// wants kelvin.
 ///
@@ -68,29 +152,13 @@ pub fn conversion(device_unit: &str, sk_unit: Option<&str>) -> Option<Conversion
     let Some(sk) = sk_unit else {
         return Some(Conversion::IDENTITY);
     };
-    let dev = normalize(device_unit);
-    let scale = |s: f64| {
-        Some(Conversion {
-            scale: s,
-            offset: 0.0,
-        })
-    };
-    match (dev.as_str(), sk) {
-        // Same unit on both sides.
-        (d, s) if d == s => Some(Conversion::IDENTITY),
-        // A device that reports no unit at all is taken at its word: several
-        // MAC monitoring fields report volts and amps with an empty unit.
-        ("", _) => Some(Conversion::IDENTITY),
-        ("\u{b0}C", "K") => Some(Conversion {
-            scale: 1.0,
-            offset: 273.15,
-        }),
-        ("%", "ratio") => scale(0.01),
-        ("Ah", "C") => scale(3600.0),
-        ("rpm", "Hz") => scale(1.0 / 60.0),
-        ("kWh", "J") => scale(3_600_000.0),
-        _ => None,
+    // A device that reports no unit at all is taken at its word: several MAC
+    // monitoring fields report volts and amps with an empty unit.
+    if normalize(device_unit).is_empty() {
+        return Some(Conversion::IDENTITY);
     }
+    let si = to_si(device_unit)?;
+    (si.unit == sk).then_some(si.conv)
 }
 
 #[cfg(test)]
@@ -145,6 +213,34 @@ mod tests {
     fn mismatched_units_refuse_rather_than_guess() {
         assert_eq!(conversion("A", Some("K")), None);
         assert_eq!(conversion("V", Some("Hz")), None);
+        // Energy is not power, however tempting `.power` looks.
+        assert_eq!(conversion("kWh", Some("W")), None);
+    }
+
+    /// The point of the redesign: the Signal K unit follows from the device
+    /// unit alone, so a leaf nobody has tabulated still gets correct metadata.
+    #[test]
+    fn the_si_unit_is_known_without_a_leaf() {
+        assert_eq!(to_si("V").unwrap().unit, "V");
+        assert_eq!(to_si("\u{b0}C").unwrap().unit, "K");
+        assert_eq!(to_si("kWh").unwrap().unit, "J");
+        assert!((to_si("kWh").unwrap().conv.apply(1.5) - 5_400_000.0).abs() < 1e-6);
+        assert_eq!(to_si("RPM").unwrap().unit, "Hz");
+        assert_eq!(to_si(" % ").unwrap().unit, "ratio");
+    }
+
+    #[test]
+    fn an_empty_or_unknown_unit_has_no_si_form() {
+        assert_eq!(to_si(""), None);
+        assert_eq!(to_si(" "), None);
+        assert_eq!(to_si("furlongs"), None);
+    }
+
+    #[test]
+    fn conversions_describe_themselves() {
+        assert_eq!(Conversion::IDENTITY.describe(), "unchanged");
+        assert_eq!(to_si("\u{b0}C").unwrap().conv.describe(), "×1 +273.15");
+        assert_eq!(to_si("%").unwrap().conv.describe(), "×0.01 +0");
     }
 
     #[test]

@@ -28,10 +28,14 @@
 //! and writes it out, so an install that worked before keeps working and has
 //! something to edit.
 //!
-//! Unit conversion is **derived**, never stored: the factor follows from the
-//! field's unit and the unit the target Signal K leaf wants. A mapping entry
-//! whose units cannot be reconciled is reported at startup and skipped rather
-//! than published as a wrong number.
+//! Unit conversion and unit metadata are **derived** from the field's own
+//! unit, never stored (see [`masterbus_tools::units::to_si`]); the target
+//! leaf only cross-checks. A mapping entry whose units cannot be reconciled is
+//! reported at startup and skipped rather than published as a wrong number.
+//!
+//! The mapping file is re-read when it changes on disk, so an edit in
+//! `masterbus-tui --mapping` takes effect within a couple of seconds without
+//! a restart.
 //!
 //! Besides live values, each published device also emits static `name` and
 //! `manufacturer` metadata once per client connection.
@@ -41,13 +45,12 @@ use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu};
+use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Subscription};
 use masterbus_tools::mapping::{DeviceMapping, FieldMapping, Mapping, field_key, parse_field_key};
 use masterbus_tools::seed;
-use masterbus_tools::signalk;
-use masterbus_tools::units::{self, Conversion};
+use masterbus_tools::signalk::{self, Plan};
 use serde_json::json;
 
 /// Default TCP listen address.
@@ -59,6 +62,9 @@ const MENU: Menu = Menu::Monitoring;
 
 /// How often each value is (re)emitted.
 const RATE: Duration = Duration::from_millis(1000);
+
+/// How often the mapping file is checked for a change.
+const RELOAD_CHECK: Duration = Duration::from_secs(2);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -105,18 +111,26 @@ struct DeviceRec {
     firmware: String,
     /// Proposed Signal K instance id, used when seeding.
     instance: String,
-    /// Monitoring fields: id, name and unit as the device reports them.
-    fields: Vec<(FieldId, String, String)>,
+    /// Monitoring fields as the device reports them.
+    fields: Vec<FieldRec>,
+}
+
+/// One monitoring field, reduced to what mapping needs.
+#[derive(Clone)]
+struct FieldRec {
+    id: FieldId,
+    name: String,
+    unit: String,
+    /// Labels, for an enum; empty otherwise.
+    options: Vec<String>,
 }
 
 /// Everything needed to turn one field's updates into a Signal K value.
 struct Emit {
     /// Target Signal K path.
     path: String,
-    /// Conversion derived from the field's unit and the path's leaf unit.
-    conv: Conversion,
-    /// Publish the logical negation (booleans only).
-    invert: bool,
+    /// How to get there, derived from the field's unit and the mapping entry.
+    plan: Plan,
 }
 
 /// Walk the bus and collect every device's monitoring fields.
@@ -135,13 +149,14 @@ fn discover(bus: &MasterBus) -> Vec<DeviceRec> {
                 firmware: String::new(),
             });
         let mut fields = Vec::new();
-        for group in dev.tab(MENU).unwrap_or_default() {
-            for field in group.fields().unwrap_or_default() {
-                fields.push((
-                    field.index(),
-                    field.name().unwrap_or_default(),
-                    field.unit().unwrap_or_default(),
-                ));
+        for group in dev.tab_info(MENU).unwrap_or_default() {
+            for field in group.fields {
+                fields.push(FieldRec {
+                    id: field.index,
+                    name: field.name,
+                    unit: field.unit,
+                    options: field.options,
+                });
             }
         }
         out.push(DeviceRec {
@@ -183,16 +198,16 @@ fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
         // for a human to add deliberately if they want them.
         let mut taken: HashMap<String, FieldId> = HashMap::new();
         let mut ordered: Vec<_> = d.fields.iter().collect();
-        ordered.sort_by_key(|(id, _, _)| *id);
-        for (id, fname, unit) in ordered {
+        ordered.sort_by_key(|f| f.id);
+        for f in ordered {
             let Some((s, _tier)) = seed::suggest_best(
                 &d.article,
                 &d.firmware,
                 &class,
                 &d.instance,
-                *id,
-                fname,
-                unit,
+                f.id,
+                &f.name,
+                &f.unit,
             ) else {
                 continue;
             };
@@ -200,18 +215,19 @@ fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
                 log::debug!(
                     "{}: {} would publish to {}, already taken by {}; skipped",
                     d.name,
-                    field_key(*id),
+                    field_key(f.id),
                     s.path,
                     field_key(*first)
                 );
                 continue;
             }
-            taken.insert(s.path.clone(), *id);
+            taken.insert(s.path.clone(), f.id);
             dm.fields.insert(
-                field_key(*id),
+                field_key(f.id),
                 FieldMapping {
                     path: s.path,
                     invert: s.invert,
+                    ..Default::default()
                 },
             );
         }
@@ -252,41 +268,38 @@ fn resolve(devices: &[DeviceRec], mapping: &Mapping) -> HashMap<(DeviceId, Field
                 eprintln!("masterbus-signalk: {serial}: {key:?} is not a field id");
                 continue;
             };
-            let Some((_, _, unit)) = dev.fields.iter().find(|(i, _, _)| *i == id) else {
+            let Some(f) = dev.fields.iter().find(|f| f.id == id) else {
                 eprintln!(
                     "masterbus-signalk: {} ({serial}) has no monitoring field {key}",
                     dev.name
                 );
                 continue;
             };
-            let leaf = signalk::leaf_unit(&fm.path);
-            let Some(conv) = units::conversion(unit, leaf) else {
-                eprintln!(
-                    "masterbus-signalk: {} ({serial}) {key}: cannot convert {:?} to what {} \
-                     expects; skipped",
-                    dev.name, unit, fm.path
-                );
-                continue;
+            // The unit and conversion follow from the field's own unit; the
+            // leaf only cross-checks. What cannot work is skipped here, with
+            // the reason, rather than published as a wrong number.
+            let plan = match signalk::plan(&fm.path, &f.unit, &f.options, fm) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "masterbus-signalk: {} ({serial}) {key} → {}: {e}; skipped — fix it in \
+                         `masterbus-tui --mapping`",
+                        dev.name, fm.path
+                    );
+                    continue;
+                }
             };
-            // A field that reports a unit, published to a leaf this build does
-            // not know, is almost always a typo or a path from a newer Signal K
-            // vocabulary. It is still published — a custom path is a legitimate
-            // choice — but the value arrives without unit metadata, so a server
-            // cannot convert it. Say so once rather than leaving it to be
-            // discovered from a dashboard reading nonsense. (#3)
-            if leaf.is_none() && !units::normalize(unit).is_empty() {
+            if let Some(w) = &plan.warning {
                 eprintln!(
-                    "masterbus-signalk: {} ({serial}) {key}: {} is not a leaf this build knows a \
-                     unit for, so {:?} values publish without unit metadata",
-                    dev.name, fm.path, unit
+                    "masterbus-signalk: {} ({serial}) {key} → {}: {w}",
+                    dev.name, fm.path
                 );
             }
             emit.insert(
                 (dev.id, id),
                 Emit {
                     path: fm.path.clone(),
-                    conv,
-                    invert: fm.invert,
+                    plan,
                 },
             );
         }
@@ -357,53 +370,46 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         }
     }
 
-    let emit = resolve(&devices, &mapping);
-    let mut per_device: HashMap<DeviceId, Vec<FieldId>> = HashMap::new();
-    for (device, field) in emit.keys() {
-        per_device.entry(*device).or_default().push(*field);
-    }
-    let published: HashSet<DeviceId> = per_device.keys().copied().collect();
-    let mut subs = Vec::new();
-    for (device, indices) in per_device {
-        subs.push(bus.subscribe(device, indices, RATE, false));
-    }
+    let mut active = activate(&bus, &devices, &mapping, &clients, &static_batch);
+    let mut stamp = mtime(mapping_path);
+    let mut last_check = Instant::now();
 
-    // Render the static metadata batch and hand it to the accept thread (for
-    // future clients) and to any client already connected during discovery.
-    let sb = static_meta_batch(&devices, &emit, &published);
-    *static_batch.lock().unwrap() = sb.clone();
-    if !sb.is_empty() {
-        let mut cs = clients.lock().unwrap();
-        cs.retain_mut(|c| c.write_all(&sb).and_then(|()| c.flush()).is_ok());
-    }
-
-    let total: usize = devices.iter().map(|d| d.fields.len()).sum();
-    eprintln!(
-        "masterbus-signalk: streaming {} of {total} monitoring fields from {} of {} device(s)",
-        emit.len(),
-        published.len(),
-        devices.len(),
-    );
-
-    // Paths whose unit `meta` has already been published. Meta is emitted inline
-    // the first time a path is seen and also appended to `static_batch` so later
-    // clients receive it on connect.
-    let mut meta_sent: HashSet<String> = HashSet::new();
     loop {
+        // Pick up edits made in `masterbus-tui --mapping` without a restart:
+        // both field reports on #12 lost time to a sidecar quietly serving
+        // the old file.
+        if let Some(p) = mapping_path
+            && last_check.elapsed() >= RELOAD_CHECK
+        {
+            last_check = Instant::now();
+            let now = mtime(Some(p));
+            if now != stamp {
+                stamp = now;
+                match Mapping::load(p) {
+                    Ok(m) => {
+                        eprintln!("masterbus-signalk: {} changed; reloading", p.display());
+                        active = activate(&bus, &devices, &m, &clients, &static_batch);
+                    }
+                    Err(e) => eprintln!("masterbus-signalk: {e}; keeping the previous mapping"),
+                }
+            }
+        }
+
         // Skip building deltas when nobody is listening (the channels are still
         // drained below so they don't grow unbounded).
         let have_clients = !clients.lock().unwrap().is_empty();
         let mut batch: Vec<u8> = Vec::new();
         let mut new_meta: Vec<serde_json::Value> = Vec::new();
-        for sub in &subs {
+        for sub in &active.subs {
             // Coalesce to the latest value per path this cycle: a field can be
             // updated many times between polls (the boat's real masters poll some
             // values rapidly, and we emit those too).
             let mut latest: HashMap<String, serde_json::Value> = HashMap::new();
             while let Some(u) = sub.try_recv() {
                 if have_clients
-                    && let Some(e) = emit.get(&(u.device, u.field))
-                    && let Some(value) = signalk::encode(&u.value, e.conv, e.invert)
+                    && let Some(e) = active.emit.get(&(u.device, u.field))
+                    && let Some(value) =
+                        signalk::encode(&u.value, e.plan.conv, e.plan.invert, &e.plan.truth)
                 {
                     latest.insert(e.path.clone(), value);
                 }
@@ -411,11 +417,11 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             if !latest.is_empty() {
                 // First sighting of a path → publish its unit metadata once.
                 for path in latest.keys() {
-                    if !meta_sent.contains(path)
-                        && let Some(units) = signalk::leaf_unit(path)
+                    if !active.meta_sent.contains(path)
+                        && let Some(units) = active.units.get(path)
                     {
                         new_meta.push(json!({ "path": path, "value": { "units": units } }));
-                        meta_sent.insert(path.clone());
+                        active.meta_sent.insert(path.clone());
                     }
                 }
                 let values: Vec<_> = latest
@@ -456,6 +462,71 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The live state a mapping resolves to: what to publish, the subscriptions
+/// feeding it, and the unit metadata each path carries. Rebuilt whole when
+/// the mapping file changes; dropping the old one unsubscribes.
+struct Active {
+    emit: HashMap<(DeviceId, FieldId), Emit>,
+    subs: Vec<Subscription>,
+    /// Path → unit metadata, from the device units behind each path.
+    units: HashMap<String, &'static str>,
+    /// Paths whose unit `meta` has already been published this activation.
+    meta_sent: HashSet<String>,
+}
+
+/// Resolve a mapping against the bus, subscribe to what it names, and
+/// (re)publish the static per-device metadata.
+fn activate(
+    bus: &MasterBus,
+    devices: &[DeviceRec],
+    mapping: &Mapping,
+    clients: &Mutex<Vec<TcpStream>>,
+    static_batch: &Mutex<Vec<u8>>,
+) -> Active {
+    let emit = resolve(devices, mapping);
+    let mut per_device: HashMap<DeviceId, Vec<FieldId>> = HashMap::new();
+    for (device, field) in emit.keys() {
+        per_device.entry(*device).or_default().push(*field);
+    }
+    let published: HashSet<DeviceId> = per_device.keys().copied().collect();
+    let mut subs = Vec::new();
+    for (device, indices) in per_device {
+        subs.push(bus.subscribe(device, indices, RATE, false));
+    }
+    let units: HashMap<String, &'static str> = emit
+        .values()
+        .filter_map(|e| e.plan.unit.map(|u| (e.path.clone(), u)))
+        .collect();
+
+    // Render the static metadata batch and hand it to the accept thread (for
+    // future clients) and to any client already connected.
+    let sb = static_meta_batch(devices, &emit, &published);
+    *static_batch.lock().unwrap() = sb.clone();
+    if !sb.is_empty() {
+        let mut cs = clients.lock().unwrap();
+        cs.retain_mut(|c| c.write_all(&sb).and_then(|()| c.flush()).is_ok());
+    }
+
+    let total: usize = devices.iter().map(|d| d.fields.len()).sum();
+    eprintln!(
+        "masterbus-signalk: streaming {} of {total} monitoring fields from {} of {} device(s)",
+        emit.len(),
+        published.len(),
+        devices.len(),
+    );
+    Active {
+        emit,
+        subs,
+        units,
+        meta_sent: HashSet::new(),
+    }
+}
+
+/// The mapping file's modification time, or `None` when it does not exist.
+fn mtime(path: Option<&Path>) -> Option<SystemTime> {
+    std::fs::metadata(path?).and_then(|m| m.modified()).ok()
 }
 
 /// The Signal K nodes a device publishes into, derived from the paths its
@@ -556,7 +627,12 @@ mod tests {
             instance: seed::instance_of(name, 0x100000),
             fields: fields
                 .iter()
-                .map(|(i, n, u)| (*i, n.to_string(), u.to_string()))
+                .map(|(i, n, u)| FieldRec {
+                    id: *i,
+                    name: n.to_string(),
+                    unit: u.to_string(),
+                    options: Vec::new(),
+                })
                 .collect(),
         }
     }
@@ -703,12 +779,13 @@ mod tests {
         let id = devices[0].id;
         // Celsius into a kelvin leaf.
         let t = &emit[&(id, 0x005)];
-        assert!((t.conv.apply(20.0) - 293.15).abs() < 1e-9);
+        assert!((t.plan.conv.apply(20.0) - 293.15).abs() < 1e-9);
+        assert_eq!(t.plan.unit, Some("K"));
         // Percent into a ratio leaf.
         let soc = &emit[&(id, 0x000)];
-        assert!((soc.conv.apply(87.0) - 0.87).abs() < 1e-9);
+        assert!((soc.plan.conv.apply(87.0) - 0.87).abs() < 1e-9);
         // Volts into a volts leaf.
-        assert!(emit[&(id, 0x001)].conv.is_identity());
+        assert!(emit[&(id, 0x001)].plan.conv.is_identity());
     }
 
     #[test]
@@ -721,7 +798,7 @@ mod tests {
             field_key(0x0FF),
             FieldMapping {
                 path: "electrical.batteries.x.voltage".into(),
-                invert: false,
+                ..Default::default()
             },
         );
         // A field whose unit cannot reach the target leaf.
@@ -729,7 +806,7 @@ mod tests {
             field_key(0x002),
             FieldMapping {
                 path: "electrical.batteries.x.temperature".into(),
-                invert: false,
+                ..Default::default()
             },
         );
         m.devices.insert("MLI-1".into(), dm);
@@ -783,7 +860,7 @@ mod tests {
                 "chargingMode" | "deviceMode" | "enabled" | "name"
             );
             assert!(
-                signalk::leaf_unit(&e.path).is_some() || unitless,
+                e.plan.unit.is_some() || unitless,
                 "{} has neither unit metadata nor a known unitless leaf",
                 e.path
             );
@@ -803,20 +880,86 @@ mod tests {
             field_key(0x005),
             FieldMapping {
                 path: "electrical.converters.house.temperature".into(),
-                invert: false,
+                ..Default::default()
             },
         );
         m.devices.insert("MLI-1".into(), dm);
         let emit = resolve(&devices, &m);
         let e = &emit[&(devices[0].id, 0x005)];
         assert_eq!(e.path, "electrical.converters.house.temperature");
-        // The conversion still follows from the leaf, not from the category.
-        assert!((e.conv.apply(20.0) - 293.15).abs() < 1e-9);
+        // The conversion still follows from the unit, not from the category.
+        assert!((e.plan.conv.apply(20.0) - 293.15).abs() < 1e-9);
         // And the identity metadata follows the device to its new home.
         assert_eq!(
             nodes_of(devices[0].id, &emit),
             vec!["electrical.converters.house".to_string()]
         );
+    }
+
+    /// The field reports on #12: spec leaves this build had not tabulated,
+    /// and a lifetime energy counter with no spec leaf at all. The unit comes
+    /// from the device, so all of them carry metadata now.
+    #[test]
+    fn a_leaf_nobody_tabulated_still_carries_the_devices_unit() {
+        let d = dev(
+            "SCM-1",
+            "SCM Solar Chg",
+            &[
+                (0x004, "Panel voltage", "V"),
+                (0x009, "Total energy", "kWh"),
+            ],
+        );
+        let devices = vec![d];
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        for (id, leaf) in [(0x004u16, "panelVoltage"), (0x009, "totalEnergy")] {
+            dm.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: format!("electrical.solar.solar-chg.{leaf}"),
+                    ..Default::default()
+                },
+            );
+        }
+        m.devices.insert("SCM-1".into(), dm);
+        let emit = resolve(&devices, &m);
+        let id = devices[0].id;
+        assert_eq!(emit[&(id, 0x004)].plan.unit, Some("V"));
+        let e = &emit[&(id, 0x009)];
+        assert_eq!(e.plan.unit, Some("J"));
+        assert_eq!(e.plan.conv.apply(1.0), 3_600_000.0);
+        assert!(e.plan.warning.is_none());
+    }
+
+    /// An enum onto a boolean leaf publishes booleans when its labels are the
+    /// conventional ones, and is skipped (not mis-published as strings) when
+    /// they are not and no truth table was supplied.
+    #[test]
+    fn enums_on_boolean_leaves_need_a_truth_table() {
+        let mut d = dev(
+            "MCO-1",
+            "INT Contact",
+            &[(0x001, "State", ""), (0x002, "State", "")],
+        );
+        d.fields[0].options = vec!["Standby".into(), "Activated".into()];
+        d.fields[1].options = vec!["Standby".into(), "On".into(), "Alarm".into()];
+        let devices = vec![d];
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        for id in [0x001u16, 0x002] {
+            dm.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: format!("electrical.switches.contact-{id}.state"),
+                    ..Default::default()
+                },
+            );
+        }
+        m.devices.insert("MCO-1".into(), dm);
+        let emit = resolve(&devices, &m);
+        let id = devices[0].id;
+        assert!(emit[&(id, 0x001)].plan.truth["Activated"]);
+        assert!(!emit.contains_key(&(id, 0x002)), "Alarm is ambiguous");
     }
 
     #[test]

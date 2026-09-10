@@ -26,11 +26,12 @@
 //! # What is not in here
 //!
 //! No scale factors. A mapping says which Signal K path a field publishes to;
-//! the arithmetic is derived from the field's unit and the unit that path's
-//! leaf wants (see [`crate::units::conversion`]). A stored factor would be one
-//! more thing to get wrong. The single exception is [`FieldMapping::invert`],
-//! for the boolean case no unit can express: a charger reporting `Standby`
-//! publishes to `enabled` negated.
+//! the arithmetic and the unit metadata are derived from the field's own unit
+//! (see [`crate::units::to_si`]). A stored factor would be one more thing to
+//! get wrong. The exceptions are the two things no unit can express:
+//! [`FieldMapping::invert`], for a charger reporting `Standby` that publishes
+//! to `enabled` negated, and [`FieldMapping::truth`], for an enum such as
+//! `Standby` / `On` / `Alarm` published to a boolean leaf.
 //!
 //! # Format
 //!
@@ -45,7 +46,9 @@
 //!       "instance": "inverter",
 //!       "fields": {
 //!         "0x006": { "path": "electrical.inverters.inverter.dc.voltage" },
-//!         "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true }
+//!         "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true },
+//!         "0x010": { "path": "electrical.switches.inverter.state",
+//!                    "truth": { "Standby": false, "On": true, "Alarm": false } }
 //!       }
 //!     }
 //!   }
@@ -107,6 +110,12 @@ pub struct FieldMapping {
     /// unit pair can express: a charger's `Standby` is `enabled` inverted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub invert: bool,
+    /// For an enum published to a boolean leaf: which label means what.
+    /// `{"Standby": false, "On": true}`. Empty for anything else. The editor
+    /// fills it in from the conventional meanings where it can, and asks for
+    /// the rest (`Alarm`?); a label missing from the table publishes nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub truth: BTreeMap<String, bool>,
 }
 
 /// Render a field id the way the whole toolchain does: `0x000`..`0x1FF`, three
@@ -194,7 +203,7 @@ mod tests {
             field_key(0x006),
             FieldMapping {
                 path: "electrical.inverters.inverter.dc.voltage".into(),
-                invert: false,
+                ..Default::default()
             },
         );
         d.fields.insert(
@@ -202,6 +211,7 @@ mod tests {
             FieldMapping {
                 path: "electrical.chargers.inverter.enabled".into(),
                 invert: true,
+                ..Default::default()
             },
         );
         m.devices.insert("R516V1070".into(), d);
@@ -283,5 +293,27 @@ mod tests {
         assert_eq!(sample().len(), 2);
         assert!(!sample().is_empty());
         assert!(Mapping::new().is_empty());
+    }
+
+    #[test]
+    fn a_truth_table_round_trips_and_is_omitted_when_empty() {
+        let mut m = sample();
+        let d = m.devices.get_mut("R516V1070").unwrap();
+        d.fields.insert(
+            field_key(0x010),
+            FieldMapping {
+                path: "electrical.switches.inverter.state".into(),
+                truth: [("Standby", false), ("On", true)]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json.matches("\"truth\"").count(), 1, "only the enum entry");
+        assert!(json.contains(r#""truth":{"On":true,"Standby":false}"#));
+        let back: Mapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
     }
 }

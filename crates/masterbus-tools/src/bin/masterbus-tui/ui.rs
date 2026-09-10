@@ -60,10 +60,13 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// factor, so the only moment a human can check that °C is about to become
 /// kelvin is while they are choosing the path.
 fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
-    use crate::app::Origin;
+    use crate::app::{Hint, Origin, Stage};
     let Some(ed) = app.path_editor.as_ref() else {
         return;
     };
+    if let Stage::Truth(sel) = ed.stage {
+        return draw_truth_modal(f, ed, sel, area);
+    }
     let w = area.width.saturating_sub(8).clamp(40, 84);
     let h = 8u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -76,12 +79,10 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
         Origin::Suggested(t) => t.describe().to_string(),
         Origin::Blank => "no suggestion for this field".to_string(),
     };
-    let (hint, hint_style) = match ed.conversion_hint() {
-        Some(h) => (h, Style::new().fg(Color::Green)),
-        None => (
-            format!("{:?} cannot be converted for this path", ed.unit),
-            Style::new().fg(Color::Red),
-        ),
+    let (hint, hint_style) = match ed.hint() {
+        Hint::Ok(h) => (h, Style::new().fg(Color::Green)),
+        Hint::Warn(h) => (h, Style::new().fg(Color::Yellow)),
+        Hint::Refuse(h) => (h, Style::new().fg(Color::Red)),
     };
     let unit = if ed.unit.trim().is_empty() {
         "no unit".to_string()
@@ -116,6 +117,56 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .title(format!(" Signal K path for {} ", field_id_tag(ed.field)))
             .title_bottom(" Enter save · Esc cancel "),
+    );
+    f.render_widget(p, rect);
+}
+
+/// The truth-table stage of the path prompt: an enum is going to a boolean
+/// leaf and this build could not classify every label, so the user says which
+/// labels mean `true`. Conventional labels arrive pre-filled; the rest are
+/// blank until chosen.
+fn draw_truth_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area: Rect) {
+    let w = area.width.saturating_sub(8).clamp(40, 84);
+    let h = (ed.options.len() as u16 + 6).min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+    f.render_widget(ratatui::widgets::Clear, rect);
+
+    let mut body = vec![
+        Line::from(Span::styled(
+            format!("  {} → {}", ed.field_name, ed.buf.trim()),
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  a boolean leaf: which labels mean true?",
+            Style::new().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+    ];
+    for (i, label) in ed.options.iter().enumerate() {
+        let marker = if i == sel { "› " } else { "  " };
+        let (value, style) = match ed.truth.get(label) {
+            Some(true) => ("true", Style::new().fg(Color::Green)),
+            Some(false) => ("false", Style::new().fg(Color::Red)),
+            None => ("?", Style::new().fg(Color::Yellow)),
+        };
+        let label_style = if i == sel {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        body.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled(format!("{label:<20}"), label_style),
+            Span::styled(value, style),
+        ]));
+    }
+    let p = Paragraph::new(body).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Truth table for {} ", field_id_tag(ed.field)))
+            .title_bottom(" Space/t/f set · Enter save · Esc back to path "),
     );
     f.render_widget(p, rect);
 }

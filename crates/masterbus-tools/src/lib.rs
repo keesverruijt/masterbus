@@ -6,10 +6,10 @@
 //!
 //! - [`mapping`] — the curated MasterBus → Signal K mapping, keyed on device
 //!   serial and field id.
-//! - [`units`] — the device-unit → Signal K SI conversion, derived from the
-//!   pair of units rather than stored per field.
-//! - [`signalk`] — the Signal K vocabulary: which SI unit each path leaf
-//!   carries, and how a device value is encoded for the wire.
+//! - [`units`] — the device-unit → Signal K SI unit and conversion, derived
+//!   from the device's own unit rather than stored per field.
+//! - [`signalk`] — the Signal K side: the leaf cross-check, boolean leaves
+//!   and their truth tables, and how a device value is encoded for the wire.
 //! - [`seed`] — path *suggestions*: the bundled per-model database first, then
 //!   the old per-class name table, both proposals with no authority.
 //! - [`database`] — bundled per-model suggestions keyed on article and field
