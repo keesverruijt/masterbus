@@ -17,7 +17,8 @@
 #   mapping.json which MasterBus field publishes to which Signal K path,
 #                keyed on device serial and field id. Seeded from built-in
 #                heuristics on the first run that finds no file; curate it
-#                while the service is stopped, then restart.
+#                with `masterbus-tui --mapping`. The service re-reads the
+#                file when it changes, no restart needed.
 #
 # Upgrading from a release that used /etc/default/masterbus-signalk/: copy any
 # LISTEN= you set in that directory's `config` file into config.ini's `listen`
