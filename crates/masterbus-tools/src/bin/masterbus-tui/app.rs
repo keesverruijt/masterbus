@@ -1125,6 +1125,17 @@ impl PathEditor {
     /// for the modal.
     pub fn hint(&self) -> Hint {
         match self.plan() {
+            // A three-valued enum is a mode, not a boolean: Standby/On/Alarm
+            // squeezed into `enabled` loses Alarm. Say so before the truth
+            // table makes the loss look deliberate.
+            Err(signalk::Refusal::Truth { .. }) | Ok(_) if self.lossy_boolean() => {
+                Hint::Warn(format!(
+                    "{} labels onto a boolean loses information; consider {} (a string), \
+                     else Enter for a truth table",
+                    self.options.len(),
+                    self.mode_leaf()
+                ))
+            }
             Err(e) => Hint::Refuse(e.to_string()),
             Ok(p) if !p.truth.is_empty() => Hint::Ok(format!(
                 "boolean: {}",
@@ -1139,6 +1150,24 @@ impl PathEditor {
                 (None, None) => Hint::Ok("no unit: published as-is".into()),
                 (Some(u), None) => Hint::Ok(format!("→ {u} ({})", p.conv.describe())),
             },
+        }
+    }
+
+    /// An enum with more than two labels going to a boolean leaf.
+    pub fn lossy_boolean(&self) -> bool {
+        self.options.len() > 2 && signalk::leaf_is_boolean(self.buf.trim())
+    }
+
+    /// The spec's string mode leaf for the path's category, to suggest instead
+    /// of a lossy boolean.
+    pub fn mode_leaf(&self) -> &'static str {
+        let p = self.buf.trim();
+        if p.starts_with("electrical.inverters.") {
+            "inverterMode"
+        } else if p.starts_with("electrical.chargers.") || p.starts_with("electrical.solar.") {
+            "chargingMode"
+        } else {
+            "a mode leaf"
         }
     }
 
@@ -1305,8 +1334,16 @@ impl App {
                     }
                 }
                 ed.stage = Stage::Truth(0);
-                self.status =
-                    "boolean leaf: say which labels mean true (Space toggles, Enter saves)".into();
+                self.status = if ed.lossy_boolean() {
+                    format!(
+                        "{} labels onto a boolean: {} would keep them all; else say which mean \
+                         true (Space toggles, Enter saves)",
+                        ed.options.len(),
+                        ed.mode_leaf()
+                    )
+                } else {
+                    "boolean leaf: say which labels mean true (Space toggles, Enter saves)".into()
+                };
                 self.path_editor = Some(ed);
                 return;
             }
@@ -1915,15 +1952,34 @@ mod mapping_tests {
             panic!("conventional labels need no help")
         };
         assert!(hint.contains("Activated→true"), "{hint}");
-        // Alarm is anyone's guess: refused until the table says.
+        // A third label makes it a mode, not a boolean: the editor steers
+        // towards the string leaf before offering the truth table, and keeps
+        // saying so once the table is filled in.
         ed.options.push("Alarm".into());
-        assert!(matches!(ed.hint(), Hint::Refuse(_)));
+        assert!(matches!(ed.hint(), Hint::Warn(_)));
         assert!(!ed.truth_complete());
         ed.truth = [("Standby", false), ("Activated", true), ("Alarm", false)]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
         assert!(ed.truth_complete());
-        assert!(matches!(ed.hint(), Hint::Ok(_)));
+        assert!(matches!(ed.hint(), Hint::Warn(_)));
+    }
+
+    #[test]
+    fn the_mode_leaf_suggested_follows_the_category() {
+        let mut ed = editor("", "electrical.inverters.inv.enabled");
+        ed.options = vec!["Standby".into(), "On".into(), "Alarm".into()];
+        assert!(ed.lossy_boolean());
+        assert_eq!(ed.mode_leaf(), "inverterMode");
+        let Hint::Warn(w) = ed.hint() else {
+            panic!("three labels onto enabled should warn")
+        };
+        assert!(w.contains("inverterMode"), "{w}");
+        ed.buf = "electrical.chargers.chg.enabled".into();
+        assert_eq!(ed.mode_leaf(), "chargingMode");
+        // Two labels is a genuine boolean; nothing to steer away from.
+        ed.options.pop();
+        assert!(!ed.lossy_boolean());
     }
 }
