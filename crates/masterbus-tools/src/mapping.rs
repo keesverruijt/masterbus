@@ -31,7 +31,10 @@
 //! get wrong. The exceptions are the two things no unit can express:
 //! [`FieldMapping::invert`], for a charger reporting `Standby` that publishes
 //! to `enabled` negated, and [`FieldMapping::truth`], for an enum such as
-//! `Standby` / `On` / `Alarm` published to a boolean leaf.
+//! `Standby` / `On` / `Alarm` published to a boolean leaf. And one thing that
+//! is not a value at all: [`FieldMapping::notify`], the labels of an enum that
+//! should raise a Signal K notification, because `Alarm` is something a
+//! server should act on rather than a string on a dashboard.
 //!
 //! # Format
 //!
@@ -47,8 +50,8 @@
 //!       "fields": {
 //!         "0x006": { "path": "electrical.inverters.inverter.dc.voltage" },
 //!         "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true },
-//!         "0x010": { "path": "electrical.switches.inverter.state",
-//!                    "truth": { "Standby": false, "On": true, "Alarm": false } }
+//!         "0x010": { "path": "electrical.inverters.inverter.inverterMode",
+//!                    "notify": { "Alarm": "alarm" } }
 //!       }
 //!     }
 //!   }
@@ -116,6 +119,56 @@ pub struct FieldMapping {
     /// the rest (`Alarm`?); a label missing from the table publishes nothing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub truth: BTreeMap<String, bool>,
+    /// For an enum: which labels raise a Signal K notification, and how
+    /// loudly. `{"Alarm": "alarm", "Overload": "warn"}`. While the field's
+    /// label is listed, `notifications.<path>` carries that state; when it
+    /// leaves the list, `normal`. Empty for anything else.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notify: BTreeMap<String, NotifyState>,
+}
+
+/// A Signal K notification state worth raising. `normal` is not listed: it
+/// is what a label that is not in the table means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyState {
+    /// Something to notice; no sound.
+    Alert,
+    /// Something to look at soon; no sound.
+    Warn,
+    /// Something wrong now; visual and sound.
+    Alarm,
+    /// Something dangerous now; visual and sound.
+    Emergency,
+}
+
+impl NotifyState {
+    /// The state as Signal K spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NotifyState::Alert => "alert",
+            NotifyState::Warn => "warn",
+            NotifyState::Alarm => "alarm",
+            NotifyState::Emergency => "emergency",
+        }
+    }
+
+    /// How the notification should be brought to attention, per the spec's
+    /// `method` field.
+    pub fn methods(self) -> &'static [&'static str] {
+        match self {
+            NotifyState::Alert | NotifyState::Warn => &["visual"],
+            NotifyState::Alarm | NotifyState::Emergency => &["visual", "sound"],
+        }
+    }
+
+    /// Every state, quietest first; what the editor cycles through.
+    pub const ALL: [NotifyState; 4] = [
+        NotifyState::Alert,
+        NotifyState::Warn,
+        NotifyState::Alarm,
+        NotifyState::Emergency,
+    ];
 }
 
 /// Render a field id the way the whole toolchain does: `0x000`..`0x1FF`, three
@@ -293,6 +346,33 @@ mod tests {
         assert_eq!(sample().len(), 2);
         assert!(!sample().is_empty());
         assert!(Mapping::new().is_empty());
+    }
+
+    #[test]
+    fn notify_states_round_trip_in_lowercase_and_are_omitted_when_empty() {
+        let mut m = sample();
+        let d = m.devices.get_mut("R516V1070").unwrap();
+        d.fields.insert(
+            field_key(0x010),
+            FieldMapping {
+                path: "electrical.inverters.inverter.inverterMode".into(),
+                notify: [
+                    ("Alarm", NotifyState::Alarm),
+                    ("Overload", NotifyState::Warn),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json.matches("\"notify\"").count(), 1);
+        assert!(json.contains(r#""notify":{"Alarm":"alarm","Overload":"warn"}"#));
+        let back: Mapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
+        assert_eq!(NotifyState::Alarm.methods(), &["visual", "sound"]);
+        assert_eq!(NotifyState::Warn.methods(), &["visual"]);
     }
 
     #[test]
