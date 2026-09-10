@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use masterbus::{DeviceStatus, FieldId, Value, VisualizationType};
 
@@ -67,12 +67,7 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
     if let Stage::Truth(sel) = ed.stage {
         return draw_truth_modal(f, ed, sel, area);
     }
-    let w = area.width.saturating_sub(8).clamp(40, 84);
-    let h = 8u16;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let rect = Rect::new(x, y, w, h);
-    f.render_widget(ratatui::widgets::Clear, rect);
+    let w = area.width.saturating_sub(4).clamp(30, 84);
 
     let origin = match ed.origin {
         Origin::Existing => "editing the existing mapping".to_string(),
@@ -89,36 +84,69 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("in {}", ed.unit)
     };
+    // For an enum on a boolean leaf ^N flips the table shown in the hint;
+    // a separate "inverted" flag would be one more thing to apply mentally.
+    let invert_line = if app.flips_truth() {
+        "^N flips true/false".to_string()
+    } else {
+        format!(
+            "invert: {}  (^N toggles)",
+            if ed.invert { "yes" } else { "no" }
+        )
+    };
     let body = vec![
         Line::from(Span::styled(
-            format!("  {} ({unit})", ed.field_name),
+            format!("{} ({unit})", ed.field_name),
             Style::new().add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            format!("  {origin}"),
-            Style::new().fg(Color::DarkGray),
-        )),
+        Line::from(Span::styled(origin, Style::new().fg(Color::DarkGray))),
         Line::raw(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{}\u{2588}", ed.buf), Style::new().fg(Color::Cyan)),
-        ]),
-        Line::from(vec![Span::raw("  "), Span::styled(hint, hint_style)]),
         Line::from(Span::styled(
-            format!(
-                "  invert: {}  (^N toggles)",
-                if ed.invert { "yes" } else { "no" }
-            ),
-            Style::new().fg(Color::DarkGray),
+            format!("{}\u{2588}", ed.buf),
+            Style::new().fg(Color::Cyan),
         )),
+        Line::from(Span::styled(hint, hint_style)),
+        Line::from(Span::styled(invert_line, Style::new().fg(Color::DarkGray))),
     ];
-    let p = Paragraph::new(body).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Signal K path for {} ", field_id_tag(ed.field)))
-            .title_bottom(" Enter save · Esc cancel "),
+    draw_modal(
+        f,
+        area,
+        w,
+        &body,
+        format!(" Signal K path for {} ", field_id_tag(ed.field)),
+        " Enter save · Esc cancel ",
     );
+}
+
+/// A centred, bordered box sized to its wrapped content. Signal K paths and
+/// the hints about them run long, and an 80-column terminal is normal on a
+/// boat, so everything wraps rather than being cut off at the border.
+fn draw_modal(f: &mut Frame, area: Rect, w: u16, body: &[Line<'_>], title: String, foot: &str) {
+    let inner = w.saturating_sub(4) as usize; // borders + one column padding
+    let rows: u16 = body.iter().map(|l| wrapped_rows(l.width(), inner)).sum();
+    let h = (rows + 2).min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+    f.render_widget(ratatui::widgets::Clear, rect);
+    let p = Paragraph::new(body.to_vec())
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(ratatui::widgets::Padding::horizontal(1))
+                .title(title)
+                .title_bottom(foot),
+        );
     f.render_widget(p, rect);
+}
+
+/// Rows a line of `width` cells occupies when wrapped into `cols` columns.
+fn wrapped_rows(width: usize, cols: usize) -> u16 {
+    if cols == 0 {
+        return 1;
+    }
+    width.max(1).div_ceil(cols) as u16
 }
 
 /// The truth-table stage of the path prompt: an enum is going to a boolean
@@ -126,20 +154,14 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
 /// labels mean `true`. Conventional labels arrive pre-filled; the rest are
 /// blank until chosen.
 fn draw_truth_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area: Rect) {
-    let w = area.width.saturating_sub(8).clamp(40, 84);
-    let h = (ed.options.len() as u16 + 6).min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let rect = Rect::new(x, y, w, h);
-    f.render_widget(ratatui::widgets::Clear, rect);
-
+    let w = area.width.saturating_sub(4).clamp(30, 84);
     let mut body = vec![
         Line::from(Span::styled(
-            format!("  {} → {}", ed.field_name, ed.buf.trim()),
+            format!("{} → {}", ed.field_name, ed.buf.trim()),
             Style::new().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "  a boolean leaf: which labels mean true?",
+            "a boolean leaf: which labels mean true?",
             Style::new().fg(Color::DarkGray),
         )),
         Line::raw(""),
@@ -162,13 +184,14 @@ fn draw_truth_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area
             Span::styled(value, style),
         ]));
     }
-    let p = Paragraph::new(body).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Truth table for {} ", field_id_tag(ed.field)))
-            .title_bottom(" Space/t/f set · Enter save · Esc back to path "),
+    draw_modal(
+        f,
+        area,
+        w,
+        &body,
+        format!(" Truth table for {} ", field_id_tag(ed.field)),
+        " Space/t/f set · ^N flip all · Enter save · Esc back ",
     );
-    f.render_widget(p, rect);
 }
 
 fn draw_logs(f: &mut Frame, area: Rect) {
@@ -800,6 +823,15 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod mapping_row_tests {
     use super::*;
+
+    #[test]
+    fn modal_rows_follow_the_wrapped_width() {
+        assert_eq!(wrapped_rows(0, 40), 1);
+        assert_eq!(wrapped_rows(40, 40), 1);
+        assert_eq!(wrapped_rows(41, 40), 2);
+        assert_eq!(wrapped_rows(120, 40), 3);
+        assert_eq!(wrapped_rows(10, 0), 1);
+    }
 
     /// The columns to the left of the path are fixed-width and already wide, so
     /// this is what a real row's head looks like.

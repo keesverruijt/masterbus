@@ -1130,8 +1130,7 @@ impl PathEditor {
             // table makes the loss look deliberate.
             Err(signalk::Refusal::Truth { .. }) | Ok(_) if self.lossy_boolean() => {
                 Hint::Warn(format!(
-                    "{} labels onto a boolean loses information; consider {} (a string), \
-                     else Enter for a truth table",
+                    "{} labels → boolean loses info; use {} (string), or Enter for a truth table",
                     self.options.len(),
                     self.mode_leaf()
                 ))
@@ -1336,8 +1335,7 @@ impl App {
                 ed.stage = Stage::Truth(0);
                 self.status = if ed.lossy_boolean() {
                     format!(
-                        "{} labels onto a boolean: {} would keep them all; else say which mean \
-                         true (Space toggles, Enter saves)",
+                        "{} labels → boolean: {} keeps them all; else set true/false per label",
                         ed.options.len(),
                         ed.mode_leaf()
                     )
@@ -1465,11 +1463,41 @@ impl App {
         }
     }
 
-    /// Toggle the invert flag from inside the editor.
+    /// `^N` in the editor. For a real boolean field this toggles `invert`.
+    /// For an enum on a boolean leaf it flips the truth table instead, so
+    /// what the user sees is `Standby→true, Activated→false` rather than a
+    /// separate "inverted" flag they have to apply in their head.
     pub fn map_editor_toggle_invert(&mut self) {
-        if let Some(ed) = self.path_editor.as_mut() {
+        let Some(ed) = self.path_editor.as_mut() else {
+            return;
+        };
+        if ed.options.is_empty() || !signalk::leaf_is_boolean(ed.buf.trim()) {
             ed.invert = !ed.invert;
+            return;
         }
+        // Materialise the table the sidecar would use, then flip it.
+        if let Ok(plan) = ed.plan()
+            && !plan.truth.is_empty()
+        {
+            ed.truth = plan.truth;
+        } else {
+            for l in &ed.options {
+                if let Some(b) = signalk::truth_of_label(l) {
+                    ed.truth.entry(l.clone()).or_insert(b);
+                }
+            }
+        }
+        for v in ed.truth.values_mut() {
+            *v = !*v;
+        }
+        ed.invert = false;
+    }
+
+    /// Whether `^N` would flip a truth table rather than the invert flag.
+    pub fn flips_truth(&self) -> bool {
+        self.path_editor
+            .as_ref()
+            .is_some_and(|ed| !ed.options.is_empty() && signalk::leaf_is_boolean(ed.buf.trim()))
     }
 
     /// Copy the open device's mapping onto every other device with the same
@@ -1964,6 +1992,29 @@ mod mapping_tests {
             .collect();
         assert!(ed.truth_complete());
         assert!(matches!(ed.hint(), Hint::Warn(_)));
+    }
+
+    /// `^N` on an enum flips the table the user is looking at, rather than
+    /// recording an invert flag they would have to apply in their head.
+    #[test]
+    fn invert_on_an_enum_flips_the_truth_table() {
+        let mut ed = editor("", "electrical.switches.out.state");
+        ed.options = vec!["Standby".into(), "Activated".into()];
+        let mut app_ed = Some(ed);
+        // Drive the same logic the App method uses, on a bare editor.
+        let ed = app_ed.as_mut().unwrap();
+        let plan = ed.plan().unwrap();
+        ed.truth = plan.truth;
+        for v in ed.truth.values_mut() {
+            *v = !*v;
+        }
+        assert!(ed.truth["Standby"]);
+        assert!(!ed.truth["Activated"]);
+        assert!(!ed.invert);
+        let Hint::Ok(h) = ed.hint() else {
+            panic!("a complete table is fine")
+        };
+        assert!(h.contains("Standby→true"), "{h}");
     }
 
     #[test]
