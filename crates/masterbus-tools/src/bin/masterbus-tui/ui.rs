@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use masterbus::{DeviceStatus, FieldId, Value, VisualizationType};
+use masterbus_tools::mapping::NotifyState;
 
 use crate::app::{App, EditKind, Focus, LOGIN_LEVELS, Row, TABS, TabKind, level_label, tab_label};
 
@@ -67,6 +68,9 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
     if let Stage::Truth(sel) = ed.stage {
         return draw_truth_modal(f, ed, sel, area);
     }
+    if let Stage::Notify(sel) = ed.stage {
+        return draw_notify_modal(f, ed, sel, area);
+    }
     let w = area.width.saturating_sub(4).clamp(30, 84);
 
     let origin = match ed.origin {
@@ -86,7 +90,7 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
     };
     // For an enum on a boolean leaf ^N flips the table shown in the hint;
     // a separate "inverted" flag would be one more thing to apply mentally.
-    let invert_line = if app.flips_truth() {
+    let mut invert_line = if app.flips_truth() {
         "^N flips true/false".to_string()
     } else {
         format!(
@@ -94,6 +98,9 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
             if ed.invert { "yes" } else { "no" }
         )
     };
+    if !ed.options.is_empty() {
+        invert_line.push_str(" · ^A notifications");
+    }
     let body = vec![
         Line::from(Span::styled(
             format!("{} ({unit})", ed.field_name),
@@ -191,6 +198,52 @@ fn draw_truth_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area
         &body,
         format!(" Truth table for {} ", field_id_tag(ed.field)),
         " Space/t/f set · ^N flip all · Enter save · Esc back ",
+    );
+}
+
+/// The notification stage of the path prompt: which of an enum's labels
+/// should raise a Signal K notification, and how loudly. Labels that sound
+/// like trouble arrive pre-filled.
+fn draw_notify_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area: Rect) {
+    let w = area.width.saturating_sub(4).clamp(30, 84);
+    let mut body = vec![
+        Line::from(Span::styled(
+            format!("{} → {}", ed.field_name, ed.buf.trim()),
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "which labels should raise a notification?",
+            Style::new().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+    ];
+    for (i, label) in ed.options.iter().enumerate() {
+        let marker = if i == sel { "› " } else { "  " };
+        let (value, style) = match ed.notify.get(label) {
+            Some(s @ (NotifyState::Alarm | NotifyState::Emergency)) => {
+                (s.as_str(), Style::new().fg(Color::Red))
+            }
+            Some(s) => (s.as_str(), Style::new().fg(Color::Yellow)),
+            None => ("normal", Style::new().fg(Color::DarkGray)),
+        };
+        let label_style = if i == sel {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        body.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled(format!("{label:<20}"), label_style),
+            Span::styled(value, style),
+        ]));
+    }
+    draw_modal(
+        f,
+        area,
+        w,
+        &body,
+        format!(" Notifications for {} ", field_id_tag(ed.field)),
+        " Space cycle · a alarm · w warn · e emergency · n normal · Enter save · Esc back ",
     );
 }
 
