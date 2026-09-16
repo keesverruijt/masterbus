@@ -37,6 +37,11 @@
 //! `masterbus-tui --mapping` takes effect within a couple of seconds without
 //! a restart.
 //!
+//! An enum whose mapping names alarm labels (`"notify": {"Alarm": "alarm"}`)
+//! also drives `notifications.<path>`: the spec's `state` / `method` /
+//! `message` object, re-sent on every change and to every new client, so a
+//! Signal K server can sound it rather than show a word on a dashboard.
+//!
 //! Besides live values, each published device also emits static `name` and
 //! `manufacturer` metadata once per client connection.
 
@@ -44,11 +49,14 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Subscription};
-use masterbus_tools::mapping::{DeviceMapping, FieldMapping, Mapping, field_key, parse_field_key};
+use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Subscription, Value};
+use masterbus_tools::mapping::{
+    DeviceMapping, FieldMapping, Mapping, NotifyState, field_key, parse_field_key,
+};
 use masterbus_tools::seed;
 use masterbus_tools::signalk::{self, Plan};
 use serde_json::json;
@@ -131,6 +139,8 @@ struct Emit {
     path: String,
     /// How to get there, derived from the field's unit and the mapping entry.
     plan: Plan,
+    /// The device's name, for notification messages.
+    device: String,
 }
 
 /// Walk the bus and collect every device's monitoring fields.
@@ -300,6 +310,7 @@ fn resolve(devices: &[DeviceRec], mapping: &Mapping) -> HashMap<(DeviceId, Field
                 Emit {
                     path: fm.path.clone(),
                     plan,
+                    device: dev.name.clone(),
                 },
             );
         }
@@ -316,6 +327,9 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         listener.local_addr()?
     );
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    // Connections accepted so far. A new one needs the current notification
+    // states, which are only ever sent on change.
+    let connections: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     // Static per-device metadata (name / manufacturer), rendered once discovery
     // completes. Replayed to every client the moment it connects so late joiners
     // still learn each device's identity without waiting for a value change.
@@ -323,8 +337,10 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     {
         let clients = clients.clone();
         let static_batch = static_batch.clone();
+        let connections = connections.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
+                connections.fetch_add(1, Ordering::Relaxed);
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                 eprintln!(
@@ -398,6 +414,13 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         // Skip building deltas when nobody is listening (the channels are still
         // drained below so they don't grow unbounded).
         let have_clients = !clients.lock().unwrap().is_empty();
+        // A new client has not seen the notification states; forget what was
+        // sent so each is re-sent with the next value.
+        let conns = connections.load(Ordering::Relaxed);
+        if conns != active.connections_seen {
+            active.connections_seen = conns;
+            active.notified.clear();
+        }
         let mut batch: Vec<u8> = Vec::new();
         let mut new_meta: Vec<serde_json::Value> = Vec::new();
         for sub in &active.subs {
@@ -406,12 +429,15 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             // values rapidly, and we emit those too).
             let mut latest: HashMap<String, serde_json::Value> = HashMap::new();
             while let Some(u) = sub.try_recv() {
-                if have_clients
-                    && let Some(e) = active.emit.get(&(u.device, u.field))
-                    && let Some(value) =
+                if have_clients && let Some(e) = active.emit.get(&(u.device, u.field)) {
+                    if let Some(value) =
                         signalk::encode(&u.value, e.plan.conv, e.plan.invert, &e.plan.truth)
-                {
-                    latest.insert(e.path.clone(), value);
+                    {
+                        latest.insert(e.path.clone(), value);
+                    }
+                    if let Some((path, value)) = notification(e, &u.value, &mut active.notified) {
+                        latest.insert(path, value);
+                    }
                 }
             }
             if !latest.is_empty() {
@@ -474,6 +500,31 @@ struct Active {
     units: HashMap<String, &'static str>,
     /// Paths whose unit `meta` has already been published this activation.
     meta_sent: HashSet<String>,
+    /// Notification path → the state last sent, so only changes go out.
+    notified: HashMap<String, Option<NotifyState>>,
+    /// The accept counter as of the last poll, to spot new clients.
+    connections_seen: usize,
+}
+
+/// The notification delta a value update calls for, if any: the first
+/// sighting of a notifying field, and every change of state after that.
+/// `notified` remembers what was last sent per notification path.
+fn notification(
+    e: &Emit,
+    value: &Value,
+    notified: &mut HashMap<String, Option<NotifyState>>,
+) -> Option<(String, serde_json::Value)> {
+    if e.plan.notify.is_empty() {
+        return None;
+    }
+    let label = value.label()?;
+    let state = signalk::notify_state(label, &e.plan.notify);
+    let path = signalk::notification_path(&e.path);
+    if notified.get(&path) == Some(&state) {
+        return None;
+    }
+    notified.insert(path.clone(), state);
+    Some((path, signalk::notification_value(&e.device, label, state)))
 }
 
 /// Resolve a mapping against the bus, subscribe to what it names, and
@@ -521,6 +572,8 @@ fn activate(
         subs,
         units,
         meta_sent: HashSet::new(),
+        notified: HashMap::new(),
+        connections_seen: usize::MAX, // forces a first send once anyone connects
     }
 }
 
@@ -960,6 +1013,60 @@ mod tests {
         let id = devices[0].id;
         assert!(emit[&(id, 0x001)].plan.truth["Activated"]);
         assert!(!emit.contains_key(&(id, 0x002)), "Alarm is ambiguous");
+    }
+
+    /// Notifications go out on the first sighting and on every change of
+    /// state, not on every value, and clear to `normal` when the label leaves
+    /// the table.
+    #[test]
+    fn notifications_follow_state_changes_only() {
+        let e = Emit {
+            path: "electrical.inverters.inv.inverterMode".into(),
+            plan: signalk::plan(
+                "electrical.inverters.inv.inverterMode",
+                "",
+                &[],
+                &FieldMapping {
+                    path: "electrical.inverters.inv.inverterMode".into(),
+                    notify: [("Alarm".to_string(), NotifyState::Alarm)].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            device: "INT Inverter 1".into(),
+        };
+        let options: Vec<String> = ["Standby", "On", "Alarm"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let at = |index: i32| Value::List {
+            index,
+            options: options.clone(),
+        };
+        let mut notified = HashMap::new();
+        // First sighting: normal, said once.
+        let (path, v) = notification(&e, &at(1), &mut notified).expect("first sighting");
+        assert_eq!(path, "notifications.electrical.inverters.inv.inverterMode");
+        assert_eq!(v["state"], "normal");
+        assert!(notification(&e, &at(1), &mut notified).is_none());
+        assert!(
+            notification(&e, &at(0), &mut notified).is_none(),
+            "Standby is normal too"
+        );
+        // Alarm raised.
+        let (_, v) = notification(&e, &at(2), &mut notified).expect("alarm");
+        assert_eq!(v["state"], "alarm");
+        assert_eq!(v["message"], "INT Inverter 1: Alarm");
+        assert!(notification(&e, &at(2), &mut notified).is_none());
+        // Cleared.
+        let (_, v) = notification(&e, &at(1), &mut notified).expect("clear");
+        assert_eq!(v["state"], "normal");
+        // A field with no table never notifies.
+        let plain = Emit {
+            plan: signalk::plan("x.y.mode", "", &[], &FieldMapping::default()).unwrap(),
+            ..e
+        };
+        assert!(notification(&plain, &at(2), &mut HashMap::new()).is_none());
     }
 
     #[test]

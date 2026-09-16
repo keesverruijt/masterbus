@@ -33,7 +33,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 
 use app::{App, Focus, Idents, MappingSession, Names};
 use masterbus::{Config, MasterBus};
-use masterbus_tools::mapping::Mapping;
+use masterbus_tools::mapping::{Mapping, NotifyState};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logging_in_tui = init_logger();
@@ -209,6 +209,23 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // The path editor owns every key while open: a Signal K path is free text
     // and may contain any of the letters the browse-mode bindings use.
     if app.path_editing() {
+        // The notification stage is a small list, not a text field.
+        if app.notify_editing() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => app.notify_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => app.notify_move(1),
+                KeyCode::Char(' ') => app.notify_cycle(),
+                KeyCode::Char('a') => app.notify_set(Some(NotifyState::Alarm)),
+                KeyCode::Char('w') => app.notify_set(Some(NotifyState::Warn)),
+                KeyCode::Char('e') => app.notify_set(Some(NotifyState::Emergency)),
+                KeyCode::Char('l') => app.notify_set(Some(NotifyState::Alert)),
+                KeyCode::Char('n') | KeyCode::Char('-') => app.notify_set(None),
+                KeyCode::Enter => app.commit_notify(),
+                KeyCode::Esc => app.notify_back(),
+                _ => {}
+            }
+            return;
+        }
         // The truth-table stage is a small list, not a text field.
         if app.truth_editing() {
             match key.code {
@@ -237,6 +254,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             // swallowed by the text field.
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.map_editor_toggle_invert()
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.open_notify()
             }
             KeyCode::Char(c) => app.map_editor_char(c),
             _ => {}

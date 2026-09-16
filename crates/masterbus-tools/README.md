@@ -101,7 +101,9 @@ same class, so nothing here matches on a name.
         "0x006": { "path": "electrical.inverters.inverter.dc.voltage" },
         "0x015": { "path": "electrical.chargers.inverter.enabled", "invert": true },
         "0x010": { "path": "electrical.switches.inverter.state",
-                   "truth": { "Standby": false, "On": true, "Alarm": false } }
+                   "truth": { "Standby": false, "Activated": true } },
+        "0x000": { "path": "electrical.inverters.inverter.inverterMode",
+                   "notify": { "Alarm": "alarm", "Overload": "warn" } }
       }
     }
   }
@@ -125,7 +127,19 @@ charger reporting `Standby` publishes to `enabled` negated. `truth` turns
 an enum into a boolean: a contact output reporting `Standby` /
 `Activated` publishes `false` / `true` to `electrical.switches.<id>.state`.
 The editor fills the table in for conventional label pairs (`Off`/`On`,
-`Standby`/`On`, `Standby`/`Activated`) and asks about the rest (`Alarm`?).
+`Standby`/`On`, `Standby`/`Activated`) and asks about the rest. A
+three-valued state such as `Standby`/`On`/`Alarm` is a mode, not a
+boolean; the editor says so and points at the spec's string leaf
+(`inverterMode`, `chargingMode`) before offering a truth table.
+
+`notify` is the one entry that is not a value. An enum's labels that mean
+trouble (`Alarm`, `Overload`) raise a Signal K notification at
+`notifications.<path>`: the spec's `state` / `method` / `message` object,
+`alarm` with visual and sound, `warn` with visual only, back to `normal`
+when the label changes. That is what a Signal K server and its plugins
+act on; a word on a dashboard is not. The editor offers the table when a
+new mapping's labels contain such a word, pre-filled; `^A` opens it for
+any enum.
 
 The path is yours. Point a field at a non-standard leaf, a spec leaf
 newer than this build, or a different category and it is honoured; the
@@ -197,8 +211,12 @@ the editor:
   anyone can check that `°C` is about to become kelvin, since the file
   stores no scale factor. `^N` toggles `invert`. An enum mapped onto a
   boolean leaf (`enabled`, a switch's `state`) whose labels are not the
-  conventional ones goes on to a truth table: pick `true` or `false` for
-  each label, Enter saves.
+    conventional ones goes on to a truth table: pick `true` or `false` for
+  each label, `^N` flips the whole table, Enter saves. An enum whose
+  labels include something like `Alarm` goes on to a notification table:
+  `a`larm, `w`arn, `e`mergency, a`l`ert or `n`ormal per label, Space
+  cycles, Enter saves. `^A` in the path prompt opens that table for any
+  enum.
 - `-` unmaps the selected field.
 - `a` copies this device's mapping to every other device with the same
   article, substituting each one's own instance into the paths. Fields a

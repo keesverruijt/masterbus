@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use masterbus::Value;
 
-use crate::mapping::FieldMapping;
+use crate::mapping::{FieldMapping, NotifyState};
 use crate::units::{self, Conversion};
 
 /// The SI unit the Signal K specification gives a leaf, keyed on the path's
@@ -95,6 +95,8 @@ pub struct Plan {
     pub truth: BTreeMap<String, bool>,
     /// Negate the boolean.
     pub invert: bool,
+    /// Enum labels that raise a notification, and at what state.
+    pub notify: BTreeMap<String, NotifyState>,
     /// Worth saying once at startup, though the field still publishes.
     pub warning: Option<String>,
 }
@@ -220,8 +222,87 @@ pub fn plan(
         unit,
         truth,
         invert: entry.invert,
+        notify: entry.notify.clone(),
         warning,
     })
+}
+
+/// The notification state an enum label conventionally deserves, for the
+/// editor to pre-fill. `Alarm`, `Fault`, `Error` are alarms; `Overload`,
+/// `Low bat`, `Warning` are warnings. `None` for an ordinary state.
+pub fn notify_of_label(label: &str) -> Option<NotifyState> {
+    let l = label.trim().to_ascii_lowercase();
+    if ["alarm", "fault", "failure", "error", "emergency"]
+        .iter()
+        .any(|w| l.contains(w))
+    {
+        Some(NotifyState::Alarm)
+    } else if [
+        "warn",
+        "overload",
+        "low bat",
+        "over temp",
+        "overtemp",
+        "high temp",
+    ]
+    .iter()
+    .any(|w| l.contains(w))
+    {
+        Some(NotifyState::Warn)
+    } else {
+        None
+    }
+}
+
+/// Whether any of an enum's labels conventionally means trouble, which is
+/// when the editor offers a notification table.
+pub fn notify_default(labels: &[String]) -> BTreeMap<String, NotifyState> {
+    labels
+        .iter()
+        .filter_map(|l| notify_of_label(l).map(|s| (l.clone(), s)))
+        .collect()
+}
+
+/// The notification state a label puts a field in: its entry in the table,
+/// else `None` for normal.
+pub fn notify_state(label: &str, table: &BTreeMap<String, NotifyState>) -> Option<NotifyState> {
+    table
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(label))
+        .map(|(_, s)| *s)
+}
+
+/// The Signal K path a field's notification lives at: `notifications.` in
+/// front of the value's own path, which is the convention notification
+/// plugins follow, and keeps two fields of one device apart.
+pub fn notification_path(path: &str) -> String {
+    format!("notifications.{path}")
+}
+
+/// The value of a notification delta: the spec's `state` / `method` /
+/// `message` object, `normal` with no method when nothing is wrong.
+pub fn notification_value(
+    device: &str,
+    label: &str,
+    state: Option<NotifyState>,
+) -> serde_json::Value {
+    let message = if device.is_empty() {
+        label.to_string()
+    } else {
+        format!("{device}: {label}")
+    };
+    match state {
+        Some(s) => serde_json::json!({
+            "state": s.as_str(),
+            "method": s.methods(),
+            "message": message,
+        }),
+        None => serde_json::json!({
+            "state": "normal",
+            "method": [],
+            "message": message,
+        }),
+    }
 }
 
 /// The Signal K *node* a path belongs to: the sub-tree that carries a device's
@@ -610,6 +691,58 @@ mod tests {
             false
         );
         assert!(encode(&v, Conversion::IDENTITY, false, &lower).is_none());
+    }
+
+    #[test]
+    fn alarm_words_prefill_a_notification_table() {
+        let t = notify_default(&labels(&["Standby", "On", "Alarm"]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t["Alarm"], NotifyState::Alarm);
+        let t = notify_default(&labels(&[
+            "Standby",
+            "Inverting",
+            "Alarm",
+            "Charging",
+            "Overload",
+            "Low Bat",
+        ]));
+        assert_eq!(t["Alarm"], NotifyState::Alarm);
+        assert_eq!(t["Overload"], NotifyState::Warn);
+        assert_eq!(t["Low Bat"], NotifyState::Warn);
+        assert!(notify_default(&labels(&["Off", "Bulk", "Float"])).is_empty());
+    }
+
+    #[test]
+    fn a_notification_follows_the_label() {
+        let table: BTreeMap<String, NotifyState> =
+            [("Alarm".to_string(), NotifyState::Alarm)].into();
+        assert_eq!(notify_state("alarm", &table), Some(NotifyState::Alarm));
+        assert_eq!(notify_state("On", &table), None);
+        let v = notification_value("INT Inverter 1", "Alarm", Some(NotifyState::Alarm));
+        assert_eq!(v["state"], "alarm");
+        assert_eq!(v["method"], serde_json::json!(["visual", "sound"]));
+        assert_eq!(v["message"], "INT Inverter 1: Alarm");
+        let v = notification_value("INT Inverter 1", "On", None);
+        assert_eq!(v["state"], "normal");
+        assert_eq!(v["method"], serde_json::json!([]));
+        assert_eq!(
+            notification_path("electrical.inverters.x.inverterMode"),
+            "notifications.electrical.inverters.x.inverterMode"
+        );
+    }
+
+    #[test]
+    fn a_plan_carries_the_notification_table() {
+        let mut e = entry("electrical.inverters.x.inverterMode");
+        e.notify = [("Alarm".to_string(), NotifyState::Alarm)].into();
+        let p = plan(
+            "electrical.inverters.x.inverterMode",
+            "",
+            &labels(&["On", "Alarm"]),
+            &e,
+        )
+        .unwrap();
+        assert_eq!(p.notify.len(), 1);
     }
 
     #[test]

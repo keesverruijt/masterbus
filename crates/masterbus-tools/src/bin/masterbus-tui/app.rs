@@ -11,7 +11,9 @@ use masterbus::{
     AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus, Menu,
     Subscription, Value, VisualizationType, field_id,
 };
-use masterbus_tools::mapping::{DeviceMapping, FieldMapping, Mapping, field_key, parse_field_key};
+use masterbus_tools::mapping::{
+    DeviceMapping, FieldMapping, Mapping, NotifyState, field_key, parse_field_key,
+};
 use masterbus_tools::{seed, signalk};
 
 /// Live-poll rate for the selected device's monitoring fields.
@@ -1069,6 +1071,8 @@ pub enum Stage {
     /// Filling in the truth table for an enum on a boolean leaf; the cursor
     /// is on the label at this index.
     Truth(usize),
+    /// Choosing which labels raise a notification; cursor on this index.
+    Notify(usize),
 }
 
 /// An in-progress edit of one field's Signal K path.
@@ -1088,10 +1092,15 @@ pub struct PathEditor {
     /// Label → boolean, for an enum published to a boolean leaf. Empty until
     /// the path turns out to need one.
     pub truth: BTreeMap<String, bool>,
+    /// Label → notification state, for an enum with alarm labels.
+    pub notify: BTreeMap<String, NotifyState>,
     /// Where `buf` was seeded from.
     pub origin: Origin,
     /// What the modal is currently asking for.
     pub stage: Stage,
+    /// Whether the notification stage has been shown (or skipped) for this
+    /// edit, so saving does not loop back into it.
+    pub notify_offered: bool,
 }
 
 /// What the editor tells the user about the path as typed.
@@ -1118,7 +1127,18 @@ impl PathEditor {
             path: self.buf.trim().to_string(),
             invert: self.invert,
             truth: self.truth.clone(),
+            notify: self.notify.clone(),
         }
+    }
+
+    /// Whether to put the notification table in front of the user before
+    /// saving: a new mapping of an enum with a label that sounds like
+    /// trouble. An existing entry is left as the user last saved it; `^A`
+    /// reopens the table on demand.
+    pub fn wants_notify_stage(&self) -> bool {
+        !self.notify_offered
+            && self.origin != Origin::Existing
+            && !signalk::notify_default(&self.options).is_empty()
     }
 
     /// The conversion (or truth table) the current path implies, as a line
@@ -1146,6 +1166,14 @@ impl PathEditor {
             )),
             Ok(p) => match (p.unit, p.warning) {
                 (_, Some(w)) => Hint::Warn(w),
+                (None, None) if !p.notify.is_empty() => Hint::Ok(format!(
+                    "label as-is; notifies on {}",
+                    p.notify
+                        .iter()
+                        .map(|(k, v)| format!("{k} ({})", v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
                 (None, None) => Hint::Ok("no unit: published as-is".into()),
                 (Some(u), None) => Hint::Ok(format!("→ {u} ({})", p.conv.describe())),
             },
@@ -1230,8 +1258,8 @@ impl App {
             .as_ref()
             .and_then(|s| s.map.field(&serial, field.index))
             .cloned();
-        let (buf, invert, truth, origin) = match existing {
-            Some(fm) => (fm.path, fm.invert, fm.truth, Origin::Existing),
+        let (buf, invert, truth, notify, origin) = match existing {
+            Some(fm) => (fm.path, fm.invert, fm.truth, fm.notify, Origin::Existing),
             None => {
                 let (name, article, firmware) = self
                     .cur_info
@@ -1248,8 +1276,20 @@ impl App {
                     &field.name,
                     &field.unit,
                 ) {
-                    Some((s, tier)) => (s.path, s.invert, BTreeMap::new(), Origin::Suggested(tier)),
-                    None => (self.path_prefix(), false, BTreeMap::new(), Origin::Blank),
+                    Some((s, tier)) => (
+                        s.path,
+                        s.invert,
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        Origin::Suggested(tier),
+                    ),
+                    None => (
+                        self.path_prefix(),
+                        false,
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                        Origin::Blank,
+                    ),
                 }
             }
         };
@@ -1261,8 +1301,10 @@ impl App {
             buf,
             invert,
             truth,
+            notify,
             origin,
             stage: Stage::Path,
+            notify_offered: false,
         });
     }
 
@@ -1351,6 +1393,20 @@ impl App {
                 return;
             }
         };
+        // An enum with a label like `Alarm` is worth a notification, which
+        // is what a Signal K server can act on. Offer the table once, with
+        // the conventional labels pre-filled, before saving.
+        if ed.wants_notify_stage() {
+            let mut ed = ed;
+            ed.notify = signalk::notify_default(&ed.options);
+            ed.notify_offered = true;
+            ed.stage = Stage::Notify(0);
+            self.status =
+                "labels that should raise a Signal K notification (Space cycles, Enter saves)"
+                    .into();
+            self.path_editor = Some(ed);
+            return;
+        }
         let identity = self.cur_info.clone();
         let instance = self.cur_instance.clone();
         let Some(s) = self.mapping.as_mut() else {
@@ -1382,10 +1438,117 @@ impl App {
                 path: path.clone(),
                 invert: ed.invert,
                 truth: plan.truth,
+                notify: plan.notify.clone(),
             },
         );
         s.dirty = true;
-        self.status = format!("{} → {path}", field_key(ed.field));
+        self.status = if plan.notify.is_empty() {
+            format!("{} → {path}", field_key(ed.field))
+        } else {
+            format!(
+                "{} → {path}, notifying on {}",
+                field_key(ed.field),
+                plan.notify
+                    .iter()
+                    .map(|(k, v)| format!("{k} ({})", v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+    }
+
+    /// Whether the editor is on the notification stage.
+    pub fn notify_editing(&self) -> bool {
+        matches!(
+            self.path_editor.as_ref().map(|e| e.stage),
+            Some(Stage::Notify(_))
+        )
+    }
+
+    /// `^A` in the path stage: open the notification table for an enum,
+    /// whatever its labels, pre-filled from the conventions if it is empty.
+    pub fn open_notify(&mut self) {
+        let Some(ed) = self.path_editor.as_mut() else {
+            return;
+        };
+        if ed.options.is_empty() {
+            self.status = "only an enum (a field with labels) can notify".into();
+            return;
+        }
+        if ed.notify.is_empty() {
+            ed.notify = signalk::notify_default(&ed.options);
+        }
+        ed.notify_offered = true;
+        ed.stage = Stage::Notify(0);
+    }
+
+    /// Move the notification cursor.
+    pub fn notify_move(&mut self, delta: i32) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Stage::Notify(i) = ed.stage
+            && !ed.options.is_empty()
+        {
+            let n = ed.options.len() as i32;
+            ed.stage = Stage::Notify((i as i32 + delta).rem_euclid(n) as usize);
+        }
+    }
+
+    /// Cycle the selected label: normal → alert → warn → alarm → emergency
+    /// → normal.
+    pub fn notify_cycle(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Stage::Notify(i) = ed.stage
+            && let Some(label) = ed.options.get(i).cloned()
+        {
+            let next = match ed.notify.get(&label) {
+                None => Some(NotifyState::ALL[0]),
+                Some(s) => NotifyState::ALL
+                    .iter()
+                    .position(|x| x == s)
+                    .and_then(|p| NotifyState::ALL.get(p + 1))
+                    .copied(),
+            };
+            match next {
+                Some(s) => {
+                    ed.notify.insert(label, s);
+                }
+                None => {
+                    ed.notify.remove(&label);
+                }
+            }
+        }
+    }
+
+    /// Set the selected label outright; `None` means normal.
+    pub fn notify_set(&mut self, state: Option<NotifyState>) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Stage::Notify(i) = ed.stage
+            && let Some(label) = ed.options.get(i).cloned()
+        {
+            match state {
+                Some(s) => {
+                    ed.notify.insert(label, s);
+                }
+                None => {
+                    ed.notify.remove(&label);
+                }
+            }
+        }
+    }
+
+    /// Leave the notification table for the path, keeping what was set.
+    pub fn notify_back(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.stage = Stage::Path;
+        }
+    }
+
+    /// Save from the notification stage.
+    pub fn commit_notify(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.notify_offered = true;
+        }
+        self.commit_map();
     }
 
     /// Whether the editor is on the truth-table stage.
@@ -1660,6 +1823,7 @@ fn copy_to_targets(
                             path,
                             invert: fm.invert,
                             truth: fm.truth.clone(),
+                            notify: fm.notify.clone(),
                         },
                     );
                     copied += 1;
@@ -1938,9 +2102,40 @@ mod mapping_tests {
             buf: buf.into(),
             invert: false,
             truth: BTreeMap::new(),
+            notify: BTreeMap::new(),
             origin: Origin::Blank,
             stage: Stage::Path,
+            notify_offered: false,
         }
+    }
+
+    #[test]
+    fn the_notification_stage_is_offered_once_for_alarm_labels() {
+        let mut ed = editor("", "electrical.inverters.inv.inverterMode");
+        ed.options = vec!["Standby".into(), "On".into(), "Alarm".into()];
+        assert!(ed.wants_notify_stage());
+        ed.notify_offered = true;
+        assert!(!ed.wants_notify_stage());
+        // An existing entry is left as saved.
+        let mut ed = editor("", "electrical.inverters.inv.inverterMode");
+        ed.options = vec!["Standby".into(), "On".into(), "Alarm".into()];
+        ed.origin = Origin::Existing;
+        assert!(!ed.wants_notify_stage());
+        // Ordinary labels never prompt.
+        let mut ed = editor("", "electrical.chargers.c.chargingMode");
+        ed.options = vec!["Off".into(), "Bulk".into(), "Float".into()];
+        assert!(!ed.wants_notify_stage());
+    }
+
+    #[test]
+    fn the_hint_names_the_notifying_labels() {
+        let mut ed = editor("", "electrical.inverters.inv.inverterMode");
+        ed.options = vec!["Standby".into(), "On".into(), "Alarm".into()];
+        ed.notify = [("Alarm".to_string(), NotifyState::Alarm)].into();
+        let Hint::Ok(h) = ed.hint() else {
+            panic!("a mode leaf with a notification is fine")
+        };
+        assert!(h.contains("Alarm (alarm)"), "{h}");
     }
 
     #[test]
