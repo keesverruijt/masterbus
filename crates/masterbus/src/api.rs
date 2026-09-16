@@ -98,8 +98,12 @@ impl MasterBus {
             .collect()
     }
 
-    /// Like [`devices`](Self::devices) but first waits until the broadcast
-    /// window (2 s after connect) has elapsed, so the whole bus is present.
+    /// Like [`devices`](Self::devices) but first waits for the bus to fill
+    /// in: at least [`Config::discovery_window`] after connect, and then
+    /// until no new device has been heard for [`Config::discovery_settle`],
+    /// so the whole bus is present. A device that stays silent longer than
+    /// that (one that is powered up later, say) is only reported by
+    /// [`device_events`](Self::device_events).
     pub fn devices_all(&self) -> Vec<Device> {
         self.engine
             .device_ids_all()

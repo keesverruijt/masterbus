@@ -37,6 +37,11 @@
 //! `masterbus-tui --mapping` takes effect within a couple of seconds without
 //! a restart.
 //!
+//! Discovery does not end at startup. A device that announces itself after
+//! the initial pass — a quiet interface, or a charger switched on when shore
+//! power is connected — is identified as it appears and, if the mapping names
+//! its serial, starts publishing then (#22).
+//!
 //! An enum whose mapping names alarm labels (`"notify": {"Alarm": "alarm"}`)
 //! also drives `notifications.<path>`: the spec's `state` / `method` /
 //! `message` object, re-sent on every change and to every new client, so a
@@ -147,39 +152,40 @@ struct Emit {
 fn discover(bus: &MasterBus) -> Vec<DeviceRec> {
     let mut devices = bus.devices_all();
     devices.sort_by_key(|d| d.id());
-    let mut out = Vec::new();
-    for dev in &devices {
-        let identity = dev
-            .identity()
-            .unwrap_or_else(|_| masterbus::DeviceIdentity {
-                article: String::new(),
-                serial: String::new(),
-                revision: String::new(),
-                name: String::new(),
-                firmware: String::new(),
-            });
-        let mut fields = Vec::new();
-        for group in dev.tab_info(MENU).unwrap_or_default() {
-            for field in group.fields {
-                fields.push(FieldRec {
-                    id: field.index,
-                    name: field.name,
-                    unit: field.unit,
-                    options: field.options,
-                });
-            }
-        }
-        out.push(DeviceRec {
-            id: dev.id(),
-            instance: seed::instance_of(&identity.name, dev.id()),
-            serial: identity.serial,
-            article: identity.article,
-            name: identity.name,
-            firmware: identity.firmware,
-            fields,
+    devices.iter().map(discover_device).collect()
+}
+
+/// One device's identity and monitoring fields, as mapping needs them.
+fn discover_device(dev: &masterbus::Device) -> DeviceRec {
+    let identity = dev
+        .identity()
+        .unwrap_or_else(|_| masterbus::DeviceIdentity {
+            article: String::new(),
+            serial: String::new(),
+            revision: String::new(),
+            name: String::new(),
+            firmware: String::new(),
         });
+    let mut fields = Vec::new();
+    for group in dev.tab_info(MENU).unwrap_or_default() {
+        for field in group.fields {
+            fields.push(FieldRec {
+                id: field.index,
+                name: field.name,
+                unit: field.unit,
+                options: field.options,
+            });
+        }
     }
-    out
+    DeviceRec {
+        id: dev.id(),
+        instance: seed::instance_of(&identity.name, dev.id()),
+        serial: identity.serial,
+        article: identity.article,
+        name: identity.name,
+        firmware: identity.firmware,
+        fields,
+    }
 }
 
 /// Build a mapping from the per-class name heuristics — the migration path for
@@ -262,7 +268,8 @@ fn resolve(devices: &[DeviceRec], mapping: &Mapping) -> HashMap<(DeviceId, Field
     for (serial, dm) in &mapping.devices {
         let Some(dev) = by_serial.get(serial.as_str()) else {
             eprintln!(
-                "masterbus-signalk: mapping lists serial {serial:?}, which is not on the bus"
+                "masterbus-signalk: mapping lists serial {serial:?}, which is not on the bus \
+                 (yet — it is picked up if it announces itself later)"
             );
             continue;
         };
@@ -356,7 +363,7 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         });
     }
 
-    let devices = discover(&bus);
+    let mut devices = discover(&bus);
 
     // Load the curated mapping; seed one on first run so there is something to
     // publish and, more importantly, something to edit.
@@ -390,7 +397,53 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     let mut stamp = mtime(mapping_path);
     let mut last_check = Instant::now();
 
+    // Devices that announce themselves after the discovery pass — the quiet
+    // interfaces on a big bus, or a charger switched on when shore power is
+    // connected hours later (#22). Presence events name them; each is
+    // identified on its own thread, because reading a schema from a cold
+    // cache can take a while and the values already streaming must not stall
+    // behind it, and joins the bus here when its record arrives.
+    let events = bus.device_events();
+    let (found_tx, found_rx) = crossbeam_channel::unbounded::<DeviceRec>();
+    let mut pending: HashSet<DeviceId> = HashSet::new();
+
     loop {
+        while let Ok(ev) = events.try_recv() {
+            let masterbus::DeviceEvent::Alive(id) = ev else {
+                continue;
+            };
+            if devices.iter().any(|d| d.id == id) || !pending.insert(id) {
+                continue;
+            }
+            let dev = bus.device(id);
+            let tx = found_tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(discover_device(&dev));
+            });
+        }
+        while let Ok(rec) = found_rx.try_recv() {
+            pending.remove(&rec.id);
+            let mapped = mapping.devices.contains_key(&rec.serial);
+            eprintln!(
+                "masterbus-signalk: {} ({}) [{:06X}] joined the bus late; {}",
+                rec.name,
+                rec.serial,
+                rec.id,
+                if mapped {
+                    "resolving its mapping"
+                } else if rec.serial.is_empty() {
+                    "it did not identify itself, so it cannot be mapped"
+                } else {
+                    "it is not in the mapping — add it in `masterbus-tui --mapping`"
+                }
+            );
+            devices.push(rec);
+            devices.sort_by_key(|d| d.id);
+            if mapped {
+                active = activate(&bus, &devices, &mapping, &clients, &static_batch);
+            }
+        }
+
         // Pick up edits made in `masterbus-tui --mapping` without a restart:
         // both field reports on #12 lost time to a sidecar quietly serving
         // the old file.
@@ -404,7 +457,8 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                 match Mapping::load(p) {
                     Ok(m) => {
                         eprintln!("masterbus-signalk: {} changed; reloading", p.display());
-                        active = activate(&bus, &devices, &m, &clients, &static_batch);
+                        mapping = m;
+                        active = activate(&bus, &devices, &mapping, &clients, &static_batch);
                     }
                     Err(e) => eprintln!("masterbus-signalk: {e}; keeping the previous mapping"),
                 }

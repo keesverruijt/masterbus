@@ -36,6 +36,17 @@ pub struct Config {
     pub discovery_timeout: Duration,
     /// Discovery attempts before giving up on a query.
     pub discovery_retries: usize,
+    /// The least `devices_all` waits after connect before reporting the bus.
+    /// Devices announce themselves every second or two, so this is how long
+    /// a bus with steady, prompt talkers needs to fill in.
+    pub discovery_window: Duration,
+    /// How long the bus has to be free of *new* devices before `devices_all`
+    /// reports it, once `discovery_window` has elapsed. The quiet devices on
+    /// a big bus (interfaces, a display, an idle charger) first speak at or
+    /// after the two-second mark; extending the wait while new devices keep
+    /// arriving catches them without slowing a bus that filled in early.
+    /// `Duration::ZERO` restores the fixed window. (#22)
+    pub discovery_settle: Duration,
     /// How long `connect` waits to hear the first device before giving up.
     /// `connect` returns as soon as one broadcast is heard, so a generous value
     /// only helps on a quiet or noisy bus; it never slows a healthy one.
@@ -60,6 +71,8 @@ impl Default for Config {
             min_send_interval: Duration::from_millis(1),
             discovery_timeout: Duration::from_millis(150),
             discovery_retries: 3,
+            discovery_window: Duration::from_millis(2000),
+            discovery_settle: Duration::from_millis(2000),
             connect_timeout: Duration::from_secs(15),
             cache_path: None,
             heartbeat_master: None,
@@ -152,8 +165,26 @@ pub(crate) enum Command {
     Shutdown,
 }
 
-/// How long after start `devices_all` waits for the broadcast list to fill.
-const DEVICE_LIST_WINDOW: Duration = Duration::from_millis(2000);
+/// The most `devices_all` waits after start, however long new devices keep
+/// arriving; keeps a bus with a very slow talker from stalling a caller.
+const DEVICE_LIST_MAX: Duration = Duration::from_secs(10);
+
+/// When `devices_all` may report the bus: the later of the fixed window and
+/// the settle period after the newest device, capped at [`DEVICE_LIST_MAX`].
+/// Pure, so the policy can be tested without a bus.
+fn device_list_deadline(
+    started: Instant,
+    window: Duration,
+    settle: Duration,
+    newest_first_seen: Option<Instant>,
+) -> Instant {
+    let earliest = started + window;
+    let settled = newest_first_seen
+        .filter(|_| !settle.is_zero())
+        .map(|t| t + settle)
+        .unwrap_or(earliest);
+    earliest.max(settled).min(started + DEVICE_LIST_MAX)
+}
 
 /// The shared engine behind every API handle.
 pub(crate) struct Engine {
@@ -378,13 +409,23 @@ impl Engine {
         self.state.alive_ids(self.config.liveness)
     }
 
-    /// Wait until the broadcast-collection window has elapsed since start, then
-    /// return all alive device ids (the full bus).
+    /// Wait until the broadcast-collection window has elapsed since start and
+    /// no new device has been heard for the settle period, then return all
+    /// alive device ids (the full bus). The deadline moves out each time a
+    /// device is first heard, so it is re-evaluated as the wait goes on.
     pub fn device_ids_all(&self) -> Vec<DeviceId> {
-        let target = self.started + DEVICE_LIST_WINDOW;
-        let now = Instant::now();
-        if target > now {
-            std::thread::sleep(target - now);
+        loop {
+            let target = device_list_deadline(
+                self.started,
+                self.config.discovery_window,
+                self.config.discovery_settle,
+                self.state.newest_first_seen(),
+            );
+            let now = Instant::now();
+            if target <= now {
+                break;
+            }
+            std::thread::sleep((target - now).min(Duration::from_millis(100)));
         }
         self.device_ids()
     }
@@ -399,5 +440,59 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.cmd_tx.send(Command::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINDOW: Duration = Duration::from_secs(2);
+    const SETTLE: Duration = Duration::from_secs(2);
+
+    /// A bus that has filled in early reports at the fixed window, as before.
+    #[test]
+    fn a_quiet_bus_reports_at_the_window() {
+        let t0 = Instant::now();
+        assert_eq!(device_list_deadline(t0, WINDOW, SETTLE, None), t0 + WINDOW);
+        assert_eq!(
+            device_list_deadline(t0, WINDOW, SETTLE, Some(t0)),
+            t0 + WINDOW
+        );
+    }
+
+    /// The #22 bus: six devices first speak at the two-second mark. The old
+    /// fixed window took its snapshot at exactly that moment and missed them;
+    /// now the deadline moves out to two seconds after the newest arrival.
+    #[test]
+    fn a_late_arrival_extends_the_wait() {
+        let t0 = Instant::now();
+        let late = t0 + Duration::from_millis(2000);
+        assert_eq!(
+            device_list_deadline(t0, WINDOW, SETTLE, Some(late)),
+            late + SETTLE
+        );
+    }
+
+    /// A device that keeps arriving cannot stall the caller for ever.
+    #[test]
+    fn the_wait_is_capped() {
+        let t0 = Instant::now();
+        let very_late = t0 + Duration::from_secs(30);
+        assert_eq!(
+            device_list_deadline(t0, WINDOW, SETTLE, Some(very_late)),
+            t0 + DEVICE_LIST_MAX
+        );
+    }
+
+    /// A zero settle period is the old behaviour: the fixed window only.
+    #[test]
+    fn zero_settle_is_the_fixed_window() {
+        let t0 = Instant::now();
+        let late = t0 + Duration::from_secs(5);
+        assert_eq!(
+            device_list_deadline(t0, WINDOW, Duration::ZERO, Some(late)),
+            t0 + WINDOW
+        );
     }
 }

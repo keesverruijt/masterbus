@@ -117,6 +117,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   been discovered (else `output N`).
 
 ### Fixed
+- **Devices that announce after the two-second mark were missed.** Closes
+  #22. `devices_all()` slept a fixed 2 s from connect and took one snapshot,
+  so a device that first spoke at or after that moment — on a big bus, the
+  quiet interfaces, the display and an idle charger, which is to say the
+  low-traffic half of it — was not listed, and `masterbus-signalk` reported
+  its mapping entry as "not on the bus" while the reader log showed it going
+  alive a moment later. Which side of the mark a device landed on drifted
+  from restart to restart, so the miss looked random. Two changes, neither
+  sufficient alone:
+  - The library waits for the bus to **settle**: at least
+    `Config::discovery_window` (2 s) and then until no *new* device has been
+    heard for `Config::discovery_settle` (2 s), capped at 10 s. A bus that
+    fills in early is reported as promptly as before; one whose stragglers
+    arrive at 2 s is reported at 4 s. `masterbus-dump` and the FFI inherit
+    this, so a dump made right after stopping the sidecar no longer shows
+    eight of fourteen devices.
+  - `masterbus-signalk` subscribes to the **presence events** and picks up any
+    device that arrives after its discovery pass — the ones the settle window
+    still misses, and the charger that is switched on when shore power is
+    connected hours later. Each is identified on its own thread, so the values
+    already streaming do not stall behind a cold-cache schema read, and a
+    late device whose serial the mapping names starts publishing without a
+    restart. The startup message now says "not on the bus (yet)".
+  - Also found on the way: a mapping reloaded from disk was used for that
+    activation only, so any later re-activation would have gone back to the
+    file as it was at startup.
 - **`CONTRIBUTING.md` was a guide to the wrong thing.** It opened by
   explaining that you build from source "typically to add a device class",
   installed Rust, built the workspace, and only afterwards revealed that

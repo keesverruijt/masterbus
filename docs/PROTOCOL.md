@@ -79,7 +79,13 @@ matched by `(device_addr, class, payload-key)` — see §8.
 
 Devices announce themselves *periodically* via 8-byte broadcasts; discovery is
 **passive** — listen, don't poll. Broadcasts arrive frequently (< ~2 s apart),
-so a short collection window captures the whole bus.
+so a short collection window captures most of the bus — but not reliably all
+of it. On a 13-device bus the busy half announces within the first second and
+the quiet half (interfaces, the display, an idle charger) at or just after
+2 s, drifting either side of the mark from run to run (#22). A collector
+should therefore wait until no *new* device has been heard for a further
+couple of seconds, and a long-running program should keep listening: a
+charger switched on with shore power announces hours after any window.
 
 ### Broadcast payload (8 bytes)
 
