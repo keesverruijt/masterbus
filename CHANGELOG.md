@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-16
+
 ### Changed
 - **`masterbus-signalk` publishes a curated mapping, not a built-in table.**
   `map_field` decided both *what* a field meant and *where* it went, by
