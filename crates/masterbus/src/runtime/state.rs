@@ -24,6 +24,8 @@ pub struct CachedValue {
 pub struct DeviceEntry {
     /// 24-bit CAN device address (also the public device id).
     pub addr: u32,
+    /// When the device was first heard — drives the discovery settle window.
+    pub first_seen: Instant,
     /// Last time a broadcast (or any frame) was heard — drives liveness.
     pub last_seen: Instant,
     /// Device-family type code from the broadcast.
@@ -61,6 +63,7 @@ impl DeviceEntry {
     fn new(addr: u32, now: Instant) -> Self {
         DeviceEntry {
             addr,
+            first_seen: now,
             last_seen: now,
             type_code: 0,
             fw_hint: 0,
@@ -370,6 +373,16 @@ impl State {
     /// True if any device has ever been heard.
     pub fn any_device(&self) -> bool {
         !self.devices.lock().unwrap().is_empty()
+    }
+
+    /// When the most recently discovered device was first heard, if any.
+    pub fn newest_first_seen(&self) -> Option<Instant> {
+        self.devices
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.first_seen)
+            .max()
     }
 
     /// Compute a device's status from liveness.
