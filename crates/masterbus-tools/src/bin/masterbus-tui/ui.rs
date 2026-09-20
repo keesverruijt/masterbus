@@ -988,3 +988,406 @@ mod tests {
         assert_eq!(format_value_for(&v, &[], &devices, &names), "→ Solar");
     }
 }
+
+/// Formatting rules for the value column, independent of any frame.
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use masterbus::{Date, Time};
+
+    #[test]
+    fn numbers_booleans_and_text_have_fixed_shapes() {
+        assert_eq!(format_value(&Value::Float(26.3456)), "26.35");
+        assert_eq!(format_value(&Value::Float(-0.004)), "-0.00");
+        assert_eq!(format_value(&Value::Boolean(true)), "on");
+        assert_eq!(format_value(&Value::Boolean(false)), "off");
+        assert_eq!(
+            format_value(&Value::Text {
+                sid: 1,
+                text: "Nav Chg".into()
+            }),
+            "Nav Chg"
+        );
+        assert_eq!(format_value(&Value::Invalid), "invalid");
+    }
+
+    /// The device reports "no value" as a NaN float or a negative date/time
+    /// component; all three render as one em dash rather than as noise.
+    #[test]
+    fn the_no_value_sentinels_all_render_as_a_dash() {
+        assert_eq!(format_value(&Value::Float(f32::NAN)), "—");
+        assert_eq!(
+            format_value(&Value::Date(Date {
+                day: -1,
+                mon: -1,
+                year: -1
+            })),
+            "—"
+        );
+        assert_eq!(
+            format_value(&Value::Time(Time {
+                sec: -1,
+                min: 0,
+                hour: 0,
+                days: 0
+            })),
+            "—"
+        );
+    }
+
+    #[test]
+    fn dates_and_durations_are_zero_padded() {
+        assert_eq!(
+            format_value(&Value::Date(Date {
+                day: 7,
+                mon: 5,
+                year: 2026
+            })),
+            "2026-05-07"
+        );
+        assert_eq!(
+            format_value(&Value::Time(Time {
+                sec: 5,
+                min: 4,
+                hour: 3,
+                days: 2
+            })),
+            "2d 03:04:05"
+        );
+    }
+
+    /// A list index with no label falls back to the bare index, so an
+    /// undiscovered enum still shows what the device actually reports.
+    #[test]
+    fn a_list_without_labels_shows_its_index() {
+        let with = Value::List {
+            index: 1,
+            options: vec!["Off".into(), "On".into()],
+        };
+        assert_eq!(format_value(&with), "On");
+
+        let without = Value::List {
+            index: 3,
+            options: vec!["Off".into()],
+        };
+        assert_eq!(format_value(&without), "[3]");
+
+        let eventable = Value::Eventable {
+            index: 9,
+            labels: vec![],
+        };
+        assert_eq!(format_value(&eventable), "[9]");
+    }
+
+    /// In the field pane a list value is shown as `label(index)`, so the wire
+    /// value stays visible next to its meaning. The labels may come from the
+    /// value or, when it carries none, from the field's schema.
+    #[test]
+    fn list_values_show_their_label_and_their_index() {
+        let devices = [];
+        let names = HashMap::new();
+        let schema = vec!["Off".into(), "On".into(), "Auto".into()];
+
+        let from_value = Value::List {
+            index: 2,
+            options: vec!["A".into(), "B".into(), "C".into()],
+        };
+        assert_eq!(
+            format_value_for(&from_value, &schema, &devices, &names),
+            "C(2)"
+        );
+
+        let from_schema = Value::List {
+            index: 2,
+            options: vec![],
+        };
+        assert_eq!(
+            format_value_for(&from_schema, &schema, &devices, &names),
+            "Auto(2)"
+        );
+
+        let unknown = Value::List {
+            index: 7,
+            options: vec![],
+        };
+        assert_eq!(
+            format_value_for(&unknown, &schema, &devices, &names),
+            "[7](7)"
+        );
+    }
+
+    /// An out-of-range device reference shows the raw index — the target may
+    /// simply be powered off right now.
+    #[test]
+    fn an_out_of_range_device_reference_shows_its_index() {
+        let names = HashMap::new();
+        assert_eq!(device_ref_label(9, &[0x188EA2], &names), "→ [9]");
+        assert_eq!(device_ref_label(-1, &[0x188EA2], &names), "→ [-1]");
+    }
+
+    #[test]
+    fn every_device_status_has_a_glyph() {
+        use DeviceStatus as S;
+        for s in [
+            S::On,
+            S::OnWarning,
+            S::Sleeping,
+            S::OffFault,
+            S::OffError,
+            S::Updating,
+            S::Offline,
+            S::Unknown,
+        ] {
+            let (glyph, _) = status_style(s);
+            assert_eq!(glyph.chars().count(), 1, "{s:?}");
+        }
+        assert_eq!(status_style(S::On).0, "●");
+        assert_eq!(status_style(S::Offline).0, "○");
+        assert_eq!(status_style(S::Unknown).0, "?");
+    }
+
+    /// Truncation counts characters, not bytes, and the ellipsis is part of
+    /// the budget — a column must never overflow into its neighbour.
+    #[test]
+    fn truncation_fits_the_budget_including_the_ellipsis() {
+        assert_eq!(truncate("Voltage", 16), "Voltage");
+        assert_eq!(truncate("Voltage", 7), "Voltage");
+        assert_eq!(truncate("Voltage", 4), "Vol…");
+        assert_eq!(truncate("Voltage", 1), "…");
+        assert_eq!(truncate("Voltage", 0), "…");
+        // Multi-byte input is measured in characters.
+        assert_eq!(truncate("Temperatuur °C", 5).chars().count(), 5);
+    }
+
+    /// The field-id tag is the same three-hex-digit form `masterbus-set-field`
+    /// takes on the command line, with the channel in bit 8.
+    #[test]
+    fn field_id_tags_carry_the_channel_bit() {
+        assert_eq!(field_id_tag(masterbus::field_id::btm1(0x17)), "0x017");
+        assert_eq!(field_id_tag(masterbus::field_id::btm3(0x17)), "0x117");
+        assert_eq!(field_id_tag(masterbus::field_id::btm3(0xFF)), "0x1FF");
+    }
+}
+
+/// Whole-frame rendering, through ratatui's test backend. These assert on
+/// what a user would actually see on the screen: which pane is drawn, what
+/// the modals say, and that no layout panics at awkward sizes.
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::app::app_tests::{ADDR, app, field};
+    use crate::app::{EditKind, Editor, LoginPrompt, LoginStage, ValuesView};
+    use masterbus::{Menu, Value, field_id};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    /// Render the app and return the screen as text, one line per row.
+    fn screen_at(app: &App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+        term.draw(|f| draw(f, app)).expect("draw");
+        text(term.backend().buffer())
+    }
+
+    fn screen(app: &App) -> String {
+        screen_at(app, 100, 30)
+    }
+
+    fn text(buf: &Buffer) -> String {
+        let area = buf.area();
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Put a discovered-looking field pane in place without running discovery.
+    fn with_rows(app: &mut App) {
+        app.cur_device = Some(ADDR);
+        app.focus = Focus::Fields;
+        app.cur_tab = TabKind::Menu(Menu::Monitoring);
+        app.rows = vec![
+            Row::Group("DC".into()),
+            Row::Field(field(
+                field_id::btm1(0x17),
+                "Voltage",
+                VisualizationType::Float,
+                true,
+            )),
+            Row::Field(field(
+                field_id::btm1(0x18),
+                "Current",
+                VisualizationType::Float,
+                false,
+            )),
+        ];
+        app.row_sel = 1;
+        app.values.insert(field_id::btm1(0x17), Value::Float(26.35));
+    }
+
+    #[test]
+    fn the_device_list_is_drawn_with_names_and_status() {
+        let (app, _bus) = app();
+        app.names.lock().unwrap().insert(ADDR, "Combi".into());
+        let s = screen(&app);
+        assert!(s.contains("Combi"), "{s}");
+        // The live-status glyph for a device that is broadcasting.
+        assert!(s.contains('●'), "{s}");
+    }
+
+    /// The footer always carries the current status line, which is how the
+    /// TUI reports what just happened.
+    #[test]
+    fn the_footer_shows_the_status_line() {
+        let (mut app, _bus) = app();
+        app.status = "set failed: field is read-only".into();
+        assert!(screen(&app).contains("set failed: field is read-only"));
+    }
+
+    #[test]
+    fn opening_a_device_draws_the_tab_bar_and_summary() {
+        let (mut app, _bus) = app();
+        app.open_device();
+        let s = screen(&app);
+        assert!(s.contains("Summary"), "{s}");
+        assert!(s.contains(&tab_label(TABS[1])), "{s}");
+    }
+
+    #[test]
+    fn the_field_pane_lists_groups_fields_and_values() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        let s = screen(&app);
+        assert!(s.contains("DC"), "{s}");
+        assert!(s.contains("Voltage"), "{s}");
+        assert!(s.contains("Current"), "{s}");
+        assert!(s.contains("26.35"), "{s}");
+        // The read-only field is marked as such.
+        assert!(s.contains("ro"), "{s}");
+    }
+
+    #[test]
+    fn a_discovery_in_flight_shows_a_spinner_and_what_it_is_doing() {
+        let (mut app, _bus) = app();
+        app.names.lock().unwrap().insert(ADDR, "Combi".into());
+        app.open_device();
+        app.next_tab(); // switching to a data tab spawns the discovery worker
+        assert!(app.discovering());
+        let s = screen(&app);
+        assert!(
+            SPINNER.iter().any(|c| s.contains(*c)),
+            "expected a spinner frame:\n{s}"
+        );
+        assert!(s.contains("Combi"), "{s}");
+    }
+
+    #[test]
+    fn the_edit_modal_shows_the_field_and_the_buffer() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.editor = Some(Editor {
+            field: field_id::btm1(0x17),
+            name: "Voltage".into(),
+            kind: EditKind::Number("13.2".into()),
+        });
+        let s = screen(&app);
+        assert!(s.contains("Voltage"), "{s}");
+        assert!(s.contains("13.2"), "{s}");
+    }
+
+    #[test]
+    fn the_choice_editor_lists_its_options() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.editor = Some(Editor {
+            field: field_id::btm1(0x05),
+            name: "Mode".into(),
+            kind: EditKind::Choice {
+                options: vec!["Off".into(), "On".into(), "Auto".into()],
+                sel: 2,
+            },
+        });
+        let s = screen(&app);
+        assert!(s.contains("Mode"), "{s}");
+        assert!(s.contains("Auto"), "{s}");
+    }
+
+    #[test]
+    fn the_values_modal_lists_every_option() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.values_modal = Some(ValuesView {
+            field_name: "Mode".into(),
+            options: vec!["Off".into(), "On".into(), "Auto".into()],
+            current: Some(1),
+        });
+        let s = screen(&app);
+        assert!(s.contains("Mode"), "{s}");
+        for opt in ["Off", "On", "Auto"] {
+            assert!(s.contains(opt), "missing {opt}:\n{s}");
+        }
+    }
+
+    /// The login modal walks two stages: pick a level, then type a code. The
+    /// code must not be echoed back to the screen.
+    #[test]
+    fn the_login_modal_shows_the_levels_then_masks_the_code() {
+        let (mut app, _bus) = app();
+        app.login = Some(LoginPrompt {
+            device: ADDR,
+            sel: 1,
+            current: Some(masterbus::AccessLevel::EndUser),
+            stage: LoginStage::PickLevel,
+        });
+        let s = screen(&app);
+        for level in LOGIN_LEVELS {
+            assert!(s.contains(level_label(level)), "missing {level:?}:\n{s}");
+        }
+
+        app.login = Some(LoginPrompt {
+            device: ADDR,
+            sel: 1,
+            current: Some(masterbus::AccessLevel::EndUser),
+            stage: LoginStage::EnterPassword {
+                level: masterbus::AccessLevel::Installer,
+                buf: "1234".into(),
+            },
+        });
+        let s = screen(&app);
+        assert!(s.contains("password:"), "{s}");
+        assert!(!s.contains("1234"), "the code must not be echoed:\n{s}");
+        // Four typed characters, four bullets.
+        assert!(s.contains("••••"), "{s}");
+    }
+
+    /// The log pane is only drawn when logging is routed into the TUI.
+    #[test]
+    fn the_log_pane_is_drawn_only_when_enabled() {
+        let (mut app, _bus) = app();
+        let without = screen(&app);
+        app.logs_in_tui = true;
+        app.show_logs = true;
+        let with = screen(&app);
+        assert_ne!(without, with, "the log pane should change the layout");
+    }
+
+    /// Rendering must survive a terminal far smaller than the layout wants —
+    /// a panic here would take the whole TUI down on a resize.
+    #[test]
+    fn rendering_survives_an_absurdly_small_terminal() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.editor = Some(Editor {
+            field: field_id::btm1(0x17),
+            name: "Voltage".into(),
+            kind: EditKind::Number("13.2".into()),
+        });
+        for (w, h) in [(1, 1), (4, 3), (20, 5), (40, 10)] {
+            let _ = screen_at(&app, w, h);
+        }
+    }
+}

@@ -889,3 +889,493 @@ mod catalog_tests {
         assert!(resolve_catalog(&mut disc, 0x1403A4, &id).is_none());
     }
 }
+
+#[cfg(test)]
+mod enumeration_tests {
+    use super::*;
+    use crate::protocol::VisualizationType as Viz;
+    use crate::protocol::can_class;
+    use crate::runtime::Engine;
+    use crate::runtime::fakebus::{ADDR, Device, FakeBus};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Wire visualization codes used by the fixtures.
+    const VIZ_FLOAT: u8 = 0x01;
+    const VIZ_DROPDOWN: u8 = 0x03;
+
+    fn test_config() -> Config {
+        Config {
+            min_send_interval: Duration::ZERO,
+            discovery_timeout: Duration::from_millis(5),
+            discovery_retries: 1,
+            discovery_window: Duration::ZERO,
+            discovery_settle: Duration::ZERO,
+            connect_timeout: Duration::from_secs(5),
+            cache_path: None,
+            ..Config::default()
+        }
+    }
+
+    fn connect(device: Device, config: Config) -> (Arc<Engine>, FakeBus) {
+        let (bus, transport) = FakeBus::start(device);
+        let engine = Engine::connect(transport, config).expect("connect");
+        (engine, bus)
+    }
+
+    /// A device with one Monitoring group of two fields — a plain float and a
+    /// two-option drop-down.
+    fn combi() -> Device {
+        Device::new()
+            .with_identity("44010250", "1234567", "Combi")
+            .with_group(Menu::Monitoring, 0, "DC", &[0x17, 0x18])
+            .with_field(field_id::btm1(0x17), "Voltage", "V", VIZ_FLOAT, false)
+            .with_list_field(field_id::btm1(0x18), "State", &["Off", "On"])
+    }
+
+    /// A scratch directory that cleans up after itself.
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> TempDir {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "masterbus-cache-test-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            TempDir { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    // ── menu enumeration ────────────────────────────────────────────────────
+
+    /// One menu, end to end: group name and field count off the schema
+    /// channel, then each field's metadata and its strings.
+    #[test]
+    fn a_menu_is_enumerated_into_groups_and_fields() {
+        let (engine, _bus) = connect(combi(), test_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert_eq!(schema.groups.len(), 1);
+        let g = &schema.groups[0];
+        assert_eq!((g.id, g.name.as_str(), g.menu), (0, "DC", Menu::Monitoring));
+        assert_eq!(g.fields.len(), 2);
+
+        let voltage = &g.fields[0];
+        assert_eq!(voltage.index, field_id::btm1(0x17));
+        assert_eq!(voltage.name, "Voltage");
+        assert_eq!(voltage.unit, "V");
+        assert_eq!(voltage.viz_type, Viz::Float);
+        assert!(!voltage.writeable);
+
+        let state = &g.fields[1];
+        assert_eq!(state.name, "State");
+        assert_eq!(state.viz_type, Viz::DropDown);
+        assert!(state.writeable);
+        assert_eq!(state.options, vec!["Off", "On"]);
+        assert_eq!(state.max, 2.0);
+    }
+
+    /// Monitoring, Configuration and Service share one global gid space: a
+    /// menu's groups start after every prior menu's. Getting the offset wrong
+    /// enumerates someone else's groups.
+    #[test]
+    fn the_three_global_menus_share_one_offset_gid_space() {
+        let device = Device::new()
+            .with_identity("44010250", "1234567", "Combi")
+            .with_group(Menu::Monitoring, 0, "DC", &[])
+            .with_group(Menu::Monitoring, 1, "AC", &[])
+            .with_group(Menu::Configuration, 2, "General", &[])
+            .with_group(Menu::Service, 3, "Service", &[]);
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
+        engine.ensure_menu(ADDR, Menu::Service).unwrap();
+        let schema = engine.state.schema(ADDR).unwrap();
+
+        let config: Vec<_> = schema.menu_groups(Menu::Configuration).collect();
+        assert_eq!(config.len(), 1);
+        assert_eq!((config[0].id, config[0].name.as_str()), (2, "General"));
+
+        let service: Vec<_> = schema.menu_groups(Menu::Service).collect();
+        assert_eq!(service.len(), 1);
+        assert_eq!((service[0].id, service[0].name.as_str()), (3, "Service"));
+    }
+
+    /// Alarm and History have their own gid namespaces and no reliable count
+    /// query, so they're probed from 0 until two consecutive gids answer
+    /// nothing.
+    #[test]
+    fn the_alarm_namespace_is_probed_until_two_misses() {
+        let device = Device::new()
+            .with_identity("44010250", "1234567", "Combi")
+            .with_group(Menu::Alarm, 0, "Alarms", &[])
+            .with_group(Menu::Alarm, 1, "Warnings", &[])
+            // gid 2 and 3 are unallocated — the probe stops here...
+            .with_group(Menu::Alarm, 4, "Never reached", &[]);
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_menu(ADDR, Menu::Alarm).unwrap();
+        let schema = engine.state.schema(ADDR).unwrap();
+        let names: Vec<&str> = schema
+            .menu_groups(Menu::Alarm)
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Alarms", "Warnings"]);
+    }
+
+    /// A device with no Alarm tab at all answers nothing and is not an error.
+    #[test]
+    fn a_device_without_an_alarm_tab_yields_no_groups() {
+        let (engine, _bus) = connect(combi(), test_config());
+
+        engine.ensure_menu(ADDR, Menu::Alarm).unwrap();
+        assert!(engine.state.has_menu(ADDR, Menu::Alarm));
+        assert_eq!(
+            engine
+                .state
+                .schema(ADDR)
+                .unwrap()
+                .menu_groups(Menu::Alarm)
+                .count(),
+            0
+        );
+    }
+
+    /// The eventable flag is asked only of Monitoring fields — the only tab
+    /// whose fields are ever event targets. A field that would answer `0x0D`
+    /// on another tab is never asked, so it reports as non-eventable.
+    #[test]
+    fn only_monitoring_fields_are_asked_for_the_eventable_flag() {
+        let device = Device::new()
+            .with_identity("44010250", "1234567", "Combi")
+            .with_group(Menu::Monitoring, 0, "Relays", &[0x10])
+            .with_group(Menu::Configuration, 1, "General", &[0x11])
+            .with_eventable_field(field_id::btm1(0x10), "Relay 1")
+            .with_eventable_field(field_id::btm1(0x11), "Hidden");
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
+
+        assert!(
+            engine
+                .state
+                .field_info(ADDR, field_id::btm1(0x10))
+                .unwrap()
+                .eventable
+        );
+        assert!(
+            !engine
+                .state
+                .field_info(ADDR, field_id::btm1(0x11))
+                .unwrap()
+                .eventable
+        );
+    }
+
+    /// A group whose field ids the device won't hand over still appears, with
+    /// no fields, rather than sinking the whole menu.
+    #[test]
+    fn a_group_with_unreadable_fields_is_still_reported() {
+        let device = Device::new()
+            .with_identity("44010250", "1234567", "Combi")
+            // Field 0x17 is listed in the group but has no metadata at all.
+            .with_group(Menu::Monitoring, 0, "DC", &[0x17]);
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert_eq!(schema.groups.len(), 1);
+        assert!(schema.groups[0].fields.is_empty());
+    }
+
+    // ── the flat probe ──────────────────────────────────────────────────────
+
+    /// The flat probe sweeps both metadata channels; the two namespaces are
+    /// independent, so the same wire index on each is a different field.
+    #[test]
+    fn the_flat_probe_covers_both_channels() {
+        let device = Device::new()
+            .with_identity("44010250", "1234567", "Nav Chg")
+            .with_field(field_id::btm1(0x05), "Btm1 field", "V", VIZ_FLOAT, false)
+            .with_field(field_id::btm3(0x05), "Btm3 field", "A", VIZ_FLOAT, true);
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_all_fields(ADDR).unwrap();
+        let all = engine.state.all_fields(ADDR).unwrap();
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            engine
+                .state
+                .field_info(ADDR, field_id::btm1(0x05))
+                .unwrap()
+                .name,
+            "Btm1 field"
+        );
+        let btm3 = engine.state.field_info(ADDR, field_id::btm3(0x05)).unwrap();
+        assert_eq!(btm3.name, "Btm3 field");
+        assert!(btm3.writeable);
+    }
+
+    /// The probe is chunked, not miss-streak based: a wide hole in the index
+    /// space (the EasyView's is ~0x42 indices) must not end the sweep.
+    #[test]
+    fn a_wide_hole_does_not_end_the_flat_probe() {
+        let device = Device::new()
+            .with_identity("77010310", "7654321", "EasyView")
+            .with_field(field_id::btm3(0x00), "First", "", VIZ_FLOAT, false)
+            .with_field(field_id::btm3(0xF0), "Last", "", VIZ_FLOAT, false);
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_all_fields(ADDR).unwrap();
+        let names: Vec<String> = engine
+            .state
+            .all_fields(ADDR)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(names, vec!["First", "Last"]);
+    }
+
+    /// A drop-down with an implausible option count isn't walked — a bad
+    /// `0x07` read must not turn into hundreds of string fetches.
+    #[test]
+    fn an_absurd_option_count_is_not_walked() {
+        let mut device = Device::new().with_identity("44010250", "1234567", "Combi");
+        device.meta.insert(
+            field_id::btm1(0x17),
+            crate::runtime::fakebus::FakeField {
+                name_sid: 0,
+                unit_sid: 0,
+                viz: VIZ_DROPDOWN,
+                max: 5000.0,
+                writeable: true,
+                eventable: false,
+                option_sids: Vec::new(),
+            },
+        );
+        let device = device.with_group(Menu::Monitoring, 0, "DC", &[0x17]);
+        let (engine, _bus) = connect(device, test_config());
+
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        let f = engine.state.field_info(ADDR, field_id::btm1(0x17)).unwrap();
+        assert_eq!(f.max, 5000.0);
+        assert!(f.options.is_empty());
+    }
+
+    // ── the disk cache ──────────────────────────────────────────────────────
+
+    /// The expensive half of discovery is cached per device: a second pass
+    /// over the same menu reads the file and puts nothing on the bus.
+    #[test]
+    fn a_discovered_menu_is_cached_and_reused() {
+        let dir = TempDir::new();
+        let config = Config {
+            cache_path: Some(dir.path.clone()),
+            ..test_config()
+        };
+        let (engine, bus) = connect(combi(), config);
+
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        let enumerated = bus.sent_class(can_class::SCHEMA_REQ).len();
+        assert!(enumerated > 0, "first pass should enumerate over the wire");
+
+        // Forget what we learned; the file should answer instead.
+        engine.state.forget_schema(ADDR);
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        assert_eq!(bus.sent_class(can_class::SCHEMA_REQ).len(), enumerated);
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert_eq!(schema.groups[0].name, "DC");
+        assert_eq!(schema.groups[0].fields[1].options, vec!["Off", "On"]);
+    }
+
+    /// Writability flips per access level, so each level keys its own file —
+    /// as do the serial, the firmware and the menu. Sharing any of them would
+    /// serve one device's (or one level's) schema as another's.
+    #[test]
+    fn the_cache_file_is_keyed_by_serial_firmware_level_and_menu() {
+        let dir = Path::new("/cache");
+        let base = cache_file(
+            dir,
+            "1234567",
+            "1.0",
+            AccessLevel::EndUser,
+            Menu::Monitoring,
+        );
+        for other in [
+            cache_file(
+                dir,
+                "7654321",
+                "1.0",
+                AccessLevel::EndUser,
+                Menu::Monitoring,
+            ),
+            cache_file(
+                dir,
+                "1234567",
+                "2.0",
+                AccessLevel::EndUser,
+                Menu::Monitoring,
+            ),
+            cache_file(
+                dir,
+                "1234567",
+                "1.0",
+                AccessLevel::Installer,
+                Menu::Monitoring,
+            ),
+            cache_file(
+                dir,
+                "1234567",
+                "1.0",
+                AccessLevel::EndUser,
+                Menu::Configuration,
+            ),
+        ] {
+            assert_ne!(base, other);
+        }
+
+        // A serial read off the wire is untrusted: separators are sanitised
+        // away, so the file always lands directly in the cache dir. (Dots
+        // survive — firmware versions need them — but a dot alone can't
+        // traverse without a separator.)
+        let nasty = cache_file(
+            dir,
+            "../../etc/passwd",
+            "1.0",
+            AccessLevel::EndUser,
+            Menu::Monitoring,
+        );
+        assert_eq!(nasty.parent(), Some(dir));
+        let name = nasty.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!name.contains('/'), "{name}");
+        assert!(name.starts_with(".._.._etc_passwd-"), "{name}");
+    }
+
+    #[test]
+    fn the_cache_round_trips_groups() {
+        let dir = TempDir::new();
+        let groups = vec![GroupInfo {
+            id: 0,
+            name: "DC".into(),
+            menu: Menu::Monitoring,
+            fields: vec![FieldInfo {
+                index: field_id::btm3(0x30),
+                name: "ShutDown".into(),
+                unit: "V".into(),
+                viz_type: VisualizationType::Float,
+                writeable: true,
+                eventable: false,
+                min: 0.0,
+                max: 30.0,
+                step: 0.0,
+                options: vec![],
+            }],
+        }];
+        let args = (
+            Some(dir.path.as_path()),
+            "1234567",
+            "1.0",
+            AccessLevel::EndUser,
+            Menu::Monitoring,
+        );
+
+        assert!(load_cached_menu(args.0, args.1, args.2, args.3, args.4).is_none());
+        store_cached_menu(args.0, args.1, args.2, args.3, args.4, &groups);
+        assert_eq!(
+            load_cached_menu(args.0, args.1, args.2, args.3, args.4).unwrap(),
+            groups
+        );
+    }
+
+    /// Without a serial there is no key, so nothing is written — better than
+    /// every unidentified device sharing one file.
+    #[test]
+    fn a_device_without_a_serial_is_not_cached() {
+        let dir = TempDir::new();
+        store_cached_menu(
+            Some(dir.path.as_path()),
+            "",
+            "1.0",
+            AccessLevel::EndUser,
+            Menu::Monitoring,
+            &[],
+        );
+        assert_eq!(std::fs::read_dir(&dir.path).unwrap().count(), 0);
+        assert!(
+            load_cached_menu(
+                Some(dir.path.as_path()),
+                "",
+                "1.0",
+                AccessLevel::EndUser,
+                Menu::Monitoring
+            )
+            .is_none()
+        );
+    }
+
+    /// A truncated or hand-edited cache file is ignored, not fatal: discovery
+    /// falls back to the wire.
+    #[test]
+    fn a_corrupt_cache_file_is_ignored() {
+        let dir = TempDir::new();
+        let path = cache_file(
+            &dir.path,
+            "1234567",
+            "1.0",
+            AccessLevel::EndUser,
+            Menu::Monitoring,
+        );
+        std::fs::write(&path, b"{ not json").unwrap();
+
+        assert!(
+            load_cached_menu(
+                Some(dir.path.as_path()),
+                "1234567",
+                "1.0",
+                AccessLevel::EndUser,
+                Menu::Monitoring
+            )
+            .is_none()
+        );
+    }
+
+    /// Caching off (`cache_path: None`) is a no-op in both directions.
+    #[test]
+    fn caching_can_be_turned_off() {
+        store_cached_menu(
+            None,
+            "1234567",
+            "1.0",
+            AccessLevel::EndUser,
+            Menu::Monitoring,
+            &[],
+        );
+        assert!(
+            load_cached_menu(
+                None,
+                "1234567",
+                "1.0",
+                AccessLevel::EndUser,
+                Menu::Monitoring
+            )
+            .is_none()
+        );
+    }
+}

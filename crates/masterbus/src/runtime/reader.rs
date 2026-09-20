@@ -171,3 +171,249 @@ fn is_device_originated(can_class: u8) -> bool {
         | 0x14 // metadata error reply (e.g. EasyView's 0x0C errors)
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DeviceStatus, FieldInfo, GroupInfo, Menu};
+    use crate::protocol::VisualizationType;
+    use crate::runtime::Config;
+    use crate::runtime::fakebus::{ADDR, Device, FakeBus};
+    use crate::value::Value;
+
+    const ALIVE: Duration = Duration::from_secs(60);
+
+    fn state_with_field(field: FieldId, viz: VisualizationType) -> State {
+        let state = State::new();
+        state.put_menu(
+            ADDR,
+            Menu::Monitoring,
+            vec![GroupInfo {
+                id: 0,
+                name: "Monitoring".into(),
+                menu: Menu::Monitoring,
+                fields: vec![FieldInfo {
+                    index: field,
+                    name: "Voltage".into(),
+                    unit: "V".into(),
+                    viz_type: viz,
+                    writeable: false,
+                    eventable: false,
+                    min: 0.0,
+                    max: 0.0,
+                    step: 0.0,
+                    options: Vec::new(),
+                }],
+            }],
+        );
+        state
+    }
+
+    #[test]
+    fn value_keys_are_channel_tagged() {
+        assert_eq!(value_key(ADDR, field_id::btm1(0x17)), "val:188EA2:0017");
+        assert_eq!(value_key(ADDR, field_id::btm3(0x17)), "val:188EA2:0117");
+    }
+
+    /// Only device-originated classes register a device. Master-side classes
+    /// must not: SocketCAN loops our own requests back, and another master
+    /// polling the bus would otherwise appear as a device.
+    #[test]
+    fn only_device_classes_register_a_device() {
+        for class in [0x04, 0x06, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x10, 0x11, 0x14] {
+            assert!(is_device_originated(class), "class 0x{class:02X}");
+        }
+        for class in [0x05, 0x07, 0x18, 0x19, 0x1A, 0x1B, 0x1C] {
+            assert!(!is_device_originated(class), "class 0x{class:02X}");
+        }
+    }
+
+    #[test]
+    fn a_broadcast_registers_the_device() {
+        let state = State::new();
+        let waiter = Waiter::new();
+        handle_frame(0x04_188EA2, &[0x0B, 0, 0, 0, 0x02, 0x01], &state, &waiter);
+
+        assert_eq!(state.status(ADDR, ALIVE), DeviceStatus::On);
+        assert_eq!(state.alive_ids(ALIVE), vec![ADDR]);
+    }
+
+    /// A truncated broadcast is not a device announcement — it parses as
+    /// unknown and leaves the liveness table alone.
+    #[test]
+    fn a_short_broadcast_is_ignored() {
+        let state = State::new();
+        let waiter = Waiter::new();
+        handle_frame(0x04_188EA2, &[0x0B, 0], &state, &waiter);
+
+        // The class is still device-originated, so the device is *known*...
+        assert_eq!(state.alive_ids(ALIVE), vec![ADDR]);
+        // ...but nothing was decoded from the malformed payload.
+        let map_is_empty = state.schema(ADDR).is_none() && state.identity(ADDR).is_none();
+        assert!(map_is_empty);
+    }
+
+    /// Our own outbound request (class 0x18) looping back must not register a
+    /// device — that's how the engine used to list itself and other masters.
+    #[test]
+    fn a_looped_back_request_registers_nothing() {
+        let state = State::new();
+        let waiter = Waiter::new();
+        handle_frame(0x18_188EA2, &[0x17, 0x00], &state, &waiter);
+        handle_frame(0x05_53A493, &[], &state, &waiter);
+
+        assert!(!state.any_device());
+    }
+
+    /// A Btm1 value both wakes the pending read and lands in the cache,
+    /// decoded per the field's visualization type.
+    #[test]
+    fn a_btm1_value_wakes_the_reader_and_is_cached() {
+        let field = field_id::btm1(0x17);
+        let state = state_with_field(field, VisualizationType::Float);
+        let waiter = Waiter::new();
+        waiter.register(&value_key(ADDR, field));
+
+        let mut data = vec![0x17, 0x00];
+        data.extend_from_slice(&12.5f32.to_le_bytes());
+        handle_frame(0x08_188EA2, &data, &state, &waiter);
+
+        assert_eq!(
+            waiter.wait(&value_key(ADDR, field), Duration::ZERO),
+            Some(12.5f32.to_le_bytes().to_vec())
+        );
+        assert_eq!(
+            state.get_value(ADDR, field).unwrap().value,
+            Value::Float(12.5)
+        );
+    }
+
+    /// A value for a field we haven't discovered still wakes the waiter — the
+    /// scheduler knows the type it asked for — but isn't cached blind.
+    #[test]
+    fn a_value_for_an_unknown_field_wakes_the_waiter_but_is_not_cached() {
+        let state = State::new();
+        let waiter = Waiter::new();
+        let field = field_id::btm1(0x17);
+        waiter.register(&value_key(ADDR, field));
+
+        let mut data = vec![0x17, 0x00];
+        data.extend_from_slice(&12.5f32.to_le_bytes());
+        handle_frame(0x08_188EA2, &data, &state, &waiter);
+
+        assert!(
+            waiter
+                .wait(&value_key(ADDR, field), Duration::ZERO)
+                .is_some()
+        );
+        assert!(state.get_value(ADDR, field).is_none());
+    }
+
+    /// The Btm3 carrier: class 0x0B on the shadow address, headerless, and
+    /// the same frame shape for an unsolicited push and a write-ack.
+    #[test]
+    fn a_btm3_push_on_the_shadow_address_is_cached_against_the_real_one() {
+        let field = field_id::btm3(0x30);
+        let state = State::new();
+        state.put_all_fields(
+            ADDR,
+            vec![FieldInfo {
+                index: field,
+                name: "ShutDown".into(),
+                unit: "V".into(),
+                viz_type: VisualizationType::Float,
+                writeable: true,
+                eventable: false,
+                min: 0.0,
+                max: 0.0,
+                step: 0.0,
+                options: Vec::new(),
+            }],
+        );
+        let waiter = Waiter::new();
+        waiter.register(&value_key(ADDR, field));
+
+        let mut data = vec![0x30, 0x00];
+        data.extend_from_slice(&17.0f32.to_le_bytes());
+        handle_frame(0x0B_988EA2, &data, &state, &waiter);
+
+        assert!(
+            waiter
+                .wait(&value_key(ADDR, field), Duration::ZERO)
+                .is_some()
+        );
+        assert_eq!(
+            state.get_value(ADDR, field).unwrap().value,
+            Value::Float(17.0)
+        );
+        // Registered against the real address, not the shadow one.
+        assert_eq!(state.alive_ids(ALIVE), vec![ADDR]);
+    }
+
+    /// Metadata replies are routed to the discovery waiter by key, not to the
+    /// value cache.
+    #[test]
+    fn a_metadata_reply_routes_to_its_discovery_key() {
+        let state = State::new();
+        let waiter = Waiter::new();
+        let key = "btm1_meta:188EA2:02:23";
+        waiter.register(key);
+
+        handle_frame(
+            0x08_988EA2,
+            &[0x02, 0x17, 0x00, 0x00, 0x01],
+            &state,
+            &waiter,
+        );
+
+        assert_eq!(
+            waiter.wait(key, Duration::ZERO),
+            Some(vec![0x02, 0x17, 0x00, 0x00, 0x01])
+        );
+    }
+
+    // ── liveness, over the fake bus ─────────────────────────────────────────
+
+    fn test_config(liveness: Duration) -> Config {
+        Config {
+            min_send_interval: Duration::ZERO,
+            discovery_window: Duration::ZERO,
+            discovery_settle: Duration::ZERO,
+            connect_timeout: Duration::from_secs(5),
+            liveness,
+            cache_path: None,
+            ..Config::default()
+        }
+    }
+
+    /// The reader diffs liveness each pass and emits presence events: a
+    /// device that stops announcing goes offline, and comes back when it
+    /// speaks again.
+    #[test]
+    fn a_device_that_stops_announcing_goes_offline_and_returns() {
+        let (bus, transport) = FakeBus::start(Device::new());
+        let engine =
+            crate::runtime::Engine::connect(transport, test_config(Duration::from_millis(50)))
+                .expect("connect");
+        let events = engine.device_events();
+
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)),
+            Ok(DeviceEvent::Alive(ADDR))
+        ));
+
+        bus.with_device(|d| d.quiet = true);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)),
+            Ok(DeviceEvent::Offline(ADDR))
+        ));
+        assert!(engine.device_ids().is_empty());
+
+        bus.with_device(|d| d.quiet = false);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)),
+            Ok(DeviceEvent::Alive(ADDR))
+        ));
+        assert_eq!(engine.device_ids(), vec![ADDR]);
+    }
+}

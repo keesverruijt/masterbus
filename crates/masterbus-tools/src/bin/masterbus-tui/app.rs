@@ -2229,3 +2229,915 @@ mod mapping_tests {
         assert!(!ed.lossy_boolean());
     }
 }
+
+/// Navigation, tab and editor tests, driven against a loopback bus.
+///
+/// [`App`] owns a real [`MasterBus`], so these build one over a fake
+/// transport: a device that announces itself and answers Btm1 value reads and
+/// writes. Rows normally arrive from a discovery worker thread; a test seeds
+/// `rows` and `values` directly (both are `pub`) so the state machine under
+/// test is the navigation and editing logic, not discovery.
+#[cfg(test)]
+pub(crate) mod app_tests {
+    use super::*;
+    use masterbus::Config;
+    use masterbus::transport::{Transport, TransportRx, TransportTx};
+    use std::collections::HashMap as Map;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub(crate) const ADDR: u32 = 0x188EA2;
+
+    // ── a loopback bus with one device ──────────────────────────────────────
+
+    type Frame = (u32, Vec<u8>);
+
+    /// Shared device state: the Btm1 field values the fake answers with.
+    #[derive(Default)]
+    struct DeviceState {
+        btm1: Map<u8, [u8; 4]>,
+    }
+
+    /// The device's one Monitoring group, as `(wire index, viz code, option
+    /// count, writable)`. Discovery reads this, so the engine ends up knowing
+    /// the same fields the tests put in `App::rows` — which is what lets a
+    /// write actually reach the wire.
+    const FIELDS: [(u8, u8, f32, bool); 6] = [
+        (0x01, 0x06, 0.0, true),  // Device name, Text
+        (0x05, 0x03, 3.0, true),  // Mode, DropDown with 3 options
+        (0x13, 0x05, 0.0, true),  // Inverter, CheckBox
+        (0x17, 0x01, 0.0, true),  // Voltage, Float
+        (0x18, 0x01, 0.0, false), // Current, Float, read-only
+        (0x19, 0x01, 0.0, true),  // Frequency, Float
+    ];
+
+    struct FakeTransport {
+        up: crossbeam_channel::Receiver<Frame>,
+        down: crossbeam_channel::Sender<Frame>,
+    }
+
+    impl Transport for FakeTransport {
+        fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
+            (Box::new(FakeRx(self.up)), Box::new(FakeTx(self.down)))
+        }
+    }
+
+    struct FakeRx(crossbeam_channel::Receiver<Frame>);
+
+    impl TransportRx for FakeRx {
+        fn recv(&mut self, timeout: Duration) -> masterbus::Result<Option<Frame>> {
+            match self.0.recv_timeout(timeout) {
+                Ok(f) => Ok(Some(f)),
+                // A stopped device thread idles the reader rather than
+                // spinning it.
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(None),
+                Err(_) => {
+                    std::thread::sleep(timeout);
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    struct FakeTx(crossbeam_channel::Sender<Frame>);
+
+    impl TransportTx for FakeTx {
+        fn send(&mut self, can_id: u32, data: &[u8]) -> masterbus::Result<()> {
+            let _ = self.0.send((can_id, data.to_vec()));
+            Ok(())
+        }
+    }
+
+    /// Keeps the device thread alive for the lifetime of a test.
+    pub(crate) struct Bus {
+        stop: Arc<AtomicBool>,
+        state: Arc<Mutex<DeviceState>>,
+    }
+
+    impl Drop for Bus {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Answer one frame. Strings are all reported as string id 0 ("no
+    /// string"), so discovery never pays for a chunk fetch — the tests care
+    /// about types and writability, not names.
+    fn respond(st: &mut DeviceState, can_id: u32, data: &[u8]) -> Vec<Frame> {
+        const SHADOW: u32 = 0x80_0000;
+        let class = ((can_id >> 24) & 0x1F) as u8;
+        let addr = can_id & 0x00FF_FFFF;
+        if addr & !SHADOW != ADDR {
+            return Vec::new();
+        }
+        let shadow = addr & SHADOW != 0;
+        match (class, shadow, data) {
+            // Group count per menu selector: one Monitoring group, nothing else.
+            (0x07, false, [0x08, sel]) => {
+                let n: u16 = if *sel == 0x02 { 1 } else { 0 };
+                let [lo, hi] = n.to_le_bytes();
+                vec![(0x06_000000 | ADDR, vec![0x08, *sel, lo, hi])]
+            }
+            // Monitoring schema, group 0.
+            (0x19, false, [0x28, 0, _]) => {
+                vec![(0x09_000000 | ADDR, vec![0x28, 0, 0, 0, 0, 0])]
+            }
+            (0x19, false, [0x07, 0, _]) => {
+                let mut d = vec![0x07, 0, 0, 0];
+                d.extend_from_slice(&(FIELDS.len() as f32).to_le_bytes());
+                vec![(0x09_000000 | ADDR, d)]
+            }
+            (0x19, false, [0x03, 0, _, idx]) => match FIELDS.get(*idx as usize) {
+                Some((wire, ..)) => vec![(0x09_000000 | ADDR, vec![0x03, 0, 0, *idx, *wire, 0])],
+                None => Vec::new(),
+            },
+            // Per-field metadata on the shadow address.
+            (0x18, true, [0x26, _, _, _]) => {
+                // Option string id 0 — an unnamed option, no chunk fetch.
+                let mut d = data.to_vec();
+                d.extend_from_slice(&[0, 0]);
+                vec![(0x08_000000 | ADDR | SHADOW, d)]
+            }
+            (0x18, true, [op, lo, hi]) => {
+                let wire = u16::from_le_bytes([*lo, *hi]);
+                let Some(&(_, viz, max, writeable)) =
+                    FIELDS.iter().find(|(w, ..)| *w as u16 == wire)
+                else {
+                    return Vec::new();
+                };
+                let mut d = vec![*op, *lo, *hi, 0];
+                match *op {
+                    0x28 | 0x2C => d.extend_from_slice(&[0, 0]), // name / unit: no string
+                    0x02 => d.push(viz),
+                    0x07 => d.extend_from_slice(&max.to_le_bytes()),
+                    0x0B => d.push(writeable as u8),
+                    _ => return Vec::new(), // includes the eventable probe
+                }
+                vec![(0x08_000000 | ADDR | SHADOW, d)]
+            }
+            // Btm1 values: two bytes reads, six bytes writes.
+            (0x18, false, [f, tab]) => {
+                let v = st.btm1.get(f).copied().unwrap_or_default();
+                let mut d = vec![*f, *tab];
+                d.extend_from_slice(&v);
+                vec![(0x08_000000 | ADDR, d)]
+            }
+            (0x18, false, [f, _, a, b, c, e]) => {
+                st.btm1.insert(*f, [*a, *b, *c, *e]);
+                Vec::new()
+            }
+            // String-chunk write: ack by echoing the header.
+            (0x07, false, [0x30, lo, hi, seq, ..]) if data.len() >= 5 => {
+                vec![(0x06_000000 | ADDR, vec![0x30, *lo, *hi, *seq])]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Start the device thread and connect a `MasterBus` to it.
+    pub(crate) fn bus() -> (MasterBus, Bus) {
+        let (down_tx, down_rx) = crossbeam_channel::unbounded::<Frame>();
+        let (up_tx, up_rx) = crossbeam_channel::unbounded::<Frame>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(DeviceState::default()));
+
+        {
+            let (stop, state) = (stop.clone(), state.clone());
+            std::thread::spawn(move || {
+                let mut next = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    if Instant::now() >= next {
+                        // class 0x04 self-announcement
+                        if up_tx
+                            .send((0x04_000000 | ADDR, vec![0x0B, 0, 0, 0, 0x02, 0x01]))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        next = Instant::now() + Duration::from_millis(10);
+                    }
+                    match down_rx.recv_timeout(Duration::from_millis(1)) {
+                        Ok((id, data)) => {
+                            let replies = respond(&mut state.lock().unwrap(), id, &data);
+                            for r in replies {
+                                if up_tx.send(r).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+
+        let config = Config {
+            min_send_interval: Duration::ZERO,
+            discovery_timeout: Duration::from_millis(5),
+            discovery_retries: 1,
+            discovery_window: Duration::ZERO,
+            discovery_settle: Duration::ZERO,
+            connect_timeout: Duration::from_secs(5),
+            cache_path: None,
+            ..Default::default()
+        };
+        let transport = Box::new(FakeTransport {
+            up: up_rx,
+            down: down_tx,
+        });
+        let bus = MasterBus::with_transport(transport, config).expect("connect");
+        (bus, Bus { stop, state })
+    }
+
+    pub(crate) fn app() -> (App, Bus) {
+        let (bus, guard) = bus();
+        let app = App::new(
+            bus,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            false,
+        );
+        (app, guard)
+    }
+
+    pub(crate) fn field(
+        index: FieldId,
+        name: &str,
+        viz: VisualizationType,
+        writeable: bool,
+    ) -> FieldInfo {
+        FieldInfo {
+            index,
+            name: name.to_string(),
+            unit: "V".into(),
+            viz_type: viz,
+            writeable,
+            eventable: false,
+            min: 0.0,
+            max: 0.0,
+            step: 0.0,
+            options: Vec::new(),
+        }
+    }
+
+    /// Pump the discovery worker until its result lands, the way the event
+    /// loop does between key presses.
+    pub(crate) fn settle(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.discovering() && Instant::now() < deadline {
+            app.poll_pending();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!app.discovering(), "discovery never finished");
+    }
+
+    /// A group header followed by two fields, which is what the row pane
+    /// looks like after a menu is discovered.
+    fn seed_rows(app: &mut App) {
+        app.cur_device = Some(ADDR);
+        app.rows = vec![
+            Row::Group("DC".into()),
+            Row::Field(field(
+                field_id::btm1(0x17),
+                "Voltage",
+                VisualizationType::Float,
+                true,
+            )),
+            Row::Field(field(
+                field_id::btm1(0x18),
+                "Current",
+                VisualizationType::Float,
+                false,
+            )),
+        ];
+        app.row_sel = 1;
+    }
+
+    // ── device pane ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_new_app_starts_on_the_device_list() {
+        let (app, _bus) = app();
+        assert_eq!(app.device_ids, vec![ADDR]);
+        assert!(app.focus == Focus::Devices);
+        assert!(app.cur_device.is_none());
+        assert!(!app.should_quit);
+        assert_eq!(app.device_status(ADDR), DeviceStatus::On);
+    }
+
+    /// A device with no name yet is labelled by its id, so the list is never
+    /// blank while the backfill thread is still working.
+    #[test]
+    fn a_device_without_a_name_falls_back_to_its_id() {
+        let (app, _bus) = app();
+        assert_eq!(app.device_label(ADDR), ADDR.to_string());
+        app.names.lock().unwrap().insert(ADDR, "Combi".into());
+        assert_eq!(app.device_label(ADDR), "Combi");
+    }
+
+    /// Selection clamps at both ends rather than wrapping — the device list
+    /// is a list, not a carousel.
+    #[test]
+    fn device_selection_clamps_at_both_ends() {
+        let (mut app, _bus) = app();
+        app.note_alive(0x3A3B4B);
+        app.note_alive(0x43DF24);
+        assert_eq!(app.device_ids.len(), 3);
+
+        app.move_device(-1);
+        assert_eq!(app.dev_sel, 0);
+        app.move_device(1);
+        assert_eq!(app.dev_sel, 1);
+        app.move_device(10);
+        assert_eq!(app.dev_sel, 2);
+        app.move_device(-10);
+        assert_eq!(app.dev_sel, 0);
+    }
+
+    /// A device already in the list isn't added twice when it re-announces.
+    #[test]
+    fn note_alive_does_not_duplicate_a_known_device() {
+        let (mut app, _bus) = app();
+        app.note_alive(ADDR);
+        app.note_alive(ADDR);
+        assert_eq!(app.device_ids, vec![ADDR]);
+    }
+
+    #[test]
+    fn moving_within_an_empty_device_list_is_a_no_op() {
+        let (mut app, _bus) = app();
+        app.device_ids.clear();
+        app.move_device(1);
+        assert_eq!(app.dev_sel, 0);
+    }
+
+    /// Opening lands on Summary with the field pane focused, and going back
+    /// clears everything the device left behind.
+    #[test]
+    fn opening_a_device_lands_on_summary_and_back_clears_it() {
+        let (mut app, _bus) = app();
+        app.open_device();
+
+        assert_eq!(app.cur_device, Some(ADDR));
+        assert!(app.focus == Focus::Fields);
+        assert!(app.cur_tab == TabKind::Summary);
+
+        app.rows.push(Row::Group("stale".into()));
+        app.loaded_menus.insert(Menu::Monitoring);
+        app.settings_loaded = true;
+
+        app.back_to_devices();
+        assert!(app.focus == Focus::Devices);
+        assert!(app.cur_device.is_none());
+        assert!(app.rows.is_empty());
+        assert!(app.loaded_menus.is_empty());
+        assert!(!app.settings_loaded);
+        assert!(app.cur_info.is_none());
+    }
+
+    #[test]
+    fn opening_with_no_devices_is_a_no_op() {
+        let (mut app, _bus) = app();
+        app.device_ids.clear();
+        app.open_device();
+        assert!(app.cur_device.is_none());
+    }
+
+    // ── tabs ────────────────────────────────────────────────────────────────
+
+    /// Tabs wrap in both directions, and Summary is always position 0. Each
+    /// data tab starts its own discovery, which parks cycling until it
+    /// finishes or is cancelled — so the walk cancels as it goes.
+    #[test]
+    fn tabs_cycle_in_both_directions() {
+        let (mut app, _bus) = app();
+        app.open_device();
+        assert!(app.cur_tab == TabKind::Summary);
+
+        for expected in &TABS[1..] {
+            app.next_tab();
+            assert!(app.cur_tab == *expected);
+            assert!(app.discovering(), "{expected:?} should start a discovery");
+            settle(&mut app);
+        }
+
+        // Past the last tab, round to Summary — which needs no discovery.
+        app.next_tab();
+        assert!(app.cur_tab == TabKind::Summary);
+        assert!(!app.discovering());
+
+        // And backwards from Summary lands on the last tab.
+        app.prev_tab();
+        assert!(app.cur_tab == TABS[TABS.len() - 1]);
+    }
+
+    /// Nothing cycles until a device is open, and nothing cycles while a
+    /// discovery is in flight — the worker's result would land on the wrong
+    /// tab.
+    #[test]
+    fn tabs_do_not_cycle_without_a_device_or_during_discovery() {
+        let (mut app, _bus) = app();
+        app.next_tab();
+        assert!(app.cur_tab == TabKind::Summary);
+
+        app.open_device();
+        app.next_tab();
+        let parked = app.cur_tab;
+        let (_tx, rx) = bounded(1);
+        app.pending = Some(Pending {
+            id: ADDR,
+            tab: TabKind::Settings,
+            name: "Settings".into(),
+            started: Instant::now(),
+            rx,
+        });
+        app.next_tab();
+        assert!(app.cur_tab == parked);
+        assert!(app.discovering());
+    }
+
+    /// Cancelling abandons the discovery *and* the device: there is nothing
+    /// sensible to show on a half-discovered tab.
+    #[test]
+    fn cancelling_a_discovery_returns_to_the_device_list() {
+        let (mut app, _bus) = app();
+        app.open_device();
+        let (_tx, rx) = bounded(1);
+        app.pending = Some(Pending {
+            id: ADDR,
+            tab: TabKind::Settings,
+            name: "Settings".into(),
+            started: Instant::now(),
+            rx,
+        });
+        let (name, tab, _secs) = app.pending_info().unwrap();
+        assert_eq!(name, "Settings");
+        assert!(tab == TabKind::Settings);
+
+        app.cancel_pending();
+        assert!(!app.discovering());
+        assert!(app.pending_info().is_none());
+        assert!(app.cur_device.is_none());
+        assert!(app.focus == Focus::Devices);
+        assert_eq!(app.status, "discovery cancelled");
+    }
+
+    /// The whole discovery round trip: switching to a menu spawns a worker,
+    /// polling picks up its result, and the rows appear with the group
+    /// header the device reported.
+    #[test]
+    fn discovering_a_menu_fills_the_row_pane() {
+        let (mut app, _bus) = app();
+        app.open_device();
+        app.next_tab();
+        assert!(app.cur_tab == TABS[1]);
+        settle(&mut app);
+
+        // One group header plus every field the device enumerated.
+        assert_eq!(app.rows.len(), 1 + FIELDS.len());
+        assert!(matches!(app.rows[0], Row::Group(_)));
+        let indices: Vec<FieldId> = app
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Field(f) => Some(f.index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            indices,
+            FIELDS
+                .iter()
+                .map(|(w, ..)| field_id::btm1(*w))
+                .collect::<Vec<_>>()
+        );
+        assert!(app.loaded_menus.contains(&Menu::Monitoring));
+        // The first field is selected and its value has been read.
+        assert!(matches!(app.rows[app.row_sel], Row::Field(_)));
+    }
+
+    /// A tab already discovered is rebuilt from the library's cache — no
+    /// second worker, no second sweep of the bus.
+    #[test]
+    fn revisiting_a_discovered_tab_needs_no_second_discovery() {
+        let (mut app, _bus) = app();
+        app.open_device();
+        app.next_tab();
+        settle(&mut app);
+        let rows = app.rows.len();
+
+        app.prev_tab(); // back to Summary
+        assert!(app.cur_tab == TabKind::Summary);
+        app.next_tab(); // and into Monitoring again
+        assert!(!app.discovering(), "the menu is already loaded");
+        assert_eq!(app.rows.len(), rows);
+    }
+
+    /// The Settings tab is the Btm3 flat probe; a Btm1-only device has
+    /// nothing to show there, which is not an error.
+    #[test]
+    fn the_settings_tab_is_empty_on_a_btm1_only_device() {
+        let (mut app, _bus) = app();
+        app.open_device();
+        app.prev_tab(); // Summary → the last tab, Settings
+        assert!(app.cur_tab == TabKind::Settings);
+        settle(&mut app);
+
+        assert!(app.settings_loaded);
+        assert!(app.rows.is_empty());
+    }
+
+    // ── row pane ────────────────────────────────────────────────────────────
+
+    /// Row movement skips group headers: only fields are selectable.
+    #[test]
+    fn row_movement_skips_group_headers() {
+        let (mut app, _bus) = app();
+        app.cur_device = Some(ADDR);
+        app.rows = vec![
+            Row::Group("DC".into()),
+            Row::Field(field(
+                field_id::btm1(0x17),
+                "Voltage",
+                VisualizationType::Float,
+                true,
+            )),
+            Row::Group("AC".into()),
+            Row::Field(field(
+                field_id::btm1(0x19),
+                "Frequency",
+                VisualizationType::Float,
+                true,
+            )),
+        ];
+        app.row_sel = 1;
+
+        app.move_row(1);
+        assert_eq!(app.row_sel, 3, "should have jumped over the AC header");
+        app.move_row(-1);
+        assert_eq!(app.row_sel, 1);
+    }
+
+    /// At the edges the selection stays put rather than wrapping onto a
+    /// header or off the end.
+    #[test]
+    fn row_movement_stops_at_the_edges() {
+        let (mut app, _bus) = app();
+        seed_rows(&mut app);
+
+        app.move_row(-1);
+        assert_eq!(app.row_sel, 1, "no field above the first one");
+        app.move_row(1);
+        assert_eq!(app.row_sel, 2);
+        app.move_row(1);
+        assert_eq!(app.row_sel, 2, "no field below the last one");
+    }
+
+    #[test]
+    fn moving_within_an_empty_row_pane_is_a_no_op() {
+        let (mut app, _bus) = app();
+        app.move_row(1);
+        assert_eq!(app.row_sel, 0);
+    }
+
+    // ── editing ─────────────────────────────────────────────────────────────
+
+    /// A read-only field says so instead of opening an editor.
+    #[test]
+    fn a_read_only_field_refuses_to_open_an_editor() {
+        let (mut app, _bus) = app();
+        seed_rows(&mut app);
+        app.row_sel = 2; // Current, writeable: false
+
+        app.begin_edit();
+        assert!(!app.editing());
+        assert_eq!(app.status, "Current is read-only");
+    }
+
+    /// A numeric editor pre-fills with the cached value, takes only numeric
+    /// characters, and writes the parsed result through to the device.
+    #[test]
+    fn a_numeric_edit_pre_fills_filters_and_commits() {
+        let (mut app, bus) = app();
+        seed_rows(&mut app);
+        app.values.insert(field_id::btm1(0x17), Value::Float(12.5));
+
+        app.begin_edit();
+        let Some(Editor {
+            kind: EditKind::Number(buf),
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a numeric editor");
+        };
+        assert_eq!(buf, "12.5");
+
+        app.editor_backspace();
+        app.editor_backspace();
+        app.editor_backspace();
+        app.editor_backspace();
+        for c in "13.2xyz".chars() {
+            app.editor_char(c);
+        }
+        let Some(Editor {
+            kind: EditKind::Number(buf),
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a numeric editor");
+        };
+        assert_eq!(buf, "13.2", "letters must not reach the buffer");
+
+        app.commit_edit();
+        assert!(!app.editing());
+        assert_eq!(app.status, "set ok");
+        assert_eq!(bus.state.lock().unwrap().btm1[&0x17], 13.2f32.to_le_bytes());
+    }
+
+    /// A number that doesn't parse reports itself and writes nothing.
+    #[test]
+    fn a_malformed_number_is_reported_and_not_written() {
+        let (mut app, bus) = app();
+        seed_rows(&mut app);
+
+        app.begin_edit();
+        app.editor_char('-');
+        app.commit_edit();
+
+        assert!(!app.editing());
+        assert_eq!(app.status, "'-' is not a number");
+        assert!(bus.state.lock().unwrap().btm1.is_empty());
+    }
+
+    #[test]
+    fn cancelling_an_edit_discards_it() {
+        let (mut app, bus) = app();
+        seed_rows(&mut app);
+
+        app.begin_edit();
+        app.editor_char('9');
+        app.cancel_edit();
+
+        assert!(!app.editing());
+        assert_eq!(app.status, "edit cancelled");
+        app.commit_edit(); // nothing staged — must not panic or write
+        assert!(bus.state.lock().unwrap().btm1.is_empty());
+    }
+
+    /// A boolean field has no editor: the key press toggles it straight away
+    /// against the cached value.
+    #[test]
+    fn a_boolean_field_toggles_without_an_editor() {
+        let (mut app, bus) = app();
+        app.cur_device = Some(ADDR);
+        app.rows = vec![Row::Field(field(
+            field_id::btm1(0x13),
+            "Inverter",
+            VisualizationType::CheckBox,
+            true,
+        ))];
+        app.row_sel = 0;
+        app.values
+            .insert(field_id::btm1(0x13), Value::Boolean(false));
+
+        app.begin_edit();
+        assert!(!app.editing(), "a checkbox writes immediately");
+        assert_eq!(bus.state.lock().unwrap().btm1[&0x13], 1.0f32.to_le_bytes());
+    }
+
+    /// The choice editor starts on the current selection and wraps.
+    #[test]
+    fn a_choice_edit_starts_on_the_current_option_and_wraps() {
+        let (mut app, bus) = app();
+        app.cur_device = Some(ADDR);
+        let mut f = field(
+            field_id::btm1(0x05),
+            "Mode",
+            VisualizationType::DropDown,
+            true,
+        );
+        f.options = vec!["Off".into(), "On".into(), "Auto".into()];
+        app.rows = vec![Row::Field(f)];
+        app.row_sel = 0;
+        app.values.insert(
+            field_id::btm1(0x05),
+            Value::List {
+                index: 1,
+                options: vec![],
+            },
+        );
+
+        app.begin_edit();
+        let Some(Editor {
+            kind: EditKind::Choice { sel, .. },
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a choice editor");
+        };
+        assert_eq!(*sel, 1);
+
+        app.editor_choice_move(1);
+        app.editor_choice_move(1); // past the end → wraps to 0
+        let Some(Editor {
+            kind: EditKind::Choice { sel, .. },
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a choice editor");
+        };
+        assert_eq!(*sel, 0);
+
+        app.editor_choice_move(-1); // before the start → wraps to the last
+        let Some(Editor {
+            kind: EditKind::Choice { sel, .. },
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a choice editor");
+        };
+        assert_eq!(*sel, 2);
+
+        app.commit_edit();
+        assert_eq!(bus.state.lock().unwrap().btm1[&0x05], 2.0f32.to_le_bytes());
+    }
+
+    /// A stale cached index past the end of the option list must not panic
+    /// the editor.
+    #[test]
+    fn a_choice_index_past_the_options_is_clamped() {
+        let (mut app, _bus) = app();
+        app.cur_device = Some(ADDR);
+        let mut f = field(
+            field_id::btm1(0x05),
+            "Mode",
+            VisualizationType::DropDown,
+            true,
+        );
+        f.options = vec!["Off".into(), "On".into()];
+        app.rows = vec![Row::Field(f)];
+        app.row_sel = 0;
+        app.values.insert(
+            field_id::btm1(0x05),
+            Value::List {
+                index: 99,
+                options: vec![],
+            },
+        );
+
+        app.begin_edit();
+        let Some(Editor {
+            kind: EditKind::Choice { sel, .. },
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a choice editor");
+        };
+        assert_eq!(*sel, 1);
+    }
+
+    /// Text edits are capped at the wire limit while typing, so the user
+    /// can't compose a string the device would reject.
+    #[test]
+    fn a_text_edit_is_capped_at_the_wire_limit() {
+        let (mut app, _bus) = app();
+        app.cur_device = Some(ADDR);
+        app.rows = vec![Row::Field(field(
+            field_id::btm1(0x01),
+            "Device name",
+            VisualizationType::Text,
+            true,
+        ))];
+        app.row_sel = 0;
+        app.values.insert(
+            field_id::btm1(0x01),
+            Value::Text {
+                sid: 1,
+                text: "Combi".into(),
+            },
+        );
+
+        app.begin_edit();
+        let Some(Editor {
+            kind: EditKind::Text { str_id, buf },
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a text editor");
+        };
+        assert_eq!((*str_id, buf.as_str()), (1, "Combi"));
+
+        for c in "0123456789012345678901234567890".chars() {
+            app.editor_char(c);
+        }
+        let Some(Editor {
+            kind: EditKind::Text { buf, .. },
+            ..
+        }) = &app.editor
+        else {
+            panic!("expected a text editor");
+        };
+        assert_eq!(buf.len(), masterbus::MAX_EDITABLE_TEXT_BYTES);
+    }
+
+    /// A Text field whose value hasn't arrived yet has no sid to write to,
+    /// so the edit is refused rather than guessing one.
+    #[test]
+    fn a_text_edit_needs_the_value_first() {
+        let (mut app, _bus) = app();
+        app.cur_device = Some(ADDR);
+        app.rows = vec![Row::Field(field(
+            field_id::btm1(0x01),
+            "Device name",
+            VisualizationType::Text,
+            true,
+        ))];
+        app.row_sel = 0;
+
+        app.begin_edit();
+        assert!(!app.editing());
+        assert_eq!(app.status, "Device name: value not loaded yet");
+    }
+
+    /// Keys aimed at an editor that isn't open go nowhere.
+    #[test]
+    fn editor_keys_without_an_editor_are_ignored() {
+        let (mut app, _bus) = app();
+        app.editor_char('1');
+        app.editor_backspace();
+        app.editor_choice_move(1);
+        assert!(!app.editing());
+    }
+
+    // ── the values modal ────────────────────────────────────────────────────
+
+    /// `?` lists every option of a list field and marks the current one.
+    #[test]
+    fn the_values_modal_lists_the_options_and_the_current_one() {
+        let (mut app, _bus) = app();
+        app.cur_device = Some(ADDR);
+        let mut f = field(
+            field_id::btm1(0x05),
+            "Mode",
+            VisualizationType::DropDown,
+            true,
+        );
+        f.options = vec!["Off".into(), "On".into(), "Auto".into()];
+        app.rows = vec![Row::Field(f)];
+        app.row_sel = 0;
+        app.values.insert(
+            field_id::btm1(0x05),
+            Value::List {
+                index: 2,
+                options: vec![],
+            },
+        );
+
+        app.open_values();
+        assert!(app.values_open());
+        let modal = app.values_modal.as_ref().unwrap();
+        assert_eq!(modal.field_name, "Mode");
+        assert_eq!(modal.options, vec!["Off", "On", "Auto"]);
+        assert_eq!(modal.current, Some(2));
+
+        app.close_values();
+        assert!(!app.values_open());
+    }
+
+    /// A field with no options says so rather than opening an empty modal.
+    #[test]
+    fn the_values_modal_refuses_a_field_without_options() {
+        let (mut app, _bus) = app();
+        seed_rows(&mut app);
+
+        app.open_values();
+        assert!(!app.values_open());
+        assert_eq!(app.status, "Voltage: no list values to show");
+    }
+
+    // ── misc ────────────────────────────────────────────────────────────────
+
+    /// The log pane only toggles when logging actually lands in the TUI.
+    #[test]
+    fn the_log_pane_only_toggles_when_logs_go_to_the_tui() {
+        let (mut app, _bus) = app();
+        assert!(!app.logs_in_tui);
+        app.toggle_logs();
+        assert!(!app.show_logs, "no pane to show without the tui-logger");
+
+        app.logs_in_tui = true;
+        app.toggle_logs();
+        assert!(app.show_logs);
+        app.toggle_logs();
+        assert!(!app.show_logs);
+    }
+
+    #[test]
+    fn quitting_sets_the_flag() {
+        let (mut app, _bus) = app();
+        assert!(!app.should_quit);
+        app.quit();
+        assert!(app.should_quit);
+    }
+}

@@ -1,6 +1,8 @@
 //! Runtime engine: reader thread, single bus scheduler, shared state.
 
 mod discovery;
+#[cfg(test)]
+pub(crate) mod fakebus;
 mod framelog;
 mod reader;
 mod scheduler;

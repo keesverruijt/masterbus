@@ -924,6 +924,108 @@ mod tests {
         assert!(emit.is_empty(), "nothing publishable should survive");
     }
 
+    /// The one-shot metadata batch: one delta per published device, naming
+    /// it and its manufacturer on every node it publishes into.
+    #[test]
+    fn the_static_metadata_batch_names_each_published_device() {
+        let devices = vec![mli()];
+        let emit = resolve(&devices, &seed_mapping(&devices));
+        let published: HashSet<DeviceId> = [devices[0].id].into_iter().collect();
+
+        let batch = static_meta_batch(&devices, &emit, &published);
+        let text = String::from_utf8(batch).unwrap();
+
+        // Newline-delimited JSON: one delta, newline-terminated.
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.ends_with('\n'));
+        let delta: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        let values = delta["updates"][0]["values"].as_array().unwrap();
+
+        let paths: Vec<&str> = values.iter().map(|v| v["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"electrical.batteries.24v-service.name"));
+        assert!(paths.contains(&"electrical.batteries.24v-service.manufacturer.name"));
+        assert!(paths.contains(&"electrical.batteries.24v-service.manufacturer.model"));
+        let maker = values
+            .iter()
+            .find(|v| v["path"] == "electrical.batteries.24v-service.manufacturer.name")
+            .unwrap();
+        assert_eq!(maker["value"], "Mastervolt");
+        assert_eq!(delta["updates"][0]["$source"], "masterbus");
+    }
+
+    /// A device that publishes nothing contributes no metadata — an empty
+    /// delta would just be noise on every client connection.
+    #[test]
+    fn an_unpublished_device_contributes_no_metadata() {
+        let devices = vec![mli()];
+        let emit = resolve(&devices, &seed_mapping(&devices));
+        let batch = static_meta_batch(&devices, &emit, &HashSet::new());
+        assert!(batch.is_empty());
+    }
+
+    /// A device with neither a name nor an article still gets its
+    /// manufacturer published, since that much is always true.
+    #[test]
+    fn a_nameless_device_still_gets_a_manufacturer() {
+        let mut d = mli();
+        d.name = String::new();
+        d.article = String::new();
+        let devices = vec![d];
+        // Seed from the named version so the paths exist, then blank it.
+        let named = vec![mli()];
+        let emit = resolve(&named, &seed_mapping(&named));
+        let published: HashSet<DeviceId> = [devices[0].id].into_iter().collect();
+
+        let text = String::from_utf8(static_meta_batch(&devices, &emit, &published)).unwrap();
+        let delta: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        let paths: Vec<&str> = delta["updates"][0]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["electrical.batteries.24v-service.manufacturer.name"]
+        );
+    }
+
+    /// Timestamps are RFC-3339 in UTC with milliseconds — the shape a Signal
+    /// K server expects on every delta.
+    #[test]
+    fn timestamps_are_rfc3339_utc_with_milliseconds() {
+        let t = now_rfc3339();
+        assert_eq!(t.len(), 24, "{t}");
+        assert!(t.ends_with('Z'), "{t}");
+        let (date, time) = t.trim_end_matches('Z').split_once('T').unwrap();
+        let parts: Vec<&str> = date.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        let year: i64 = parts[0].parse().unwrap();
+        assert!((2020..2100).contains(&year), "{t}");
+        let (hms, millis) = time.split_once('.').unwrap();
+        assert_eq!(millis.len(), 3);
+        let hms: Vec<u32> = hms.split(':').map(|p| p.parse().unwrap()).collect();
+        assert!(hms[0] < 24 && hms[1] < 60 && hms[2] < 60, "{t}");
+    }
+
+    /// The mapping file is watched by modification time; a path that isn't
+    /// there yet simply has none.
+    #[test]
+    fn the_mapping_file_is_watched_by_modification_time() {
+        assert!(mtime(None).is_none());
+        let missing = std::env::temp_dir().join("masterbus-no-such-mapping.json");
+        let _ = std::fs::remove_file(&missing);
+        assert!(mtime(Some(&missing)).is_none());
+
+        let path = std::env::temp_dir().join(format!(
+            "masterbus-mapping-test-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(mtime(Some(&path)).is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn nodes_come_from_the_paths_a_device_actually_uses() {
         let devices = vec![mli()];

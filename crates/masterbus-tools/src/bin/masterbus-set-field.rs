@@ -214,3 +214,80 @@ fn render(v: &Value) -> String {
         other => format!("{other:?}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ids are taken in the same hex form the TUI prints, with or without the
+    /// `0x` prefix — copy-pasting from the screen has to work.
+    #[test]
+    fn hex_ids_are_accepted_with_or_without_a_prefix() {
+        for s in ["188EA2", "0x188EA2", "0X188ea2", " 188EA2 "] {
+            assert_eq!(parse_hex_u32(s), Some(0x188EA2), "{s:?}");
+        }
+        assert_eq!(parse_hex_u32("0x1FF"), Some(0x1FF));
+        assert_eq!(parse_hex_u32(""), None);
+        assert_eq!(parse_hex_u32("zzz"), None);
+        assert_eq!(parse_hex_u32("-1"), None);
+    }
+
+    /// A list pick may be given as an index or as the option's exact label,
+    /// so a user can write what they see on screen.
+    #[test]
+    fn a_list_pick_accepts_an_index_or_a_label() {
+        let options = vec!["Off".to_string(), "On".to_string(), "Auto".to_string()];
+        assert_eq!(resolve_index("2", &options), Ok(2));
+        assert_eq!(resolve_index("Auto", &options), Ok(2));
+        assert_eq!(resolve_index("Off", &options), Ok(0));
+        // An index the device might accept but this build has no label for.
+        assert_eq!(resolve_index("9", &options), Ok(9));
+    }
+
+    /// A label that matches nothing lists what was available — the user is
+    /// usually one typo away.
+    #[test]
+    fn an_unknown_label_reports_the_available_options() {
+        let options = vec!["Off".to_string(), "On".to_string()];
+        let err = resolve_index("auto", &options).unwrap_err();
+        assert!(err.contains("\"auto\""), "{err}");
+        assert!(err.contains("Off, On"), "{err}");
+    }
+
+    /// Matching is exact: a label differing only in case is not silently
+    /// accepted as a different option's index.
+    #[test]
+    fn label_matching_is_exact() {
+        let options = vec!["Standby".to_string(), "Activated".to_string()];
+        assert_eq!(resolve_index("Activated", &options), Ok(1));
+        assert!(resolve_index("activated", &options).is_err());
+    }
+
+    #[test]
+    fn the_confirmation_line_renders_each_value_kind() {
+        assert_eq!(render(&Value::Float(13.2)), "13.2");
+        assert_eq!(render(&Value::Boolean(true)), "true");
+        assert_eq!(
+            render(&Value::Text {
+                sid: 1,
+                text: "Nav Chg".into()
+            }),
+            "\"Nav Chg\""
+        );
+        assert_eq!(
+            render(&Value::List {
+                index: 1,
+                options: vec!["Off".into(), "On".into()]
+            }),
+            "On (1)"
+        );
+        // A list whose labels we don't have still reports the wire value.
+        assert_eq!(
+            render(&Value::List {
+                index: 4,
+                options: vec![]
+            }),
+            "index 4"
+        );
+    }
+}
