@@ -11,8 +11,10 @@
 //! - `<value>`: parsed against the field's discovered visualization type:
 //!     - **Boolean**: `true` / `false` / `on` / `off` / `1` / `0`.
 //!     - **Float / numeric**: any number.
-//!     - **List / DropDown / Eventable**: option index (integer) **or** the
-//!       option's exact label string.
+//!     - **List / DropDown / Eventable**: the option's exact label, a decimal
+//!       index, or a `0x`-prefixed hex index — in that order of preference,
+//!       so a label like `AC` is a label and a bare `12` is twelve. The TUI
+//!       prints both forms beside each option as `label(index)`.
 //!     - **Text**: the new string content; the current sid is taken from
 //!       the cached value.
 //!
@@ -182,24 +184,36 @@ fn build_value(
     }
 }
 
-/// Accept either a decimal/hex integer index, or the exact option label.
+/// Resolve a list/enum pick: the option's exact label, a decimal index, or a
+/// `0x`-prefixed hex index.
+///
+/// The order matters, and getting it wrong wrote the wrong value to a device.
+/// Labels come first because they are a closed, known set — an exact match is
+/// unambiguous intent, and a label that happens to read as hex (`AC`, `DC`, a
+/// bank called `B`) must not be taken for a number. Decimal comes next
+/// because that is the form `masterbus-tui` prints beside each option, so
+/// what you read off the screen is what you can type. Hex is accepted only
+/// when it says so: a bare `10` is ten, not sixteen.
 fn resolve_index(arg: &str, options: &[String]) -> Result<i32, String> {
-    if let Some(i) = parse_hex_u32(arg) {
+    if let Some(i) = options.iter().position(|o| o == arg) {
         return Ok(i as i32);
     }
     if let Ok(i) = arg.parse::<i32>() {
         return Ok(i);
     }
-    options
-        .iter()
-        .position(|o| o == arg)
-        .map(|i| i as i32)
-        .ok_or_else(|| {
-            format!(
-                "{arg:?} doesn't match any option; available: {}",
-                options.join(", ")
-            )
-        })
+    if let Some(hex) = arg
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| arg.trim().strip_prefix("0X"))
+        && let Ok(i) = i32::from_str_radix(hex, 16)
+    {
+        return Ok(i);
+    }
+    Err(format!(
+        "{arg:?} is not an option label, a decimal index or a 0x-prefixed hex \
+         index; available: {}",
+        options.join(", ")
+    ))
 }
 
 fn render(v: &Value) -> String {
@@ -232,35 +246,91 @@ mod tests {
         assert_eq!(parse_hex_u32("-1"), None);
     }
 
-    /// A list pick may be given as an index or as the option's exact label,
-    /// so a user can write what they see on screen.
+    /// An option's exact label resolves to its index, whatever the label
+    /// looks like. `AC` and `DC` are ordinary MasterBus enum labels and also
+    /// valid hex; before the parse order was fixed they resolved to 172 and
+    /// 220 and were written to the device as such.
     #[test]
-    fn a_list_pick_accepts_an_index_or_a_label() {
-        let options = vec!["Off".to_string(), "On".to_string(), "Auto".to_string()];
-        assert_eq!(resolve_index("2", &options), Ok(2));
-        assert_eq!(resolve_index("Auto", &options), Ok(2));
+    fn a_label_is_a_label_even_when_it_reads_as_hex() {
+        let options = vec![
+            "Off".to_string(),
+            "AC".to_string(),
+            "DC".to_string(),
+            "Auto".to_string(),
+        ];
         assert_eq!(resolve_index("Off", &options), Ok(0));
-        // An index the device might accept but this build has no label for.
+        assert_eq!(resolve_index("AC", &options), Ok(1));
+        assert_eq!(resolve_index("DC", &options), Ok(2));
+        assert_eq!(resolve_index("Auto", &options), Ok(3));
+    }
+
+    /// A bare number is decimal — the form the TUI prints beside each option
+    /// as `label(index)`. Reading `Stabilizer(12)` off the screen and typing
+    /// 12 used to write 18.
+    #[test]
+    fn a_bare_number_is_decimal_not_hex() {
+        let options: Vec<String> = Vec::new();
+        for (arg, want) in [
+            ("0", 0),
+            ("2", 2),
+            ("9", 9),
+            ("10", 10),
+            ("12", 12),
+            ("24", 24),
+            ("99", 99),
+        ] {
+            assert_eq!(resolve_index(arg, &options), Ok(want), "{arg}");
+        }
+    }
+
+    /// Hex still works, but only when it says so.
+    #[test]
+    fn hex_indices_need_their_prefix() {
+        let options: Vec<String> = Vec::new();
+        assert_eq!(resolve_index("0x12", &options), Ok(18));
+        assert_eq!(resolve_index("0X1A", &options), Ok(26));
+        assert_eq!(resolve_index("0xff", &options), Ok(255));
+    }
+
+    /// Labels that are themselves numbers — a "12 / 24 / 48 V system" enum —
+    /// match as labels, so the on-screen text keeps working even though it
+    /// collides with the index form.
+    #[test]
+    fn a_numeric_label_still_matches_as_a_label() {
+        let options = vec!["12".to_string(), "24".to_string(), "48".to_string()];
+        assert_eq!(resolve_index("24", &options), Ok(1));
+        // An index no label spells is still taken as an index.
+        assert_eq!(resolve_index("2", &options), Ok(2));
+    }
+
+    /// An index this build has no label for is still passed through: the
+    /// device's option list may be longer than what discovery resolved.
+    #[test]
+    fn an_index_beyond_the_known_labels_is_passed_through() {
+        let options = vec!["Off".to_string(), "On".to_string()];
         assert_eq!(resolve_index("9", &options), Ok(9));
     }
 
-    /// A label that matches nothing lists what was available — the user is
-    /// usually one typo away.
-    #[test]
-    fn an_unknown_label_reports_the_available_options() {
-        let options = vec!["Off".to_string(), "On".to_string()];
-        let err = resolve_index("auto", &options).unwrap_err();
-        assert!(err.contains("\"auto\""), "{err}");
-        assert!(err.contains("Off, On"), "{err}");
-    }
-
     /// Matching is exact: a label differing only in case is not silently
-    /// accepted as a different option's index.
+    /// accepted as something else.
     #[test]
     fn label_matching_is_exact() {
         let options = vec!["Standby".to_string(), "Activated".to_string()];
         assert_eq!(resolve_index("Activated", &options), Ok(1));
         assert!(resolve_index("activated", &options).is_err());
+    }
+
+    /// Anything else names the forms it accepts and lists the options — the
+    /// user is usually one typo, or one missing `0x`, away.
+    #[test]
+    fn an_unresolvable_pick_reports_the_accepted_forms_and_options() {
+        let options = vec!["Off".to_string(), "On".to_string()];
+        let err = resolve_index("1A", &options).unwrap_err();
+        assert!(err.contains("\"1A\""), "{err}");
+        assert!(err.contains("0x-prefixed hex"), "{err}");
+        assert!(err.contains("Off, On"), "{err}");
+        // A hex body that isn't hex at all.
+        assert!(resolve_index("0xzz", &options).is_err());
     }
 
     #[test]

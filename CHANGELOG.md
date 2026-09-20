@@ -29,6 +29,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   omits the Linux-only SocketCAN transport entirely, so it reads higher than
   the same tree measured on Linux.
 
+### Fixed
+- **`masterbus-set-field` wrote the wrong option for a list/enum field.** Its
+  argument parser tried hex before anything else, so a bare decimal index was
+  read as hex — `10` wrote 16, `12` wrote 18, `24` wrote 36 — and an option
+  label that happens to be valid hex never matched at all: `AC` wrote 172,
+  `DC` wrote 220. The TUI prints each option as `label(index)` with the index
+  in decimal, so reading a value off the screen and typing it back was enough
+  to set a device to something you did not choose, reported as `set ok`. The
+  pick is now resolved as the option's exact label first, then a decimal
+  index, and only then a `0x`-prefixed hex index. **Upgrading:** a bare hex
+  index (`1A` meaning 26) is no longer accepted — write `0x1A`. Anything
+  unresolvable now names the three accepted forms instead of silently
+  becoming a number.
+
 ## [0.3.5] - 2026-09-16
 
 ### Changed
