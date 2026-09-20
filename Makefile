@@ -24,7 +24,8 @@
 
 CARGO ?= cargo
 
-.PHONY: all build debug check test fmt fmt-check clippy doc precommit \
+.PHONY: all build debug check test coverage coverage-html fmt fmt-check \
+        clippy doc precommit \
         tools release publish-dry publish \
         clean help
 
@@ -50,6 +51,24 @@ check:
 # and the FFI demos.
 test:
 	$(CARGO) test --workspace
+
+# Line/region coverage for the whole workspace, printed per file. Needs
+# cargo-llvm-cov and the llvm-tools component:
+#
+#   rustup component add llvm-tools-preview
+#   cargo install cargo-llvm-cov
+#
+# Note this measures whatever compiles on *this* host: the Linux-only
+# transports (socketcan) are cfg'd out on macOS and simply don't appear in
+# the report, so a Linux run reports a lower total than a macOS one.
+coverage:
+	$(CARGO) llvm-cov --workspace --summary-only
+
+# Same run, but writes a browsable HTML report and opens it. The
+# line-by-line view is what you want when hunting for which branches of a
+# half-covered function the tests never reach.
+coverage-html:
+	$(CARGO) llvm-cov --workspace --html --open
 
 # Reformat the whole tree.
 fmt:
@@ -149,6 +168,8 @@ help:
 	@echo "  make debug          Debug build of every workspace member"
 	@echo "  make check          Type-check without producing binaries"
 	@echo "  make test           Run the workspace test suite"
+	@echo "  make coverage       Per-file line coverage (needs cargo-llvm-cov)"
+	@echo "  make coverage-html  Coverage as a browsable HTML report"
 	@echo "  make fmt            cargo fmt --all"
 	@echo "  make fmt-check      cargo fmt --all --check (CI shape)"
 	@echo "  make clippy         Workspace clippy at -D warnings (CI shape)"

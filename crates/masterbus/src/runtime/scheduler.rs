@@ -614,3 +614,544 @@ impl Sched {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DeviceIdentity, FieldInfo, GroupInfo};
+    use crate::protocol::can_class;
+    use crate::runtime::Engine;
+    use crate::runtime::fakebus::{ADDR, Device, FakeBus};
+
+    /// Config for a test bus: no pacing, short discovery timeouts (nothing
+    /// here waits out a real device), no disk cache.
+    fn test_config() -> Config {
+        Config {
+            min_send_interval: Duration::ZERO,
+            discovery_timeout: Duration::from_millis(5),
+            discovery_retries: 1,
+            discovery_window: Duration::ZERO,
+            discovery_settle: Duration::ZERO,
+            connect_timeout: Duration::from_secs(5),
+            liveness: Duration::from_millis(200),
+            cache_path: None,
+            ..Config::default()
+        }
+    }
+
+    fn connect(device: Device, config: Config) -> (Arc<Engine>, FakeBus) {
+        let (bus, transport) = FakeBus::start(device);
+        let engine = Engine::connect(transport, config).expect("connect");
+        (engine, bus)
+    }
+
+    fn field(index: FieldId, name: &str, viz: VisualizationType) -> FieldInfo {
+        FieldInfo {
+            index,
+            name: name.to_string(),
+            unit: String::new(),
+            viz_type: viz,
+            writeable: true,
+            eventable: false,
+            min: 0.0,
+            max: 0.0,
+            step: 0.0,
+            options: Vec::new(),
+        }
+    }
+
+    /// Put a discovered schema in place, so the scheduler's read/write paths
+    /// run without first enumerating the device.
+    fn seed_schema(engine: &Engine, fields: Vec<FieldInfo>) {
+        engine.state.put_identity(
+            ADDR,
+            DeviceIdentity {
+                article: "44010250".into(),
+                serial: "1234567".into(),
+                revision: "3".into(),
+                name: "Combi".into(),
+                firmware: "1.0".into(),
+            },
+        );
+        let (btm1, btm3): (Vec<_>, Vec<_>) = fields
+            .into_iter()
+            .partition(|f| field_id::channel(f.index) == Channel::Btm1);
+        engine.state.put_menu(
+            ADDR,
+            Menu::Monitoring,
+            vec![GroupInfo {
+                id: 0,
+                name: "Monitoring".into(),
+                menu: Menu::Monitoring,
+                fields: btm1,
+            }],
+        );
+        if !btm3.is_empty() {
+            engine.state.put_all_fields(ADDR, btm3);
+        }
+    }
+
+    // ── values ──────────────────────────────────────────────────────────────
+
+    /// A read with no usable cache entry goes out on the wire as a class-0x18
+    /// request and comes back decoded per the field's visualization type.
+    #[test]
+    fn an_on_demand_read_polls_the_device() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        assert_eq!(
+            engine.read(ADDR, f, Duration::ZERO).unwrap(),
+            Value::Float(12.5)
+        );
+        assert_eq!(
+            bus.sent_class(can_class::MONITORING_REQ),
+            vec![(0x18_188EA2, vec![0x17, TAB_DEFAULT])]
+        );
+    }
+
+    /// The point of the value cache: a read inside `max_age` is answered from
+    /// memory and puts nothing on the bus.
+    #[test]
+    fn a_fresh_cached_value_is_served_without_touching_the_bus() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        engine.read(ADDR, f, Duration::ZERO).unwrap();
+        let after_first = bus.sent_class(can_class::MONITORING_REQ).len();
+
+        // Served from cache…
+        assert_eq!(
+            engine.read(ADDR, f, Duration::from_secs(60)).unwrap(),
+            Value::Float(12.5)
+        );
+        assert_eq!(bus.sent_class(can_class::MONITORING_REQ).len(), after_first);
+
+        // …until the caller demands something fresher.
+        engine.read(ADDR, f, Duration::ZERO).unwrap();
+        assert_eq!(
+            bus.sent_class(can_class::MONITORING_REQ).len(),
+            after_first + 1
+        );
+    }
+
+    /// A field the device never answers for resolves as a timeout rather than
+    /// hanging the caller.
+    #[test]
+    fn a_silent_field_times_out() {
+        let mut device = Device::new();
+        device.mute.push(0x17);
+        let (engine, _bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        assert!(matches!(
+            engine.read(ADDR, f, Duration::ZERO),
+            Err(Error::Timeout)
+        ));
+    }
+
+    /// A field that is in neither the schema nor the flat probe list sends the
+    /// scheduler into discovery; when the device won't enumerate either, the
+    /// read reports the field as unavailable rather than timing out.
+    #[test]
+    fn an_undiscoverable_field_is_reported_unavailable() {
+        let (engine, _bus) = connect(Device::new(), test_config());
+        let f = field_id::btm1(0x17);
+
+        assert!(matches!(
+            engine.read(ADDR, f, Duration::ZERO),
+            Err(Error::FieldNotAvailable(0x17))
+        ));
+    }
+
+    /// Btm3 values live on the shadow address (`addr | 0x800000`) with a
+    /// headerless payload, and decode through the flat probe list.
+    #[test]
+    fn a_btm3_read_uses_the_shadow_address() {
+        let device = Device::new().with_btm3(0x30, 17.0);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm3(0x30);
+        seed_schema(
+            &engine,
+            vec![field(f, "ShutDown", VisualizationType::Float)],
+        );
+
+        assert_eq!(
+            engine.read(ADDR, f, Duration::ZERO).unwrap(),
+            Value::Float(17.0)
+        );
+        assert_eq!(
+            bus.sent_class(can_class::SCHEMA_REQ_HISTORY),
+            vec![(0x1B_988EA2, vec![0x30, 0x00])]
+        );
+    }
+
+    // ── writes ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_float_write_lands_and_is_read_back() {
+        let device = Device::new().with_btm1(0x30, 14.4);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x30);
+        seed_schema(
+            &engine,
+            vec![field(f, "Absorption", VisualizationType::Float)],
+        );
+
+        assert_eq!(
+            engine.write(ADDR, f, WriteValue::Float(15.2)).unwrap(),
+            Value::Float(15.2)
+        );
+        assert_eq!(
+            bus.device.lock().unwrap().btm1[&0x30],
+            15.2f32.to_le_bytes()
+        );
+    }
+
+    /// Relay-style booleans only actuate when the value write is followed by
+    /// the commit token at the adjacent hidden register.
+    #[test]
+    fn a_boolean_write_is_followed_by_the_commit_token() {
+        let (engine, bus) = connect(Device::new(), test_config());
+        let f = field_id::btm1(0x13);
+        seed_schema(
+            &engine,
+            vec![
+                field(f, "Inverter", VisualizationType::CheckBox),
+                // The CombiMaster reports the command register as an unnamed
+                // field — that's what marks the slot as free to commit into.
+                field(f + 1, "", VisualizationType::Float),
+            ],
+        );
+
+        assert_eq!(
+            engine.write(ADDR, f, WriteValue::Bool(true)).unwrap(),
+            Value::Boolean(true)
+        );
+
+        let writes: Vec<Vec<u8>> = bus
+            .sent_class(can_class::MONITORING_REQ)
+            .into_iter()
+            .map(|(_, d)| d)
+            .filter(|d| d.len() == 6)
+            .collect();
+        assert_eq!(
+            writes,
+            vec![
+                vec![0x13, 0x00, 0x00, 0x00, 0x80, 0x3F],
+                // The commit token itself, captured from MasterAdjust.
+                vec![0x14, 0x00, 0x14, 0x9F, 0x3C, 0x02],
+            ]
+        );
+    }
+
+    /// If a *named*, user-facing field occupies the commit slot, the write is
+    /// refused: committing there would clobber it, and not committing would
+    /// silently fail to actuate.
+    #[test]
+    fn a_boolean_write_is_refused_when_the_commit_slot_is_occupied() {
+        let (engine, bus) = connect(Device::new(), test_config());
+        let f = field_id::btm1(0x13);
+        seed_schema(
+            &engine,
+            vec![
+                field(f, "Inverter", VisualizationType::CheckBox),
+                field(f + 1, "Charger", VisualizationType::CheckBox),
+            ],
+        );
+
+        let err = engine.write(ADDR, f, WriteValue::Bool(true)).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::CommitFieldOccupied {
+                field: 0x13,
+                cmd_field: 0x14,
+                ref cmd_field_name,
+            } if cmd_field_name == "Charger"
+        ));
+        // Nothing went out: the refusal happens before the value write.
+        assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
+    }
+
+    /// Every Btm3 write is a 4-byte f32 — a list pick goes as its index — and
+    /// the device's ack on the value carrier confirms it.
+    #[test]
+    fn a_btm3_list_write_goes_out_as_a_float() {
+        let (engine, bus) = connect(Device::new(), test_config());
+        let f = field_id::btm3(0x2C);
+        seed_schema(&engine, vec![field(f, "Mode", VisualizationType::DropDown)]);
+
+        assert_eq!(
+            engine.write(ADDR, f, WriteValue::ListIndex(2)).unwrap(),
+            Value::List {
+                index: 2,
+                options: Vec::new()
+            }
+        );
+        assert_eq!(
+            bus.sent_class(can_class::SCHEMA_REQ_HISTORY)
+                .first()
+                .unwrap(),
+            &(0x1B_988EA2, vec![0x2C, 0x00, 0x00, 0x00, 0x00, 0x40])
+        );
+    }
+
+    /// A Text write goes through the string-chunk protocol: four chars per
+    /// frame, then an explicit NUL terminator — never the numeric write path.
+    #[test]
+    fn a_text_write_is_chunked_and_terminated() {
+        let (engine, bus) = connect(Device::new(), test_config());
+
+        engine.write_string(ADDR, 0x0001, "NavigationCh").unwrap();
+
+        let chunks: Vec<Vec<u8>> = bus
+            .sent_class(can_class::PROPERTY_REQ)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![
+                vec![0x30, 0x01, 0x00, 0x00, b'N', b'a', b'v', b'i'],
+                vec![0x30, 0x01, 0x00, 0x01, b'g', b'a', b't', b'i'],
+                vec![0x30, 0x01, 0x00, 0x02, b'o', b'n', b'C', b'h'],
+                vec![0x30, 0x01, 0x00, 0x03, 0x00],
+            ]
+        );
+        assert_eq!(bus.device.lock().unwrap().strings[&0x0001], "NavigationCh");
+    }
+
+    /// Writing a Text *field* takes the same path and caches the new text
+    /// against the field, without a numeric read-back.
+    #[test]
+    fn a_text_field_write_caches_the_new_text() {
+        let (engine, _bus) = connect(Device::new(), test_config());
+        let f = field_id::btm1(0x01);
+        seed_schema(
+            &engine,
+            vec![field(f, "Device name", VisualizationType::Text)],
+        );
+
+        let written = engine
+            .write(
+                ADDR,
+                f,
+                WriteValue::Text {
+                    sid: 0x0001,
+                    text: "Combi".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            written,
+            Value::Text {
+                sid: 0x0001,
+                text: "Combi".into()
+            }
+        );
+        assert_eq!(engine.state.get_value(ADDR, f).unwrap().value, written);
+    }
+
+    // ── access level ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_access_level_is_read_from_the_device() {
+        let mut device = Device::new();
+        device.level = AccessLevel::Installer;
+        let (engine, bus) = connect(device, test_config());
+
+        assert_eq!(engine.access_level(ADDR).unwrap(), AccessLevel::Installer);
+        assert_eq!(
+            engine.state.access_level(ADDR),
+            Some(AccessLevel::Installer)
+        );
+        assert_eq!(
+            bus.sent_class(can_class::PROPERTY_REQ),
+            vec![(0x07_188EA2, vec![0x08, 0x19])]
+        );
+    }
+
+    /// A successful login raises the level *and* drops the cached schema:
+    /// writability flips per level, so the discovered attributes are stale.
+    #[test]
+    fn a_login_raises_the_level_and_forgets_the_schema() {
+        let mut device = Device::new();
+        device.codes.insert(1, 1234.0);
+        let (engine, _bus) = connect(device, test_config());
+        seed_schema(
+            &engine,
+            vec![field(
+                field_id::btm1(0x17),
+                "Voltage",
+                VisualizationType::Float,
+            )],
+        );
+        assert!(engine.state.schema(ADDR).is_some());
+
+        let level = engine
+            .set_access_level(ADDR, AccessLevel::Installer, Some(1234.0))
+            .unwrap();
+        assert_eq!(level, AccessLevel::Installer);
+        assert_eq!(
+            engine.state.access_level(ADDR),
+            Some(AccessLevel::Installer)
+        );
+        assert!(engine.state.schema(ADDR).is_none());
+    }
+
+    /// A wrong code isn't an error on the wire — the device just answers with
+    /// the level you were already at. Callers detect it by comparing.
+    #[test]
+    fn a_wrong_login_code_leaves_the_level_alone() {
+        let mut device = Device::new();
+        device.codes.insert(1, 1234.0);
+        let (engine, _bus) = connect(device, test_config());
+
+        let level = engine
+            .set_access_level(ADDR, AccessLevel::Installer, Some(9999.0))
+            .unwrap();
+        assert_eq!(level, AccessLevel::EndUser);
+    }
+
+    #[test]
+    fn a_logout_returns_to_end_user() {
+        let mut device = Device::new();
+        device.level = AccessLevel::Distributor;
+        let (engine, bus) = connect(device, test_config());
+
+        assert_eq!(
+            engine
+                .set_access_level(ADDR, AccessLevel::EndUser, None)
+                .unwrap(),
+            AccessLevel::EndUser
+        );
+        assert_eq!(bus.device.lock().unwrap().level, AccessLevel::EndUser);
+    }
+
+    // ── identity ────────────────────────────────────────────────────────────
+
+    /// Identity is the cheap half of discovery: firmware halves, four property
+    /// string ids, and the strings they point at. It is fetched once.
+    #[test]
+    fn the_identity_is_fetched_once_and_then_served_from_memory() {
+        let device = Device::new().with_identity("44010250", "1234567", "Combi");
+        let (engine, bus) = connect(device, test_config());
+
+        let id = engine.identity(ADDR).unwrap();
+        assert_eq!(id.article, "44010250");
+        assert_eq!(id.serial, "1234567");
+        assert_eq!(id.name, "Combi");
+        assert_eq!(id.firmware, "1.0");
+
+        let after_first = bus.sent_class(can_class::PROPERTY_REQ).len();
+        assert_eq!(engine.identity(ADDR).unwrap(), id);
+        assert_eq!(bus.sent_class(can_class::PROPERTY_REQ).len(), after_first);
+    }
+
+    /// An article number with a trailing space defeats every catalog and
+    /// mapping lookup that keys on it, so identity trims what it fetches.
+    #[test]
+    fn identity_strings_are_trimmed() {
+        let device = Device::new().with_identity("44010250 ", "1234567", "Combi");
+        let (engine, _bus) = connect(device, test_config());
+
+        assert_eq!(engine.identity(ADDR).unwrap().article, "44010250");
+    }
+
+    // ── subscriptions ───────────────────────────────────────────────────────
+
+    #[test]
+    fn a_subscription_delivers_values_at_its_interval() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let (engine, _bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
+        for _ in 0..2 {
+            let update = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(update.device, ADDR);
+            assert_eq!(update.field, f);
+            assert_eq!(update.value, Value::Float(12.5));
+        }
+    }
+
+    /// `change_only` suppresses repeats of an unchanged value, and delivers
+    /// again the moment the device reports something new.
+    #[test]
+    fn change_only_delivers_only_on_change() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), true);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().value,
+            Value::Float(12.5)
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(60)).is_err());
+
+        bus.with_device(|d| {
+            d.btm1.insert(0x17, 13.0f32.to_le_bytes());
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().value,
+            Value::Float(13.0)
+        );
+    }
+
+    #[test]
+    fn unsubscribing_stops_the_updates() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let (engine, _bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        let (id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        engine.unsubscribe(id);
+
+        // Drain whatever was already in flight, then expect silence.
+        while rx.recv_timeout(Duration::from_millis(50)).is_ok() {}
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    // ── bus master ──────────────────────────────────────────────────────────
+
+    /// With `heartbeat_master` set the scheduler drives the bus itself: the
+    /// first heartbeat goes out immediately on connect, then at the interval.
+    #[test]
+    fn heartbeats_are_emitted_when_acting_as_bus_master() {
+        let config = Config {
+            heartbeat_master: Some(0x53A493),
+            heartbeat_interval: Duration::from_millis(10),
+            ..test_config()
+        };
+        let (_engine, bus) = connect(Device::new(), config);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while bus.sent_class(can_class::BUS_POLL).len() < 3 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let beats = bus.sent_class(can_class::BUS_POLL);
+        assert!(
+            beats.len() >= 3,
+            "expected repeated heartbeats, got {beats:?}"
+        );
+        assert!(beats.iter().all(|f| *f == (0x05_53A493, Vec::new())));
+    }
+
+    /// A passive engine transmits nothing until it's asked to.
+    #[test]
+    fn a_passive_engine_stays_off_the_bus() {
+        let (_engine, bus) = connect(Device::new(), test_config());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(bus.sent().is_empty());
+    }
+}

@@ -614,10 +614,127 @@ mod tests {
         assert_eq!(cfg.cache_dir, Some(PathBuf::from("/tmp/cache")));
     }
 
+    /// A line that isn't `key = value` names the file and the line number —
+    /// a hand-edited config should say where it went wrong.
+    #[test]
+    fn a_malformed_line_is_rejected_with_its_line_number() {
+        let raw = "device_type = can\n\nthis is not ini\n";
+        let err = parse(raw, PathBuf::from("t.ini")).unwrap_err().to_string();
+        assert!(err.contains("t.ini:3"), "{err}");
+        assert!(err.contains("expected `key = value`"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_device_type_is_rejected_by_name() {
+        let err = parse("device_type = rs232\n", PathBuf::from("t.ini"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("t.ini:1"), "{err}");
+        assert!(err.contains("rs232"), "{err}");
+    }
+
+    #[test]
+    fn socketcan_is_an_alias_for_can() {
+        let cfg = parse("device_type = SocketCAN\n", PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.device_type, DeviceType::Can);
+    }
+
+    /// Values may be quoted and lines may carry a trailing comment in either
+    /// style; neither should end up in the value.
+    #[test]
+    fn values_are_unquoted_and_stripped_of_trailing_comments() {
+        let raw = "\
+            device_type = usb   ; the link\n\
+            device_name = \"ML2311\"  # its serial\n\
+            ";
+        let cfg = parse(raw, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.device_type, DeviceType::Usb);
+        assert_eq!(cfg.device_name, "ML2311");
+    }
+
+    /// Rendering a config that has nothing set leaves every optional key
+    /// present but commented out, so the file documents itself.
+    #[test]
+    fn an_empty_config_renders_its_optional_keys_as_comments() {
+        let cfg = FileConfig {
+            heartbeat_master: None,
+            device_type: DeviceType::Usb,
+            device_name: String::new(),
+            cache_dir: None,
+            listen: None,
+            path: PathBuf::from("t.ini"),
+        };
+        let rendered = render(&cfg);
+        assert!(
+            rendered.contains("# heartbeat_master = 000001"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("# cache_dir = /var/lib/masterbus"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("# listen = 0.0.0.0:3009"), "{rendered}");
+        assert!(rendered.contains("device_type = usb"), "{rendered}");
+
+        // And it still parses back to the same nothing.
+        let back = parse(&rendered, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(back.heartbeat_master, None);
+        assert_eq!(back.cache_dir, None);
+        assert_eq!(back.listen, None);
+    }
+
+    /// A writable directory is used as-is — no fallback, no surprise
+    /// relocation of someone's cache.
+    #[test]
+    fn a_writable_cache_dir_is_used_as_is() {
+        let dir = temp_dir();
+        let nested = dir.join("schemas");
+        assert_eq!(resolve_cache_dir(&nested), Some(nested.clone()));
+        assert!(nested.is_dir(), "the directory should have been created");
+        // The write probe cleans up after itself.
+        assert_eq!(std::fs::read_dir(&nested).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A path that cannot be a directory at all (here: under a regular file)
+    /// fails the probe rather than being handed back as usable.
+    #[test]
+    fn an_unusable_cache_dir_fails_the_probe() {
+        let dir = temp_dir();
+        let file = dir.join("not-a-dir");
+        fs::write(&file, b"x").unwrap();
+        assert!(!try_use_dir(&file.join("schemas")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The default cache location follows the config location: a system-wide
+    /// config caches where the systemd unit's StateDirectory points, anything
+    /// else caches per user.
     #[test]
     fn default_cache_for_system_path() {
         let sys = default_cache_dir(std::path::Path::new("/etc/default/masterbus/config.ini"));
         assert_eq!(sys, Some(PathBuf::from("/var/lib/masterbus")));
+
+        let user = default_cache_dir(std::path::Path::new(
+            "/home/kees/.config/masterbus/config.ini",
+        ));
+        assert_eq!(user, user_cache_dir());
+        assert_ne!(user, sys);
+    }
+
+    /// A scratch directory for the cache-probe tests. Removed by each test;
+    /// nothing here touches the real per-user cache.
+    fn temp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "masterbus-settings-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 
     #[cfg(target_os = "linux")]

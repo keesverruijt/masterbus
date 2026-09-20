@@ -565,7 +565,594 @@ impl Drop for Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::field_id;
+    use crate::runtime::fakebus::{ADDR, Device as FakeDevice, FakeBus};
     use crate::value::Date;
+    use std::time::Instant;
+
+    /// Every menu, so seeding them all marks the device fully discovered and
+    /// the handle layer runs without a discovery round trip.
+    const ALL_MENUS: [Menu; 5] = [
+        Menu::Monitoring,
+        Menu::Configuration,
+        Menu::Service,
+        Menu::Alarm,
+        Menu::History,
+    ];
+
+    fn test_config() -> Config {
+        Config {
+            min_send_interval: Duration::ZERO,
+            discovery_timeout: Duration::from_millis(5),
+            discovery_retries: 1,
+            discovery_window: Duration::ZERO,
+            discovery_settle: Duration::ZERO,
+            connect_timeout: Duration::from_secs(5),
+            liveness: Duration::from_millis(200),
+            cache_path: None,
+            ..Config::default()
+        }
+    }
+
+    fn connect(device: FakeDevice, config: Config) -> (MasterBus, FakeBus) {
+        let (fake, transport) = FakeBus::start(device);
+        let bus = MasterBus::with_transport(transport, config).expect("connect");
+        (bus, fake)
+    }
+
+    fn field_info(
+        index: FieldId,
+        name: &str,
+        viz: VisualizationType,
+        writeable: bool,
+    ) -> FieldInfo {
+        FieldInfo {
+            index,
+            name: name.to_string(),
+            unit: "V".into(),
+            viz_type: viz,
+            writeable,
+            eventable: false,
+            min: 0.0,
+            max: 0.0,
+            step: 0.0,
+            options: Vec::new(),
+        }
+    }
+
+    fn group_info(id: i32, name: &str, menu: Menu, fields: Vec<FieldInfo>) -> GroupInfo {
+        GroupInfo {
+            id,
+            name: name.to_string(),
+            menu,
+            fields,
+        }
+    }
+
+    /// Put a fully-discovered device in place: identity plus every menu, so
+    /// each `ensure_*` call is satisfied from memory.
+    fn seed(bus: &MasterBus, groups: Vec<GroupInfo>) {
+        let state = &bus.engine.state;
+        state.put_identity(
+            ADDR,
+            DeviceIdentity {
+                article: "44010250".into(),
+                serial: "1234567".into(),
+                revision: "3".into(),
+                name: "Combi".into(),
+                firmware: "1.0".into(),
+            },
+        );
+        for menu in ALL_MENUS {
+            let of_menu: Vec<GroupInfo> =
+                groups.iter().filter(|g| g.menu == menu).cloned().collect();
+            state.put_menu(ADDR, menu, of_menu);
+        }
+    }
+
+    /// One writable Float, one read-only Float, one Text — enough to exercise
+    /// every `Field` accessor and both `set` rejections.
+    fn seed_default(bus: &MasterBus) {
+        seed(
+            bus,
+            vec![
+                group_info(
+                    0,
+                    "DC",
+                    Menu::Monitoring,
+                    vec![
+                        field_info(
+                            field_id::btm1(0x17),
+                            "Voltage",
+                            VisualizationType::Float,
+                            true,
+                        ),
+                        field_info(
+                            field_id::btm1(0x18),
+                            "Current",
+                            VisualizationType::Float,
+                            false,
+                        ),
+                    ],
+                ),
+                group_info(
+                    7,
+                    "General",
+                    Menu::Configuration,
+                    vec![field_info(
+                        field_id::btm1(0x01),
+                        "Device name",
+                        VisualizationType::Text,
+                        true,
+                    )],
+                ),
+            ],
+        );
+    }
+
+    // ── MasterBus ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_bus_lists_its_live_devices() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+
+        let devices = bus.devices();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id(), ADDR);
+        assert_eq!(devices[0].status(), DeviceStatus::On);
+    }
+
+    /// A handle by id is just a handle: no presence check, no traffic.
+    #[test]
+    fn a_handle_by_id_does_not_check_presence() {
+        let (bus, fake) = connect(FakeDevice::new(), test_config());
+
+        let absent = bus.device(0x00DEAD);
+        assert_eq!(absent.id(), 0x00DEAD);
+        assert_eq!(absent.status(), DeviceStatus::Offline);
+        assert!(fake.sent().is_empty());
+    }
+
+    /// `devices_all` holds off until the collection window has passed, so a
+    /// caller enumerating the bus sees all of it rather than whoever spoke
+    /// first.
+    #[test]
+    fn devices_all_waits_for_the_collection_window() {
+        let config = Config {
+            discovery_window: Duration::from_millis(150),
+            ..test_config()
+        };
+        let started = Instant::now();
+        let (bus, _fake) = connect(FakeDevice::new(), config);
+
+        let devices = bus.devices_all();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id(), ADDR);
+    }
+
+    #[test]
+    fn the_event_stream_reports_the_first_device() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+
+        assert!(matches!(
+            bus.device_events().recv_timeout(Duration::from_secs(2)),
+            Ok(DeviceEvent::Alive(ADDR))
+        ));
+    }
+
+    // ── Device ──────────────────────────────────────────────────────────────
+
+    /// Every identity accessor is a view on one cheap fetch.
+    #[test]
+    fn the_identity_accessors_share_one_fetch() {
+        let device = FakeDevice::new().with_identity("44010250", "1234567", "Combi");
+        let (bus, fake) = connect(device, test_config());
+        let d = bus.device(ADDR);
+
+        assert_eq!(d.article_number().unwrap(), "44010250");
+        assert_eq!(d.serial_number().unwrap(), "1234567");
+        assert_eq!(d.name().unwrap(), "Combi");
+        assert_eq!(d.revision_code().unwrap(), "3");
+        assert_eq!(d.firmware_version().unwrap(), "1.0");
+        assert_eq!(d.identity().unwrap().article, "44010250");
+
+        // Only the first accessor went to the wire.
+        let queries = fake.sent().len();
+        assert_eq!(d.name().unwrap(), "Combi");
+        assert_eq!(fake.sent().len(), queries);
+    }
+
+    #[test]
+    fn the_schema_is_exposed_as_groups_and_tabs() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        seed_default(&bus);
+        let d = bus.device(ADDR);
+
+        assert_eq!(d.schema().unwrap().groups.len(), 2);
+        assert_eq!(d.groups().unwrap().len(), 2);
+
+        let monitoring = d.tab(Menu::Monitoring).unwrap();
+        assert_eq!(monitoring.len(), 1);
+        assert_eq!(monitoring[0].name().unwrap(), "DC");
+
+        let info = d.tab_info(Menu::Configuration).unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].fields[0].name, "Device name");
+
+        assert!(d.tab(Menu::Service).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_flat_probe_list_is_exposed() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        bus.engine.state.put_all_fields(
+            ADDR,
+            vec![field_info(
+                field_id::btm3(0x30),
+                "ShutDown",
+                VisualizationType::Float,
+                true,
+            )],
+        );
+
+        let all = bus.device(ADDR).all_fields().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "ShutDown");
+    }
+
+    /// The event-target space: eventable fields from both the schema and the
+    /// flat probe, in field-index order, each named once.
+    #[test]
+    fn eventable_outputs_are_index_ordered_and_deduplicated() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        let eventable = |index, name| FieldInfo {
+            eventable: true,
+            ..field_info(index, name, VisualizationType::Eventable, true)
+        };
+        seed(
+            &bus,
+            vec![group_info(
+                0,
+                "Relays",
+                Menu::Monitoring,
+                vec![
+                    eventable(field_id::btm1(0x20), "Relay 2"),
+                    field_info(
+                        field_id::btm1(0x05),
+                        "Voltage",
+                        VisualizationType::Float,
+                        false,
+                    ),
+                    eventable(field_id::btm1(0x10), "Relay 1"),
+                ],
+            )],
+        );
+        // The flat probe repeats one of them and adds a third.
+        bus.engine.state.put_all_fields(
+            ADDR,
+            vec![
+                eventable(field_id::btm1(0x10), "Relay 1"),
+                eventable(field_id::btm1(0x30), "Relay 3"),
+            ],
+        );
+
+        assert_eq!(
+            bus.device(ADDR).eventable_outputs(),
+            vec!["Relay 1", "Relay 2", "Relay 3"]
+        );
+    }
+
+    /// Nothing is known about the level until it has been observed; asking
+    /// costs a round trip, and the answer is cached for the render loop.
+    #[test]
+    fn the_access_level_is_cached_only_once_observed() {
+        let mut device = FakeDevice::new();
+        device.level = AccessLevel::Installer;
+        let (bus, _fake) = connect(device, test_config());
+        let d = bus.device(ADDR);
+
+        assert!(d.cached_access_level().is_none());
+        assert_eq!(d.access_level().unwrap(), AccessLevel::Installer);
+        assert_eq!(d.cached_access_level(), Some(AccessLevel::Installer));
+    }
+
+    #[test]
+    fn login_and_logout_go_through_the_handle() {
+        let mut device = FakeDevice::new();
+        device.codes.insert(1, 1234.0);
+        let (bus, fake) = connect(device, test_config());
+        let d = bus.device(ADDR);
+
+        assert_eq!(
+            d.login(AccessLevel::Installer, 1234.0).unwrap(),
+            AccessLevel::Installer
+        );
+        assert_eq!(d.logout().unwrap(), AccessLevel::EndUser);
+        assert_eq!(fake.device.lock().unwrap().level, AccessLevel::EndUser);
+    }
+
+    #[test]
+    fn a_string_write_goes_through_the_handle() {
+        let (bus, fake) = connect(FakeDevice::new(), test_config());
+
+        bus.device(ADDR).write_string(0x0001, "Combi").unwrap();
+        assert_eq!(fake.device.lock().unwrap().strings[&0x0001], "Combi");
+    }
+
+    // ── Group ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_group_exposes_its_name_menu_and_fields() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        seed_default(&bus);
+
+        let group = &bus.device(ADDR).tab(Menu::Monitoring).unwrap()[0];
+        assert_eq!(group.name().unwrap(), "DC");
+        assert_eq!(group.menu().unwrap(), Menu::Monitoring);
+
+        let fields = group.fields().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name().unwrap(), "Voltage");
+    }
+
+    /// A group handle that outlives its schema (or was never in one) reports
+    /// the group as unavailable rather than panicking.
+    #[test]
+    fn an_unknown_group_is_reported_unavailable() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        seed_default(&bus);
+
+        let ghost = Group {
+            engine: bus.engine.clone(),
+            device: ADDR,
+            group_id: 99,
+        };
+        assert!(matches!(ghost.name(), Err(Error::GroupNotAvailable(99))));
+    }
+
+    // ── Field ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_field_accessors_read_the_schema_entry() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        seed_default(&bus);
+
+        let f = bus.device(ADDR).field(field_id::btm1(0x17));
+        assert_eq!(f.index(), field_id::btm1(0x17));
+        assert_eq!(f.name().unwrap(), "Voltage");
+        assert_eq!(f.unit().unwrap(), "V");
+        assert_eq!(f.viz_type().unwrap(), VisualizationType::Float);
+        assert!(f.is_writable().unwrap());
+        assert!(
+            !bus.device(ADDR)
+                .field(field_id::btm1(0x18))
+                .is_writable()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_field_on_a_fully_discovered_device_that_does_not_exist_is_unavailable() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        seed_default(&bus);
+
+        assert!(matches!(
+            bus.device(ADDR).field(field_id::btm1(0x99)).info(),
+            Err(Error::FieldNotAvailable(0x99))
+        ));
+    }
+
+    #[test]
+    fn a_field_reads_its_value_from_the_device() {
+        let device = FakeDevice::new().with_btm1(0x17, 12.5);
+        let (bus, _fake) = connect(device, test_config());
+        seed_default(&bus);
+
+        assert_eq!(
+            bus.device(ADDR)
+                .field(field_id::btm1(0x17))
+                .value()
+                .unwrap(),
+            Value::Float(12.5)
+        );
+    }
+
+    #[test]
+    fn a_write_lands_and_returns_the_observed_value() {
+        let device = FakeDevice::new().with_btm1(0x17, 12.5);
+        let (bus, fake) = connect(device, test_config());
+        seed_default(&bus);
+
+        let observed = bus
+            .device(ADDR)
+            .field(field_id::btm1(0x17))
+            .set(Value::Float(13.2))
+            .unwrap();
+        assert_eq!(observed, Value::Float(13.2));
+        assert_eq!(
+            fake.device.lock().unwrap().btm1[&0x17],
+            13.2f32.to_le_bytes()
+        );
+    }
+
+    /// The three ways `set` refuses before anything reaches the bus: a value
+    /// of the wrong kind, a read-only field, and text the wire cannot carry.
+    #[test]
+    fn a_rejected_write_never_reaches_the_bus() {
+        let (bus, fake) = connect(FakeDevice::new(), test_config());
+        seed_default(&bus);
+        let d = bus.device(ADDR);
+
+        assert!(matches!(
+            d.field(field_id::btm1(0x17)).set(Value::Boolean(true)),
+            Err(Error::WrongType { expected: "Float" })
+        ));
+        assert!(matches!(
+            d.field(field_id::btm1(0x18)).set(Value::Float(1.0)),
+            Err(Error::ReadOnly)
+        ));
+        assert!(matches!(
+            d.field(field_id::btm1(0x01)).set(Value::Text {
+                sid: 1,
+                text: "far too long to fit".into()
+            }),
+            Err(Error::InvalidText { got: 19, .. })
+        ));
+
+        assert!(fake.sent().is_empty());
+    }
+
+    // ── Subscription ────────────────────────────────────────────────────────
+
+    /// A field subscription delivers updates and cancels itself on drop.
+    #[test]
+    fn a_subscription_delivers_and_cancels_on_drop() {
+        let device = FakeDevice::new().with_btm1(0x17, 12.5);
+        let (bus, _fake) = connect(device, test_config());
+        seed_default(&bus);
+
+        let sub = bus
+            .device(ADDR)
+            .field(field_id::btm1(0x17))
+            .subscribe(Duration::from_millis(10), false);
+
+        let update = sub.recv().unwrap();
+        assert_eq!(update.device, ADDR);
+        assert_eq!(update.field, field_id::btm1(0x17));
+        assert_eq!(update.value, Value::Float(12.5));
+        assert!(sub.receiver().recv_timeout(Duration::from_secs(2)).is_ok());
+
+        let rx = sub.receiver().clone();
+        drop(sub);
+        // Drain what was already in flight, then expect silence.
+        while rx.recv_timeout(Duration::from_millis(50)).is_ok() {}
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    /// The bus-level subscription takes several fields at once.
+    #[test]
+    fn a_bus_subscription_covers_several_fields() {
+        let device = FakeDevice::new().with_btm1(0x17, 12.5).with_btm1(0x18, 3.0);
+        let (bus, _fake) = connect(device, test_config());
+        seed_default(&bus);
+
+        let sub = bus.subscribe(
+            ADDR,
+            [field_id::btm1(0x17), field_id::btm1(0x18)],
+            Duration::from_millis(10),
+            false,
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while seen.len() < 2 && Instant::now() < deadline {
+            if let Some(u) = sub.try_recv() {
+                seen.insert(u.field);
+            }
+        }
+        assert_eq!(seen.len(), 2, "expected both fields, saw {seen:?}");
+    }
+
+    /// `eventable_outputs` reads only what discovery has already found, so an
+    /// un-enumerated device has no target space rather than an error.
+    #[test]
+    fn eventable_outputs_are_empty_before_discovery() {
+        let (bus, _fake) = connect(FakeDevice::new(), test_config());
+        assert!(bus.device(ADDR).eventable_outputs().is_empty());
+    }
+
+    /// The full write-type gate, one row per visualization type: what a field
+    /// of that type accepts, and that anything else is refused before a byte
+    /// goes out. The read-only display types accept nothing at all.
+    #[test]
+    fn every_viz_type_has_a_write_rule() {
+        use VisualizationType as V;
+        let list = || Value::List {
+            index: 2,
+            options: vec![],
+        };
+        let eventable = || Value::Eventable {
+            index: 2,
+            labels: vec![],
+        };
+        let device_ref = || Value::DeviceRef {
+            index: 2,
+            device_ids: vec![],
+        };
+        let text = || Value::Text {
+            sid: 1,
+            text: "Combi".into(),
+        };
+
+        let accepted: Vec<(V, Value, WriteValue)> = vec![
+            (V::Float, Value::Float(4.0), WriteValue::Float(4.0)),
+            (V::CheckBox, Value::Boolean(true), WriteValue::Bool(true)),
+            (
+                V::ToggleButton,
+                Value::Boolean(false),
+                WriteValue::Bool(false),
+            ),
+            (V::PushButton, Value::Boolean(true), WriteValue::Bool(true)),
+            (V::Radio, list(), WriteValue::ListIndex(2)),
+            (V::DropDown, list(), WriteValue::ListIndex(2)),
+            (V::EventCommand, list(), WriteValue::ListIndex(2)),
+            (V::Eventable, eventable(), WriteValue::ListIndex(2)),
+            (V::DeviceList, device_ref(), WriteValue::ListIndex(2)),
+            (
+                V::Text,
+                text(),
+                WriteValue::Text {
+                    sid: 1,
+                    text: "Combi".into(),
+                },
+            ),
+        ];
+        for (viz, value, want) in accepted {
+            assert_eq!(
+                write_value_for(viz, value).unwrap(),
+                want,
+                "{viz:?} should accept its own value type"
+            );
+        }
+
+        // Every writable type refuses a value of the wrong kind...
+        for viz in [
+            V::Float,
+            V::CheckBox,
+            V::ToggleButton,
+            V::PushButton,
+            V::Radio,
+            V::DropDown,
+            V::EventCommand,
+            V::Eventable,
+            V::DeviceList,
+            V::Text,
+        ] {
+            let wrong = if matches!(viz, V::Float) {
+                Value::Boolean(true)
+            } else {
+                Value::Float(1.0)
+            };
+            assert!(
+                matches!(write_value_for(viz, wrong), Err(Error::WrongType { .. })),
+                "{viz:?} should reject a mismatched value"
+            );
+        }
+
+        // ...and the display-only types have no write encoding at all.
+        for viz in [V::GrayVisualization, V::Time, V::Date] {
+            assert!(
+                matches!(
+                    write_value_for(viz, Value::Float(1.0)),
+                    Err(Error::WrongType {
+                        expected: "a writable type"
+                    })
+                ),
+                "{viz:?} should not be writable"
+            );
+        }
+    }
 
     #[test]
     fn write_value_matches_schema_type() {

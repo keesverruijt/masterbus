@@ -132,6 +132,12 @@ fn menu_tag(m: Menu) -> String {
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// The parser proper, over an explicit argument list so it can be exercised
+/// without touching the process environment.
+fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut args = Args {
         output: None,
         menus: DEFAULT_MENUS.to_vec(),
@@ -141,7 +147,7 @@ fn parse_args() -> Result<Args, String> {
         pretty: true,
     };
     let mut menus_set = false;
-    let mut it = std::env::args().skip(1);
+    let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => {
@@ -769,5 +775,259 @@ mod tests {
         ] {
             assert_eq!(parse_menu(&menu_tag(m)), Some(m));
         }
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> Result<Args, String> {
+        parse_args_from(argv.iter().map(|s| s.to_string()))
+    }
+
+    /// The message a rejected command line produces.
+    fn err(argv: &[&str]) -> String {
+        match parse(argv) {
+            Err(e) => e,
+            Ok(_) => panic!("expected {argv:?} to be rejected"),
+        }
+    }
+
+    /// With no arguments: the three Btm1 menus, monitoring values only, and
+    /// pretty JSON on stdout. Keeping the default bus load sane is the point
+    /// of `--values monitoring`.
+    #[test]
+    fn the_defaults_are_the_three_btm1_menus_and_monitoring_values() {
+        let a = parse(&[]).unwrap();
+        assert!(a.output.is_none());
+        assert_eq!(a.menus, DEFAULT_MENUS.to_vec());
+        assert!(a.values == ValueMode::Monitoring);
+        assert!(a.devices.is_empty());
+        assert!(!a.probe);
+        assert!(a.pretty);
+    }
+
+    /// The output file can be a flag or a positional, but not both and not
+    /// twice — silently overwriting the wrong file would be worse than an
+    /// error.
+    #[test]
+    fn the_output_file_may_be_a_flag_or_a_positional_but_not_two() {
+        for argv in [
+            vec!["-o", "dump.json"],
+            vec!["--output", "dump.json"],
+            vec!["dump.json"],
+        ] {
+            let a = parse(&argv).unwrap();
+            assert_eq!(a.output, Some(PathBuf::from("dump.json")), "{argv:?}");
+        }
+
+        assert!(parse(&["a.json", "b.json"]).is_err());
+        assert!(parse(&["-o", "a.json", "b.json"]).is_err());
+        assert_eq!(err(&["-o"]), "--output needs a file name");
+    }
+
+    #[test]
+    fn menus_accept_a_list_of_aliases_or_all() {
+        let a = parse(&["--menus", "mon,cfg,svc"]).unwrap();
+        assert_eq!(
+            a.menus,
+            vec![Menu::Monitoring, Menu::Configuration, Menu::Service]
+        );
+
+        let a = parse(&["--menus", "all"]).unwrap();
+        assert_eq!(a.menus.len(), 5);
+        assert!(a.menus.contains(&Menu::Alarm));
+        assert!(a.menus.contains(&Menu::History));
+
+        // Case and stray whitespace don't matter; empty entries are skipped.
+        let a = parse(&["--menus", " Alarm , ,HIST "]).unwrap();
+        assert_eq!(a.menus, vec![Menu::Alarm, Menu::History]);
+    }
+
+    /// A menu list that selects nothing is a mistake, not an empty dump.
+    #[test]
+    fn an_empty_or_unknown_menu_list_is_rejected() {
+        assert_eq!(err(&["--menus", " , "]), "--menus selected nothing");
+        assert_eq!(
+            err(&["--menus", "monitoring,bogus"]),
+            "unknown menu \"bogus\""
+        );
+        assert_eq!(err(&["--menus"]), "--menus needs a value");
+    }
+
+    #[test]
+    fn every_value_mode_is_accepted_by_name() {
+        for (arg, want) in [
+            ("none", ValueMode::None),
+            ("no", ValueMode::None),
+            ("monitoring", ValueMode::Monitoring),
+            ("mon", ValueMode::Monitoring),
+            ("all", ValueMode::All),
+            ("ALL", ValueMode::All),
+        ] {
+            let a = parse(&["--values", arg]).unwrap();
+            assert!(a.values == want, "{arg}");
+        }
+        assert_eq!(err(&["--values", "some"]), "unknown --values mode \"some\"");
+        assert_eq!(err(&["--values"]), "--values needs a value");
+    }
+
+    /// `--device` is repeatable and takes the same hex form the TUI shows,
+    /// with or without the `0x` prefix.
+    #[test]
+    fn devices_are_hex_and_repeatable() {
+        let a = parse(&["--device", "188EA2", "--device", "0x3A3B4B"]).unwrap();
+        assert_eq!(a.devices, vec![0x188EA2, 0x3A3B4B]);
+
+        assert!(parse(&["--device", "zzz"]).is_err());
+        assert_eq!(err(&["--device"]), "--device needs an address");
+    }
+
+    #[test]
+    fn the_boolean_flags_flip_their_defaults() {
+        let a = parse(&["--probe", "--compact"]).unwrap();
+        assert!(a.probe);
+        assert!(!a.pretty);
+    }
+
+    /// An unrecognised option is an error; a bare word is the output file.
+    #[test]
+    fn an_unknown_option_is_rejected() {
+        assert_eq!(err(&["--nope"]), "unknown option \"--nope\"");
+        assert!(parse(&["-x"]).is_err());
+    }
+
+    #[test]
+    fn menus_parse_from_every_documented_alias() {
+        for (s, want) in [
+            ("monitoring", Menu::Monitoring),
+            ("mon", Menu::Monitoring),
+            ("configuration", Menu::Configuration),
+            ("config", Menu::Configuration),
+            ("cfg", Menu::Configuration),
+            ("service", Menu::Service),
+            ("svc", Menu::Service),
+            ("alarm", Menu::Alarm),
+            ("alarms", Menu::Alarm),
+            ("history", Menu::History),
+            ("hist", Menu::History),
+        ] {
+            assert_eq!(parse_menu(s), Some(want), "{s}");
+        }
+        assert_eq!(parse_menu("settings"), None);
+    }
+
+    /// The JSON `menu` tag is the stable name a consumer keys on, including
+    /// for a selector this build has no name for.
+    #[test]
+    fn every_menu_has_a_json_tag() {
+        assert_eq!(menu_tag(Menu::Monitoring), "monitoring");
+        assert_eq!(menu_tag(Menu::Configuration), "configuration");
+        assert_eq!(menu_tag(Menu::Service), "service");
+        assert_eq!(menu_tag(Menu::Alarm), "alarm");
+        assert_eq!(menu_tag(Menu::History), "history");
+        assert_eq!(menu_tag(Menu::Other(0x07)), "other(7)");
+    }
+
+    /// Which menus get their values read. The default reads only monitoring,
+    /// so a dump of every menu doesn't hammer the bus.
+    #[test]
+    fn the_value_mode_decides_which_menus_are_read() {
+        assert!(!ValueMode::None.wants(Menu::Monitoring));
+        assert!(ValueMode::Monitoring.wants(Menu::Monitoring));
+        assert!(!ValueMode::Monitoring.wants(Menu::Configuration));
+        assert!(ValueMode::All.wants(Menu::Monitoring));
+        assert!(ValueMode::All.wants(Menu::History));
+
+        assert_eq!(ValueMode::None.name(), "none");
+        assert_eq!(ValueMode::Monitoring.name(), "monitoring");
+        assert_eq!(ValueMode::All.name(), "all");
+    }
+
+    /// The dump renders values the way the TUI does, so a dump reads like the
+    /// screen — except a device reference, which keeps its hex id because a
+    /// file has no device list to resolve against.
+    #[test]
+    fn values_render_the_way_the_screen_shows_them() {
+        assert_eq!(format_value(&Value::Float(26.3456)), "26.35");
+        assert_eq!(format_value(&Value::Float(f32::NAN)), "—");
+        assert_eq!(format_value(&Value::Boolean(true)), "on");
+        assert_eq!(format_value(&Value::Boolean(false)), "off");
+        assert_eq!(format_value(&Value::Invalid), "invalid");
+        assert_eq!(
+            format_value(&Value::Text {
+                sid: 1,
+                text: "Nav Chg".into()
+            }),
+            "Nav Chg"
+        );
+        assert_eq!(
+            format_value(&Value::List {
+                index: 1,
+                options: vec!["Off".into(), "On".into()]
+            }),
+            "On"
+        );
+        assert_eq!(
+            format_value(&Value::Eventable {
+                index: 4,
+                labels: vec![]
+            }),
+            "[4]"
+        );
+        assert_eq!(
+            format_value(&Value::DeviceRef {
+                index: 0,
+                device_ids: vec![0x188EA2]
+            }),
+            "0x188EA2"
+        );
+        assert_eq!(
+            format_value(&Value::DeviceRef {
+                index: 3,
+                device_ids: vec![]
+            }),
+            "[3]"
+        );
+    }
+
+    #[test]
+    fn date_and_time_sentinels_render_as_a_dash() {
+        use masterbus::{Date, Time};
+        assert_eq!(
+            format_value(&Value::Date(Date {
+                day: -1,
+                mon: -1,
+                year: -1
+            })),
+            "—"
+        );
+        assert_eq!(
+            format_value(&Value::Date(Date {
+                day: 7,
+                mon: 5,
+                year: 2026
+            })),
+            "2026-05-07"
+        );
+        assert_eq!(
+            format_value(&Value::Time(Time {
+                sec: -1,
+                min: 0,
+                hour: 0,
+                days: 0
+            })),
+            "—"
+        );
+        assert_eq!(
+            format_value(&Value::Time(Time {
+                sec: 5,
+                min: 4,
+                hour: 3,
+                days: 2
+            })),
+            "2d 03:04:05"
+        );
     }
 }

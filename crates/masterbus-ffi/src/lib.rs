@@ -519,3 +519,315 @@ pub extern "C" fn mb_free_str(s: *mut c_char) {
         drop(unsafe { CString::from_raw(s) });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use masterbus::{Date, Time};
+
+    /// Read back a `char*` this crate allocated, then free it.
+    fn take(p: *mut c_char) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        mb_free_str(p);
+        Some(s)
+    }
+
+    /// Wrap a value the way the bus entry points do, so the accessors see
+    /// exactly what a C caller would hold.
+    fn value(v: Value) -> *mut MbValue {
+        alloc_value(v)
+    }
+
+    /// NULL is the documented error return, so every accessor has to survive
+    /// being handed one — this is the crate's main safety contract.
+    #[test]
+    fn every_accessor_survives_a_null_value() {
+        let v: *const MbValue = ptr::null();
+        assert!(mb_value_type(v) == MbValueType::Invalid);
+        assert_eq!(mb_value_float(v), 0.0);
+        assert!(!mb_value_bool(v));
+        assert_eq!(mb_value_date(v).day, -1);
+        assert_eq!(mb_value_time(v).sec, -1);
+        assert!(mb_value_text(v).is_null());
+        assert_eq!(mb_value_list_index(v), -1);
+        assert_eq!(mb_value_list_size(v), 0);
+        assert!(mb_value_list_label(v, 0).is_null());
+        assert_eq!(mb_value_device_id(v, 0), 0);
+    }
+
+    /// The freeing functions are no-ops on NULL and on an empty array, so a C
+    /// caller can free unconditionally after an error.
+    #[test]
+    fn the_free_functions_tolerate_null() {
+        mb_free_str(ptr::null_mut());
+        mb_free_value(ptr::null_mut());
+        mb_free_ids(ptr::null_mut(), 0);
+        mb_free_fields(ptr::null_mut(), 0);
+        mb_free_ids(ptr::null_mut(), 5);
+        mb_free_fields(ptr::null_mut(), 5);
+        mb_close(ptr::null_mut());
+    }
+
+    #[test]
+    fn each_value_kind_reports_its_own_discriminant() {
+        let cases = [
+            (Value::Float(1.0), MbValueType::Float),
+            (
+                Value::Date(Date {
+                    day: 1,
+                    mon: 2,
+                    year: 2026,
+                }),
+                MbValueType::Date,
+            ),
+            (
+                Value::Time(Time {
+                    sec: 1,
+                    min: 2,
+                    hour: 3,
+                    days: 4,
+                }),
+                MbValueType::Time,
+            ),
+            (Value::Boolean(true), MbValueType::Boolean),
+            (
+                Value::List {
+                    index: 0,
+                    options: vec![],
+                },
+                MbValueType::List,
+            ),
+            (
+                Value::Text {
+                    sid: 1,
+                    text: String::new(),
+                },
+                MbValueType::Text,
+            ),
+            (
+                Value::DeviceRef {
+                    index: 0,
+                    device_ids: vec![],
+                },
+                MbValueType::DeviceRef,
+            ),
+            (
+                Value::Eventable {
+                    index: 0,
+                    labels: vec![],
+                },
+                MbValueType::Eventable,
+            ),
+            (Value::Invalid, MbValueType::Invalid),
+        ];
+        for (v, want) in cases {
+            let p = value(v);
+            assert!(mb_value_type(p) == want);
+            mb_free_value(p);
+        }
+    }
+
+    /// A payload accessor answers only for its own kind; asking a float for a
+    /// date must give the documented sentinel, not a reinterpreted number.
+    #[test]
+    fn a_payload_accessor_answers_only_for_its_own_kind() {
+        let p = value(Value::Float(12.5));
+        assert_eq!(mb_value_float(p), 12.5);
+        assert!(!mb_value_bool(p));
+        assert_eq!(mb_value_date(p).day, -1);
+        assert_eq!(mb_value_time(p).sec, -1);
+        assert!(mb_value_text(p).is_null());
+        assert_eq!(mb_value_list_index(p), -1);
+        assert_eq!(mb_value_list_size(p), 0);
+        mb_free_value(p);
+
+        let p = value(Value::Boolean(true));
+        assert!(mb_value_bool(p));
+        assert_eq!(mb_value_float(p), 0.0);
+        mb_free_value(p);
+
+        // Boolean false and "not a boolean" are indistinguishable through the
+        // C ABI — mb_value_type is how a caller tells them apart.
+        let p = value(Value::Boolean(false));
+        assert!(!mb_value_bool(p));
+        assert!(mb_value_type(p) == MbValueType::Boolean);
+        mb_free_value(p);
+    }
+
+    #[test]
+    fn dates_and_times_carry_every_component() {
+        let p = value(Value::Date(Date {
+            day: 27,
+            mon: 5,
+            year: 2026,
+        }));
+        let d = mb_value_date(p);
+        assert_eq!((d.day, d.mon, d.year), (27, 5, 2026));
+        mb_free_value(p);
+
+        let p = value(Value::Time(Time {
+            sec: 9,
+            min: 8,
+            hour: 7,
+            days: 6,
+        }));
+        let t = mb_value_time(p);
+        assert_eq!((t.sec, t.min, t.hour, t.days), (9, 8, 7, 6));
+        mb_free_value(p);
+    }
+
+    #[test]
+    fn a_list_exposes_its_index_size_and_labels() {
+        let p = value(Value::List {
+            index: 1,
+            options: vec!["Off".into(), "On".into()],
+        });
+        assert_eq!(mb_value_list_index(p), 1);
+        assert_eq!(mb_value_list_size(p), 2);
+        assert_eq!(take(mb_value_list_label(p, 0)).as_deref(), Some("Off"));
+        assert_eq!(take(mb_value_list_label(p, 1)).as_deref(), Some("On"));
+        // Out of range is NULL, not a panic across the ABI boundary.
+        assert!(mb_value_list_label(p, 2).is_null());
+        assert!(mb_value_list_label(p, -1).is_null());
+        mb_free_value(p);
+    }
+
+    /// Eventable and device-ref values share the index accessor but each has
+    /// its own notion of "entries".
+    #[test]
+    fn eventable_and_device_ref_values_share_the_index_accessor() {
+        let p = value(Value::Eventable {
+            index: 2,
+            labels: vec!["Relay 1".into(), "Relay 2".into(), "Relay 3".into()],
+        });
+        assert_eq!(mb_value_list_index(p), 2);
+        assert_eq!(mb_value_list_size(p), 3);
+        assert_eq!(take(mb_value_list_label(p, 2)).as_deref(), Some("Relay 3"));
+        assert_eq!(mb_value_device_id(p, 0), 0);
+        mb_free_value(p);
+
+        let p = value(Value::DeviceRef {
+            index: 1,
+            device_ids: vec![0x188EA2, 0x3A3B4B],
+        });
+        assert_eq!(mb_value_list_index(p), 1);
+        assert_eq!(mb_value_list_size(p), 2);
+        assert_eq!(mb_value_device_id(p, 1), 0x3A3B4B);
+        // Out of range yields 0 — there is no device 0 on a MasterBus.
+        assert_eq!(mb_value_device_id(p, 9), 0);
+        // A device ref has ids, not labels.
+        assert!(mb_value_list_label(p, 0).is_null());
+        mb_free_value(p);
+    }
+
+    #[test]
+    fn text_values_cross_the_boundary_as_c_strings() {
+        let p = value(Value::Text {
+            sid: 1,
+            text: "NavigationCh".into(),
+        });
+        assert_eq!(take(mb_value_text(p)).as_deref(), Some("NavigationCh"));
+        mb_free_value(p);
+    }
+
+    /// A Rust string may contain an interior NUL; a C string may not. The
+    /// conversion refuses rather than truncating silently.
+    #[test]
+    fn a_string_with_an_interior_nul_becomes_null() {
+        let p = value(Value::Text {
+            sid: 1,
+            text: "Nav\0Chg".into(),
+        });
+        assert!(mb_value_text(p).is_null());
+        mb_free_value(p);
+
+        // ...while an ordinary string converts and frees cleanly.
+        assert_eq!(take(to_cstr("ok".into())).as_deref(), Some("ok"));
+        assert!(to_cstr("bad\0".into()).is_null());
+    }
+
+    /// Every bus entry point returns its documented error value for a NULL
+    /// handle, without dereferencing it.
+    #[test]
+    fn a_null_bus_fails_every_entry_point() {
+        let bus: *mut MbBus = ptr::null_mut();
+        let mut ids: *mut u32 = ptr::null_mut();
+        let mut fields: *mut i32 = ptr::null_mut();
+
+        assert_eq!(mb_devices(bus, &mut ids), -1);
+        assert_eq!(mb_group_count(bus, 1), -1);
+        assert_eq!(mb_group_fields(bus, 1, 0, &mut fields), -1);
+        assert!(mb_group_name(bus, 1, 0).is_null());
+        assert!(mb_device_name(bus, 1).is_null());
+        assert!(mb_device_article(bus, 1).is_null());
+        assert!(mb_device_serial(bus, 1).is_null());
+        assert!(mb_device_revision(bus, 1).is_null());
+        assert!(mb_device_firmware(bus, 1).is_null());
+        assert!(mb_device_status(bus, 1) == MbStatus::Unknown);
+        assert!(mb_field_name(bus, 1, 0).is_null());
+        assert!(mb_field_unit(bus, 1, 0).is_null());
+        assert!(!mb_field_writable(bus, 1, 0));
+        assert!(mb_field_value(bus, 1, 0).is_null());
+        assert!(mb_set_bool(bus, 1, 0, true).is_null());
+        assert!(mb_set_float(bus, 1, 0, 1.0).is_null());
+    }
+
+    /// A NULL out-param is refused too: the array functions must not write
+    /// through it before checking.
+    #[test]
+    fn a_null_out_parameter_is_refused() {
+        let bus: *mut MbBus = ptr::null_mut();
+        assert_eq!(mb_devices(bus, ptr::null_mut()), -1);
+        assert_eq!(mb_group_fields(bus, 1, 0, ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn opening_a_bus_rejects_a_null_interface_name() {
+        assert!(mb_open_socketcan(ptr::null(), ptr::null()).is_null());
+    }
+
+    /// SocketCAN is Linux-only; elsewhere the entry point exists (so the ABI
+    /// is identical everywhere) but always fails.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn socketcan_is_unavailable_off_linux() {
+        let iface = CString::new("can0").unwrap();
+        assert!(mb_open_socketcan(iface.as_ptr(), ptr::null()).is_null());
+    }
+
+    #[test]
+    fn borrowed_c_strings_are_optional_and_utf8_checked() {
+        assert_eq!(opt_str(ptr::null()), None);
+        let ok = CString::new("can0").unwrap();
+        assert_eq!(opt_str(ok.as_ptr()), Some("can0"));
+        // Invalid UTF-8 is treated as absent rather than lossily accepted.
+        let bad = CString::new([0xFFu8, 0xFE]).unwrap();
+        assert_eq!(opt_str(bad.as_ptr()), None);
+    }
+
+    /// The array helpers hand out a pointer plus a length that the matching
+    /// free function accepts back.
+    #[test]
+    fn allocated_arrays_round_trip_through_their_free_function() {
+        let (ids, len) = alloc_slice(vec![0x188EA2u32, 0x3A3B4B]);
+        assert_eq!(len, 2);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(ids, len as usize) },
+            [0x188EA2, 0x3A3B4B]
+        );
+        mb_free_ids(ids, len);
+
+        let (fields, len) = alloc_slice(vec![0x17i32, 0x118]);
+        assert_eq!(len, 2);
+        assert_eq!(unsafe { *fields.add(1) }, 0x118);
+        mb_free_fields(fields, len);
+
+        // An empty allocation is still a valid (dangling but non-null) pointer.
+        let (empty, len) = alloc_slice(Vec::<u32>::new());
+        assert_eq!(len, 0);
+        mb_free_ids(empty, len);
+    }
+}
