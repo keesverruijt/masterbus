@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **A fake-bus test harness, and workspace coverage from 38% to 83%.** Below
+  the pure-logic modules the engine had no tests at all: the scheduler, the
+  reader, the shared device state and the whole discovery path were at 0%, as
+  were the C ABI and three of the four tools. What was missing was a way to
+  run the real threads without a real bus. `runtime/fakebus.rs` (test-only) is
+  a scriptable MasterBus device — it announces itself, answers login, values
+  and string chunks, and, once given groups and fields, schema and per-field
+  metadata too — wired to the `Transport` trait, so a test drives the actual
+  reader and scheduler threads over a loopback bus and asserts both on the
+  frames transmitted and on what the engine concluded. The tools crate builds
+  a smaller one against the same public trait. That covers the protocol paths
+  that previously could only be checked against hardware: the commit token a
+  relay-style boolean write needs, Btm3 reads and writes on the shadow
+  address, the access-level login dropping the cached schema, probe-and-stop
+  on the Alarm gid namespace, the disk cache's keying, and the TUI's
+  navigation, editor and rendering. 158 → 345 tests, still well under a
+  second.
+- **`make coverage`** (and `make coverage-html` for the line-by-line report),
+  which need `cargo-llvm-cov` and the `llvm-tools` component. Note a macOS run
+  omits the Linux-only SocketCAN transport entirely, so it reads higher than
+  the same tree measured on Linux.
+
 ## [0.3.5] - 2026-09-16
 
 ### Changed
