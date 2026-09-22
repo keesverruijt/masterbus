@@ -292,11 +292,21 @@ struct Options {
     transport: String,
 }
 
-/// Walk the bus and collect every device's monitoring fields.
-fn discover(bus: &MasterBus) -> Vec<DeviceRec> {
+/// Walk the bus and collect every device's monitoring fields, adding each
+/// to `shared` as it is done. From a cold cache a big bus takes a minute or
+/// more, and the API (and the plugin's editor behind it) should show the
+/// devices as they arrive rather than nothing until the last one.
+fn discover(bus: &MasterBus, shared: &Shared) {
     let mut devices = bus.devices_all();
     devices.sort_by_key(|d| d.id());
-    devices.iter().map(DeviceRec::discover).collect()
+    for dev in &devices {
+        let rec = DeviceRec::discover(dev);
+        let mut list = shared.devices.lock().unwrap();
+        if !list.iter().any(|d| d.id == rec.id) {
+            list.push(rec);
+            list.sort_by_key(|d| d.id);
+        }
+    }
 }
 
 fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
@@ -388,7 +398,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
     );
     let _ = std::io::stdout().flush();
 
-    *shared.devices.lock().unwrap() = discover(&bus);
+    discover(&bus, &shared);
 
     // Load the curated mapping; seed one on first run so there is something to
     // publish and, more importantly, something to edit.
