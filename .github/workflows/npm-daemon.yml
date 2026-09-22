@@ -1,0 +1,88 @@
+# Publish `masterbus-signalk` as per-platform npm packages,
+# `signalk-masterbus-daemon-<os>-<arch>`, which the Signal K plugin
+# (signalk-masterbus) lists as optionalDependencies so npm installs only
+# the one matching the host. Runs on the same tags as build.yml and reuses
+# its artifacts, so the binary in the npm package is byte-for-byte the one
+# in the release tarball.
+name: npm-daemon
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl,      os: linux,  arch: x64,   exe: masterbus-signalk }
+          - { target: aarch64-unknown-linux-musl,     os: linux,  arch: arm64, exe: masterbus-signalk }
+          - { target: armv7-unknown-linux-musleabihf, os: linux,  arch: arm,   exe: masterbus-signalk }
+          - { target: x86_64-apple-darwin,            os: darwin, arch: x64,   exe: masterbus-signalk }
+          - { target: aarch64-apple-darwin,           os: darwin, arch: arm64, exe: masterbus-signalk }
+          - { target: x86_64-pc-windows-msvc,         os: win32,  arch: x64,   exe: masterbus-signalk.exe }
+    steps:
+      - uses: actions/checkout@v4
+
+      # The binary built by build.yml for this tag. `gh run download` needs
+      # the run id of the build workflow on the same commit.
+      - name: Fetch the build artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            run=$(gh run list --workflow build.yml --commit "$GITHUB_SHA" --json databaseId,status,conclusion \
+                  --jq '.[] | select(.status=="completed") | .databaseId' | head -1)
+            if [ -n "$run" ]; then break; fi
+            echo "waiting for build.yml on $GITHUB_SHA…"; sleep 30
+          done
+          [ -n "$run" ] || { echo "no completed build run for $GITHUB_SHA"; exit 1; }
+          gh run download "$run" --name "masterbus-${{ matrix.target }}" --dir dist
+          ls -l dist
+
+      - name: Assemble the package
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          name="signalk-masterbus-daemon-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p pkg
+          cp "dist/${{ matrix.exe }}" pkg/
+          chmod +x "pkg/${{ matrix.exe }}"
+          cp LICENSE pkg/
+          cat > pkg/package.json <<EOF
+          {
+            "name": "$name",
+            "version": "$version",
+            "description": "masterbus-signalk daemon binary for ${{ matrix.os }}/${{ matrix.arch }}, used by the signalk-masterbus plugin",
+            "repository": { "type": "git", "url": "git+https://github.com/keesverruijt/masterbus.git" },
+            "license": "Apache-2.0",
+            "os": ["${{ matrix.os }}"],
+            "cpu": ["${{ matrix.arch }}"],
+            "files": ["${{ matrix.exe }}", "LICENSE"]
+          }
+          EOF
+          cat > pkg/README.md <<EOF
+          # $name
+
+          The \`masterbus-signalk\` daemon for ${{ matrix.os }}/${{ matrix.arch }}, as built
+          for masterbus $version. Installed automatically by the
+          [signalk-masterbus](https://www.npmjs.com/package/signalk-masterbus) plugin;
+          not meant to be depended on directly. See
+          https://github.com/keesverruijt/masterbus.
+          EOF
+          cat pkg/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish
+        run: cd pkg && npm publish --provenance --access public

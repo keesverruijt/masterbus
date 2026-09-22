@@ -69,7 +69,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Subscription, Value};
+use masterbus::{Config, DeviceId, FieldId, MasterBus, Subscription, Value};
 use masterbus_tools::api::{self, Info, Shared};
 use masterbus_tools::mapping::{Mapping, NotifyState};
 use masterbus_tools::publish::{self, DeviceRec, Emit};
@@ -637,33 +637,6 @@ fn notification(
     Some((path, signalk::notification_value(&e.device, label, state)))
 }
 
-/// A mapping that names a field the device record has not discovered yet is
-/// most likely pointing at a Configuration setting (a PUT target). Discover
-/// that menu once per device before resolving, so the entry can be honoured
-/// rather than reported as "no such field".
-fn ensure_menus(bus: &MasterBus, devices: &mut [DeviceRec], mapping: &Mapping) {
-    for d in devices.iter_mut() {
-        if d.menus.contains(&Menu::Configuration) || publish::unknown_fields(d, mapping).is_empty()
-        {
-            continue;
-        }
-        match bus.device(d.id).tab_info(Menu::Configuration) {
-            Ok(groups) => {
-                eprintln!(
-                    "masterbus-signalk: {} ({}): mapping names a field outside Monitoring; \
-                     discovered its Configuration menu",
-                    d.name, d.serial
-                );
-                d.merge_groups(Menu::Configuration, groups);
-            }
-            Err(e) => eprintln!(
-                "masterbus-signalk: {} ({}): could not discover Configuration: {e}",
-                d.name, d.serial
-            ),
-        }
-    }
-}
-
 /// Resolve the mapping against the bus, subscribe to what it names, and
 /// (re)publish the static per-device metadata.
 fn activate(
@@ -673,8 +646,8 @@ fn activate(
     static_batch: &Mutex<Vec<u8>>,
 ) -> Active {
     let mapping = shared.mapping.lock().unwrap().clone();
-    let mut devices = shared.devices.lock().unwrap();
-    ensure_menus(bus, &mut devices, &mapping);
+    shared.ensure_menus(&mapping);
+    let devices = shared.devices.lock().unwrap();
     let resolved = publish::resolve(&devices, &mapping);
     for d in &resolved.diagnostics {
         eprintln!("masterbus-signalk: {d}");

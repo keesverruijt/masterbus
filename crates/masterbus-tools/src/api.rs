@@ -118,10 +118,47 @@ impl Shared {
         }
     }
 
+    /// A mapping that names a field a device record has not discovered yet
+    /// is most likely pointing at a Configuration setting (a PUT target).
+    /// Discover that menu once per device, so the entry can be honoured
+    /// rather than reported as "no such field". Bus access happens outside
+    /// the lock; a device that will not enumerate is logged and left alone.
+    pub fn ensure_menus(&self, mapping: &Mapping) {
+        let wanted: Vec<(DeviceId, String, String)> = self
+            .devices
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| {
+                !d.menus.contains(&Menu::Configuration)
+                    && !publish::unknown_fields(d, mapping).is_empty()
+            })
+            .map(|d| (d.id, d.name.clone(), d.serial.clone()))
+            .collect();
+        for (id, name, serial) in wanted {
+            match self.bus.discover_menu(id, Menu::Configuration) {
+                Ok(groups) => {
+                    eprintln!(
+                        "masterbus-signalk: {name} ({serial}): mapping names a field outside \
+                         Monitoring; discovered its Configuration menu"
+                    );
+                    let mut devices = self.devices.lock().unwrap();
+                    if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                        d.merge_groups(Menu::Configuration, groups);
+                    }
+                }
+                Err(e) => eprintln!(
+                    "masterbus-signalk: {name} ({serial}): could not discover Configuration: {e}"
+                ),
+            }
+        }
+    }
+
     /// Put a new mapping in force: persist, replace, re-resolve, tell the
     /// daemon. Returns what resolving it had to say.
     fn adopt(&self, m: Mapping) -> Result<publish::Resolved, String> {
         self.persist(&m)?;
+        self.ensure_menus(&m);
         let resolved = {
             let devices = self.devices.lock().unwrap();
             publish::resolve(&devices, &m)
@@ -1046,6 +1083,58 @@ mod tests {
             get(&shared, "/api/devices/MLI-1/fields/0x002/value").status,
             502
         );
+    }
+
+    /// A mapping naming a field outside Monitoring (a PUT target on
+    /// Configuration) has that menu discovered before it is resolved, so
+    /// the answer does not claim "no such field" for a field the device has.
+    #[test]
+    fn adopting_a_mapping_discovers_the_menu_a_put_target_lives_on() {
+        let devices = vec![mli()];
+        let id = devices[0].id;
+        let (bus, state) = StubBus::new(0.0);
+        state.menus.lock().unwrap().insert(
+            (id, Menu::Configuration),
+            vec![GroupInfo {
+                id: 9,
+                name: "Relay".into(),
+                menu: Menu::Configuration,
+                fields: vec![masterbus::FieldInfo {
+                    index: 0x040,
+                    name: "Relay".into(),
+                    unit: String::new(),
+                    viz_type: masterbus::VisualizationType::CheckBox,
+                    writeable: true,
+                    eventable: false,
+                    min: 0.0,
+                    max: 1.0,
+                    step: 1.0,
+                    options: vec![],
+                }],
+            }],
+        );
+        let (shared, _) = shared_with(bus, devices, Mapping::new());
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        dm.fields.insert(
+            field_key(0x040),
+            FieldMapping {
+                path: "electrical.switches.relay.state".into(),
+                put: true,
+                ..Default::default()
+            },
+        );
+        m.devices.insert("MLI-1".into(), dm);
+        let r = send(&shared, "PUT", "/api/mapping", json!(m));
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["streaming"], 1);
+        assert_eq!(r.body["diagnostics"], json!([]));
+        assert_eq!(*state.discoveries.lock().unwrap(), 1);
+        let d = get(&shared, "/api/devices/MLI-1").body;
+        assert_eq!(d["menus"], json!(["monitoring", "configuration"]));
+        // Adopting again does not discover again.
+        send(&shared, "PUT", "/api/mapping", json!(m));
+        assert_eq!(*state.discoveries.lock().unwrap(), 1);
     }
 
     /// Adopting a mapping over the API persists it, re-resolves it against
