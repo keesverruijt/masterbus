@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-22
+
 ### Fixed
 - **0.4.0 did not build on Linux.** The `FileConfig` literal in the
   SocketCAN auto-detect path, which only compiles on Linux, missed the two
