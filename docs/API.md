@@ -240,10 +240,19 @@ or
 { "ok": false, "refusal": { "kind": "units", "message": "\"A\" cannot be converted to the K this leaf expects", "labels": [] } }
 ```
 
-`kind` is `units`, `truth` (a boolean leaf needs a truth table for the
-listed `labels`) or `empty`. `warnings` are things the daemon would say at
-activation but still publish: a unit it cannot convert, three or more labels
-onto a boolean leaf, a `put` on a field that is read-only right now.
+`kind` is `path` (not a Signal K path a value can go to: a prefix such as
+`electrical.`, a malformed segment, or too few segments for its branch),
+`units`, `truth` (a boolean leaf needs a truth table for the listed
+`labels`) or `empty`. A `truth` refusal also carries `truthPartial`, the
+labels whose meaning is conventional (`{"Standby": false, "On": true}`) so
+an editor can pre-fill them and ask only for the rest, and, for three or
+more labels, a `hint` naming the string leaf that would keep them all.
+`warnings` are things the daemon would say at activation but still publish:
+a unit it cannot convert, three or more labels onto a boolean leaf, a `put`
+on a field that is read-only right now.
+
+The same path check applies when a mapping is activated: an entry with a
+path that fails it is skipped with an `error` diagnostic.
 
 ### `POST /api/mapping/apply-article`
 

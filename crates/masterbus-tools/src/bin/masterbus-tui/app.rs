@@ -1189,14 +1189,7 @@ impl PathEditor {
     /// The spec's string mode leaf for the path's category, to suggest instead
     /// of a lossy boolean.
     pub fn mode_leaf(&self) -> &'static str {
-        let p = self.buf.trim();
-        if p.starts_with("electrical.inverters.") {
-            "inverterMode"
-        } else if p.starts_with("electrical.chargers.") || p.starts_with("electrical.solar.") {
-            "chargingMode"
-        } else {
-            "a mode leaf"
-        }
+        signalk::mode_leaf(&self.buf)
     }
 
     /// Whether the truth table names every label.

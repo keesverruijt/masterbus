@@ -101,9 +101,79 @@ pub struct Plan {
     pub warning: Option<String>,
 }
 
+/// Whether a path is a Signal K path at all: dotted, every segment
+/// non-empty and made of letters, digits, `-` or `_`, and deep enough for
+/// its branch to hold a leaf. The editor pre-fills `electrical.` and the
+/// node of a sibling path as a prefix to type after, and neither is a place
+/// a value can go.
+pub fn check_path(path: &str) -> Result<(), String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("no path".into());
+    }
+    if p.chars().any(char::is_whitespace) {
+        return Err("a path cannot contain spaces".into());
+    }
+    let seg: Vec<&str> = p.split('.').collect();
+    if seg.iter().any(|s| s.is_empty()) {
+        return Err(if p.ends_with('.') {
+            format!("{p:?} is a prefix; add the leaf (e.g. voltage)")
+        } else {
+            "empty path segment".into()
+        });
+    }
+    if let Some(bad) = seg.iter().find(|s| {
+        !s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }) {
+        return Err(format!(
+            "{bad:?} is not a valid path segment (letters, digits, - and _)"
+        ));
+    }
+    // A branch with per-device nodes needs the node and a leaf below it.
+    let need = match seg[0] {
+        "electrical" | "tanks" => 4,
+        "propulsion" | "sails" => 3,
+        _ => 2,
+    };
+    if seg.len() < need {
+        return Err(format!(
+            "{p:?} is too short: {} needs at least {need} segments, e.g. {}",
+            seg[0],
+            match seg[0] {
+                "electrical" => "electrical.batteries.house.voltage",
+                "tanks" => "tanks.fuel.main.currentLevel",
+                "propulsion" => "propulsion.main.revolutions",
+                "sails" => "sails.inventory.main.area",
+                _ => "environment.inside.temperature",
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// The string leaf that keeps every label of an enum which does not fit a
+/// boolean: what the editor steers towards when three labels are about to
+/// be squeezed into `enabled`.
+pub fn mode_leaf(path: &str) -> &'static str {
+    let p = path.trim();
+    if p.starts_with("electrical.inverters.") {
+        "inverterMode"
+    } else if p.starts_with("electrical.chargers.") || p.starts_with("electrical.solar.") {
+        "chargingMode"
+    } else {
+        "a mode leaf"
+    }
+}
+
 /// Why a mapping entry cannot be published as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
+    /// The path is not a Signal K path a value can be published to.
+    Path {
+        /// What is wrong with it.
+        reason: String,
+    },
     /// The device unit cannot reach the unit the leaf is documented to want.
     Units {
         /// The device unit, normalised.
@@ -122,6 +192,7 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Refusal::Path { reason } => write!(f, "{reason}"),
             Refusal::Units { device, leaf } => {
                 write!(
                     f,
@@ -160,6 +231,7 @@ pub fn plan(
     options: &[String],
     entry: &FieldMapping,
 ) -> Result<Plan, Refusal> {
+    check_path(path).map_err(|reason| Refusal::Path { reason })?;
     let dev = units::normalize(device_unit);
     let leaf = leaf_unit(path);
     let si = units::to_si(device_unit);
@@ -504,6 +576,41 @@ mod tests {
     use super::*;
     use crate::units::conversion;
     use masterbus::value::Time;
+
+    /// The editor pre-fills a prefix to type after; saving the prefix
+    /// itself, or anything else that is not a path, is refused up front.
+    #[test]
+    fn a_prefix_or_a_malformed_path_is_refused() {
+        for bad in [
+            "",
+            "electrical.",
+            "electrical",
+            "electrical.batteries",
+            "a b.c",
+            "a..b",
+            "x.y/z",
+        ] {
+            let e = plan(bad, "V", &[], &FieldMapping::default()).unwrap_err();
+            assert!(matches!(e, Refusal::Path { .. }), "{bad:?} gave {e:?}");
+        }
+        assert!(check_path("electrical.").unwrap_err().contains("prefix"));
+        assert!(
+            check_path("electrical.batteries")
+                .unwrap_err()
+                .contains("at least 4")
+        );
+        for ok in [
+            "electrical.batteries.house.voltage",
+            "propulsion.main.revolutions",
+            "environment.inside.temperature",
+            "electrical.switches.bilge_pump-1.state",
+        ] {
+            assert_eq!(check_path(ok), Ok(()), "{ok}");
+        }
+        assert_eq!(mode_leaf("electrical.inverters.x.enabled"), "inverterMode");
+        assert_eq!(mode_leaf("electrical.solar.x.enabled"), "chargingMode");
+        assert_eq!(mode_leaf("electrical.switches.x.state"), "a mode leaf");
+    }
 
     fn list(labels: &[&str]) -> Value {
         Value::List {

@@ -668,8 +668,9 @@ fn validate(shared: &Shared, body: &[u8]) -> Response {
             let mut warnings: Vec<String> = p.warning.iter().cloned().collect();
             if f.options.len() > 2 && signalk::leaf_is_boolean(path) {
                 warnings.push(format!(
-                    "{} labels onto a boolean leaf loses information; a mode leaf keeps them all",
-                    f.options.len()
+                    "{} labels onto a boolean leaf loses information; {} (a string) keeps them all",
+                    f.options.len(),
+                    signalk::mode_leaf(path)
                 ));
             }
             if b.entry.put && !f.writable {
@@ -688,12 +689,28 @@ fn validate(shared: &Shared, body: &[u8]) -> Response {
         }
         Err(e) => {
             let (kind, labels) = match &e {
+                signalk::Refusal::Path { .. } => ("path", Vec::new()),
                 signalk::Refusal::Units { .. } => ("units", Vec::new()),
                 signalk::Refusal::Truth { labels } => ("truth", labels.clone()),
             };
+            // For a truth refusal, what the conventional label meanings can
+            // already say, so the editor pre-fills those and asks for the rest.
+            let partial: BTreeMap<&str, bool> = labels
+                .iter()
+                .filter_map(|l| signalk::truth_of_label(l).map(|b| (l.as_str(), b)))
+                .collect();
+            let hint = match &e {
+                signalk::Refusal::Truth { .. } if f.options.len() > 2 => Some(format!(
+                    "{} labels onto a boolean leaf loses information; {} (a string) keeps them all",
+                    f.options.len(),
+                    signalk::mode_leaf(path)
+                )),
+                _ => None,
+            };
             Response::ok(json!({
                 "ok": false,
-                "refusal": { "kind": kind, "message": e.to_string(), "labels": labels },
+                "refusal": { "kind": kind, "message": e.to_string(), "labels": labels,
+                             "truthPartial": partial, "hint": hint },
             }))
         }
     }
@@ -1353,6 +1370,30 @@ mod tests {
         let r = v("0x005", json!({"path": "  "}));
         assert_eq!(r.body["ok"], false);
         assert_eq!(r.body["refusal"]["kind"], "empty");
+        // A prefix, as the editor pre-fills it, is not a path.
+        let r = v("0x005", json!({"path": "electrical."}));
+        assert_eq!(r.body["ok"], false);
+        assert_eq!(r.body["refusal"]["kind"], "path");
+        assert!(
+            r.body["refusal"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("prefix")
+        );
+        // A truth refusal says what the conventions already know, and steers
+        // three labels towards the mode leaf.
+        let r = v("0x010", json!({"path": "electrical.inverters.x.enabled"}));
+        assert_eq!(r.body["refusal"]["kind"], "truth");
+        assert_eq!(
+            r.body["refusal"]["truthPartial"],
+            json!({"Standby": false, "On": true})
+        );
+        assert!(
+            r.body["refusal"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("inverterMode")
+        );
     }
 
     #[test]
