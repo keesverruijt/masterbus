@@ -33,6 +33,26 @@ use crate::value::{Value, WriteValue};
 /// next device-side push or write-ack delivers, and pushes are observed at
 /// ~2 s intervals on the reference bus, so a single read after discovery
 /// can wait that long.
+/// How many extra read-backs a write gets when the first one does not show
+/// the written value, and how long to wait between them. About a second in
+/// all: the CombiMaster's relays flip within a few hundred milliseconds.
+const WRITE_SETTLE_POLLS: u32 = 5;
+const WRITE_SETTLE_WAIT: Duration = Duration::from_millis(200);
+
+/// Whether a read-back shows the value that was written. Floats compare
+/// loosely, because a device may round to its own step.
+fn write_took_effect(written: &WriteValue, observed: &Value) -> bool {
+    match (written, observed) {
+        (WriteValue::Bool(b), Value::Boolean(o)) => b == o,
+        (WriteValue::Float(f), Value::Float(o)) => (f - o).abs() <= 1e-3 * f.abs().max(1.0),
+        (WriteValue::ListIndex(i), Value::List { index, .. })
+        | (WriteValue::ListIndex(i), Value::Eventable { index, .. }) => i == index,
+        (WriteValue::Text { text, .. }, Value::Text { text: o, .. }) => text == o,
+        // A kind mismatch is not something more polling will change.
+        _ => true,
+    }
+}
+
 const VALUE_READ_TIMEOUT_BTM1: Duration = Duration::from_millis(500);
 const VALUE_READ_TIMEOUT_BTM3: Duration = Duration::from_millis(2500);
 
@@ -493,9 +513,28 @@ impl Sched {
         self.state.mark_outdated(addr, field);
         // Confirm by observing the resulting value. On Btm1 the echo on class
         // 0x08 lands within tens of ms; on Btm3 the ack on class 0x0B lands
-        // within ~10 ms.
+        // within ~10 ms. A relay-style control (the CombiMaster's inverter
+        // and charger) answers that first read with the *old* value and moves
+        // a moment later, so when the read-back does not show what was
+        // written, look again a few times before reporting it; a caller
+        // that gets `Boolean(false)` back from a successful `true` cannot
+        // tell it from a refused write.
         let viz = self.viz_of(addr, field)?;
-        let result = self.poll_value(addr, field, viz);
+        let mut result = self.poll_value(addr, field, viz);
+        for attempt in 1..=WRITE_SETTLE_POLLS {
+            match &result {
+                Ok(v) if !write_took_effect(&value, v) => {
+                    log::debug!(
+                        target: "masterbus::write",
+                        "  read-back {v:?} does not show the write yet; poll {attempt}/{WRITE_SETTLE_POLLS}",
+                    );
+                    std::thread::sleep(WRITE_SETTLE_WAIT);
+                    self.state.mark_outdated(addr, field);
+                    result = self.poll_value(addr, field, viz);
+                }
+                _ => break,
+            }
+        }
         match &result {
             Ok(v) => log::info!(
                 target: "masterbus::write",
@@ -848,6 +887,72 @@ mod tests {
                 vec![0x14, 0x00, 0x14, 0x9F, 0x3C, 0x02],
             ]
         );
+    }
+
+    /// The CombiMaster answers the read-back straight after a relay-style
+    /// write with the old value and flips a moment later. The write keeps
+    /// looking until it sees the new value, so the caller is told the truth.
+    #[test]
+    fn a_slow_relay_is_read_again_until_the_write_shows() {
+        let device = Device::new().with_settle_reads(2);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x15);
+        seed_schema(
+            &engine,
+            vec![
+                field(f, "Charger", VisualizationType::CheckBox),
+                field(f + 1, "", VisualizationType::Float),
+            ],
+        );
+        let t = std::time::Instant::now();
+        assert_eq!(
+            engine.write(ADDR, f, WriteValue::Bool(true)).unwrap(),
+            Value::Boolean(true)
+        );
+        // First read-back showed the old value, the third the new one.
+        let reads = bus
+            .sent_class(can_class::MONITORING_REQ)
+            .into_iter()
+            .filter(|(_, d)| d.len() == 2 && d[0] == 0x15)
+            .count();
+        assert_eq!(reads, 3, "one confirm plus two re-reads");
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A device that never shows the write gets a bounded number of looks,
+    /// and the caller is told what was actually observed.
+    #[test]
+    fn a_write_that_never_shows_is_reported_as_observed() {
+        let device = Device::new().with_settle_reads(100);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x15);
+        seed_schema(
+            &engine,
+            vec![
+                field(f, "Charger", VisualizationType::CheckBox),
+                field(f + 1, "", VisualizationType::Float),
+            ],
+        );
+        let t = std::time::Instant::now();
+        assert_eq!(
+            engine.write(ADDR, f, WriteValue::Bool(true)).unwrap(),
+            Value::Boolean(false)
+        );
+        let reads = bus
+            .sent_class(can_class::MONITORING_REQ)
+            .into_iter()
+            .filter(|(_, d)| d.len() == 2 && d[0] == 0x15)
+            .count();
+        assert_eq!(reads as u32, 1 + WRITE_SETTLE_POLLS);
+        assert!(t.elapsed() < Duration::from_secs(3));
+        assert!(write_took_effect(
+            &WriteValue::Float(6.0),
+            &Value::Float(6.0004)
+        ));
+        assert!(!write_took_effect(
+            &WriteValue::Float(6.0),
+            &Value::Float(5.0)
+        ));
     }
 
     /// If a *named*, user-facing field occupies the commit slot, the write is

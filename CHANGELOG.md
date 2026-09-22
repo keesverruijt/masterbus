@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A write to a slow relay reported the old value.** The CombiMaster's
+  inverter and charger answer the read-back straight after the commit
+  token with the value they still have and flip a moment later, so
+  `Field::set`, `masterbus-set-field` and the daemon's write API all
+  reported a successful `true` as `false`, indistinguishable from a
+  refused write. When the read-back does not show what was written, the
+  engine now looks again, up to five times 200 ms apart, and reports what
+  it finally sees.
+
 ## [0.4.1] - 2026-09-22
 
 ### Fixed

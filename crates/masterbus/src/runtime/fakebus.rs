@@ -100,6 +100,13 @@ pub struct Device {
     /// Wire indices the device refuses to answer a value read for, on either
     /// channel — the silent-field case a real bus produces under load.
     pub mute: Vec<u8>,
+    /// How many value reads a Btm1 write sits pending for before it takes
+    /// effect. Zero applies at once. A CombiMaster's relay-style booleans
+    /// still read the old value on the read-back straight after the commit
+    /// token and flip a moment later; this is that.
+    pub settle_reads: u8,
+    /// Btm1 writes waiting to take effect: wire index → (value, reads left).
+    pub pending_btm1: HashMap<u8, ([u8; 4], u8)>,
     /// Stop announcing (the device has dropped off the bus).
     pub quiet: bool,
     /// Group counts by `[0x08, selector]` selector byte.
@@ -135,6 +142,8 @@ impl Device {
             prop_sids: HashMap::new(),
             fw_parts: [(0, 1), (0, 0)],
             mute: Vec::new(),
+            settle_reads: 0,
+            pending_btm1: HashMap::new(),
             quiet: false,
             group_counts: HashMap::new(),
             groups: HashMap::new(),
@@ -250,6 +259,13 @@ impl Device {
             self.prop_sids.insert(n, sid);
             self.strings.insert(sid, text.to_string());
         }
+        self
+    }
+
+    /// Make Btm1 writes take effect only after `reads` value reads, like a
+    /// relay that answers the confirming read before it has moved.
+    pub fn with_settle_reads(mut self, reads: u8) -> Device {
+        self.settle_reads = reads;
         self
     }
 
@@ -484,13 +500,29 @@ impl Device {
                 if self.mute.contains(f) {
                     return Vec::new();
                 }
+                // A pending write lands once `settle_reads` reads have gone
+                // by still showing the old value.
+                if let Some((v, left)) = self.pending_btm1.get_mut(f) {
+                    if *left == 0 {
+                        let v = *v;
+                        self.pending_btm1.remove(f);
+                        self.btm1.insert(*f, v);
+                    } else {
+                        *left -= 1;
+                    }
+                }
                 let v = self.btm1.get(f).copied().unwrap_or_default();
                 let mut d = vec![*f, *tab];
                 d.extend_from_slice(&v);
                 vec![(id(can_class::MONITORING_DATA, self.addr), d)]
             }
             [f, _tab, v0, v1, v2, v3] => {
-                self.btm1.insert(*f, [*v0, *v1, *v2, *v3]);
+                if self.settle_reads > 0 {
+                    self.pending_btm1
+                        .insert(*f, ([*v0, *v1, *v2, *v3], self.settle_reads));
+                } else {
+                    self.btm1.insert(*f, [*v0, *v1, *v2, *v3]);
+                }
                 Vec::new()
             }
             _ => Vec::new(),
