@@ -52,10 +52,22 @@ The first time you connect to a device it takes a few seconds to
 discover its schema; afterwards everything is cached on disk and the
 TUI feels instant.
 
+## Signal K: install the plugin
+
+If you run a [Signal K](https://signalk.org) server, the easiest way in is
+the **signalk-masterbus** plugin from the server's App Store. It brings
+the `masterbus-signalk` daemon along for your platform, starts it on the
+machine wired to the bus, shows every device in a browser editor where
+you choose what publishes where, and lets a switch in Signal K set a
+field on the bus. When the machine on the bus is not the one running
+Signal K, run `masterbus-signalk` there (below) and point the plugin at
+it. See <https://github.com/keesverruijt/signalk-masterbus>.
+
 ## Reading data continuously
 
-For pulling data off the bus in a long-running stream, use
-`masterbus-signalk`. It connects to the bus and emits Signal K deltas
+For pulling data off the bus in a long-running stream without Signal K,
+or on a machine other than the one running it, use `masterbus-signalk`
+directly. It connects to the bus and emits Signal K deltas
 (newline-delimited JSON) on a TCP socket.
 
     masterbus-signalk
@@ -73,7 +85,8 @@ Read that before you conclude the thing is broken.
 
 **You have to do this.** Nothing else in this guide matters if you skip
 it: a device that is not in your mapping produces no Signal K data, no
-matter how happily it shows up in the TUI.
+matter how happily it shows up in the TUI. With the Signal K plugin the
+editor is the **MasterBus mapping** webapp; without it, the TUI:
 
     masterbus-tui --mapping
 
