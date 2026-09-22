@@ -94,6 +94,21 @@ doc:
 # clippy + tests + docs). Uses fmt-check (read-only); run `make fmt` to fix.
 precommit: fmt-check clippy test doc
 
+# Type-check the workspace (tests included) for the Linux targets CI
+# builds. Code behind `cfg(target_os = "linux")` — SocketCAN, the CAN
+# auto-detect path — is invisible to a macOS precommit, which is how 0.4.0
+# shipped without Linux binaries. Needs the targets installed:
+#   rustup target add $(CROSS_CHECK_TARGETS)
+# A `check` needs no cross linker, so nothing else is required.
+CROSS_CHECK_TARGETS ?= x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
+cross-check:
+	@for t in $(CROSS_CHECK_TARGETS); do \
+	  rustup target list --installed | grep -qx "$$t" \
+	    || { echo "target $$t is not installed: rustup target add $$t"; exit 1; }; \
+	  echo "cargo check --target $$t"; \
+	  $(CARGO) check --workspace --all-targets --target $$t || exit 1; \
+	done
+
 # Release build of just the command-line tools (masterbus-tui,
 # masterbus-signalk, masterbus-set-field, masterbus-dump) — handy when you
 # don't need the core crate's tests or the FFI demos.
@@ -108,14 +123,15 @@ tools:
 #
 # Bumps the workspace version — both `[workspace.package] version` and the
 # internal `masterbus` dependency pin — dates the CHANGELOG's [Unreleased]
-# section (leaving a fresh empty one), verifies the tree (precommit),
-# refreshes Cargo.lock, commits "Bump to X.Y.Z", tags vX.Y.Z, and pushes
-# main + the tag. Pushing the tag triggers the CI release build (artifacts).
-# Then `make publish` uploads to crates.io.
+# section (leaving a fresh empty one), verifies the tree (precommit, then
+# cross-check for the Linux targets), refreshes Cargo.lock, commits "Bump to
+# X.Y.Z", tags vX.Y.Z, and pushes main + the tag. Pushing the tag triggers
+# the CI release build (artifacts). Then `make publish` uploads to crates.io.
 #
-# precommit runs on the current tree *before* any edit, so a failing check
-# leaves the working tree untouched. The bump only rewrites version strings
-# and one CHANGELOG line, so it can't break a tree that was already green.
+# precommit and cross-check run on the current tree *before* any edit, so a
+# failing check leaves the working tree untouched. The bump only rewrites
+# version strings and one CHANGELOG line, so it can't break a tree that was
+# already green.
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=X.Y.Z"; exit 1; }
 	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' \
@@ -125,6 +141,7 @@ release:
 	@git diff --quiet && git diff --cached --quiet \
 	  || { echo "working tree not clean — commit or stash first"; exit 1; }
 	$(MAKE) precommit
+	$(MAKE) cross-check
 	perl -pi -e 's/"\Q$(OLDVERSION)\E"/"$(VERSION)"/g' Cargo.toml
 	perl -pi -e 's/^## \[Unreleased\]\s*$$/## [Unreleased]\n\n## [$(VERSION)] - $(DATE)\n/' CHANGELOG.md
 	$(CARGO) check --workspace   # refresh Cargo.lock to the new version
@@ -175,6 +192,7 @@ help:
 	@echo "  make clippy         Workspace clippy at -D warnings (CI shape)"
 	@echo "  make doc            rustdoc with warnings denied"
 	@echo "  make precommit      fmt-check + clippy + test + doc (mirrors CI)"
+	@echo "  make cross-check    cargo check for the Linux release targets (cfg'd code)"
 	@echo ""
 	@echo "  make tools          Release build of just the command-line tools"
 	@echo ""
