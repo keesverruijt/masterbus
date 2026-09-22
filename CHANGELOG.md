@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-22
+
 ### Fixed
 - **A write to a slow relay reported the old value.** The CombiMaster's
   inverter and charger answer the read-back straight after the commit
