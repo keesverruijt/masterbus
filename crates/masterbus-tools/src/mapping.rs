@@ -60,12 +60,17 @@
 //!
 //! Presence is the toggle: a field that is not listed is not published. There
 //! are no per-menu or per-group default flags, and so no precedence rules.
+//!
+//! A field may additionally be marked `"put": true`, which is how a Signal K
+//! PUT on its path reaches the bus (see [`FieldMapping::put`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use masterbus::FieldId;
+use masterbus::{DeviceIdentity, FieldId};
 use serde::{Deserialize, Serialize};
+
+use crate::signalk;
 
 /// Current value of the file's `version` key.
 pub const VERSION: u32 = 1;
@@ -125,6 +130,12 @@ pub struct FieldMapping {
     /// leaves the list, `normal`. Empty for anything else.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub notify: BTreeMap<String, NotifyState>,
+    /// Also accept writes: the Signal K plugin registers a PUT handler on
+    /// the path, and a PUT of an SI value is converted back and written to
+    /// the field. Only meaningful on a writable field; the field still
+    /// publishes its value as usual, so Signal K shows the state it set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub put: bool,
 }
 
 /// A Signal K notification state worth raising. `normal` is not listed: it
@@ -239,9 +250,93 @@ impl Mapping {
     }
 }
 
+/// A device one device's mapping can be copied onto: the same article, a
+/// different serial.
+#[derive(Debug, Clone)]
+pub struct CopyTarget {
+    /// Signal K instance proposed for it, used when it has no entry yet.
+    pub instance: String,
+    /// The field ids it actually has, so nothing is written blind.
+    pub have: HashSet<FieldId>,
+    /// Its identity, recorded into the new entry.
+    pub ident: DeviceIdentity,
+}
+
+/// Copy one device's field mappings onto every target, substituting each
+/// target's own Signal K instance into the paths. Returns (copied, skipped).
+///
+/// This is the TUI's `a` key and the API's `apply-article`, so it lives here
+/// rather than in either.
+///
+/// Fields the target does not have are skipped rather than written blind. That
+/// is what keeps a cluster master's extra fields off a plain member of the same
+/// article, which is the case the bus in #6 actually contains.
+///
+/// The instance substituted is the one each *path* uses, not the one recorded
+/// for the device. A cluster master publishes its aggregate under one node
+/// and its own cells under another, so its entries do not share an instance;
+/// substituting the device's single recorded one copied nothing at all when
+/// pressed on the master (#12).
+pub fn copy_to_targets(
+    map: &mut Mapping,
+    src: &DeviceMapping,
+    targets: &[CopyTarget],
+) -> (usize, usize) {
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+    for t in targets {
+        let entry = map.devices.entry(t.ident.serial.clone()).or_default();
+        entry.article = t.ident.article.clone();
+        entry.firmware = t.ident.firmware.clone();
+        entry.name = t.ident.name.clone();
+        if entry.instance.is_empty() {
+            entry.instance = t.instance.clone();
+        }
+        let target_instance = entry.instance.clone();
+        for (key, fm) in &src.fields {
+            match parse_field_key(key) {
+                Some(id) if t.have.contains(&id) => {
+                    let from =
+                        signalk::instance_of(&fm.path).unwrap_or_else(|| src.instance.clone());
+                    let path = retarget(&fm.path, &from, &target_instance);
+                    // Nothing was substituted, so this target would publish to
+                    // the source's own node. Two devices writing one path is
+                    // never what "apply to this article" meant.
+                    if path == fm.path {
+                        skipped += 1;
+                        continue;
+                    }
+                    entry
+                        .fields
+                        .insert(key.to_string(), FieldMapping { path, ..fm.clone() });
+                    copied += 1;
+                }
+                _ => skipped += 1,
+            }
+        }
+    }
+    (copied, skipped)
+}
+
+/// Swap one instance segment for another inside a Signal K path.
+///
+/// Only whole segments are replaced, so an instance that happens to be a
+/// substring of a leaf (`house` in `household`) is left alone. An empty source
+/// instance means there is nothing to substitute and the path is copied as-is.
+pub fn retarget(path: &str, from: &str, to: &str) -> String {
+    if from.is_empty() || from == to {
+        return path.to_string();
+    }
+    path.split('.')
+        .map(|seg| if seg == from { to } else { seg })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seed;
 
     fn sample() -> Mapping {
         let mut m = Mapping::new();
@@ -395,5 +490,249 @@ mod tests {
         assert!(json.contains(r#""truth":{"On":true,"Standby":false}"#));
         let back: Mapping = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
+    }
+
+    /// `put` is a flag like `invert`: absent when false, so a file from a
+    /// build that predates it reads back unchanged, and a file this build
+    /// writes stays readable by one that ignores unknown keys.
+    #[test]
+    fn put_is_omitted_when_false_and_round_trips_when_set() {
+        let mut m = sample();
+        let d = m.devices.get_mut("R516V1070").unwrap();
+        d.fields.insert(
+            field_key(0x013),
+            FieldMapping {
+                path: "electrical.inverters.inverter.enabled".into(),
+                put: true,
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json.matches("\"put\"").count(), 1);
+        assert!(
+            json.contains(r#""0x013":{"path":"electrical.inverters.inverter.enabled","put":true}"#)
+        );
+        let back: Mapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, back);
+        assert!(!back.devices["R516V1070"].fields[&field_key(0x006)].put);
+    }
+
+    fn ident(serial: &str, name: &str) -> DeviceIdentity {
+        DeviceIdentity {
+            article: "66026000".into(),
+            serial: serial.into(),
+            revision: "A".into(),
+            name: name.into(),
+            firmware: "2.14".into(),
+        }
+    }
+
+    fn src_mapping() -> DeviceMapping {
+        let mut d = DeviceMapping {
+            article: "66026000".into(),
+            firmware: "2.14".into(),
+            name: "BAT 24V Service".into(),
+            instance: "24v-service".into(),
+            ..Default::default()
+        };
+        for (id, leaf) in [
+            (0x001u16, "voltage"),
+            (0x002, "current"),
+            (0x071, "voltage"),
+        ] {
+            d.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: format!("electrical.batteries.24v-service.{leaf}"),
+                    ..Default::default()
+                },
+            );
+        }
+        d
+    }
+
+    fn target(serial: &str, name: &str, have: &[FieldId]) -> CopyTarget {
+        CopyTarget {
+            instance: seed::instance_of(name, 0x1000),
+            have: have.iter().copied().collect(),
+            ident: ident(serial, name),
+        }
+    }
+
+    #[test]
+    fn copying_rewrites_the_instance_segment_per_target() {
+        let mut map = Mapping::new();
+        let t = target("MLI-2", "BAT 24V Service2", &[0x001, 0x002, 0x071]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src_mapping(), &[t]);
+        assert_eq!((copied, skipped), (3, 0));
+        let d = &map.devices["MLI-2"];
+        assert_eq!(d.instance, "24v-service2");
+        assert_eq!(
+            d.fields[&field_key(0x001)].path,
+            "electrical.batteries.24v-service2.voltage"
+        );
+    }
+
+    /// The cluster case from the bus in #6: two units share an article, but the
+    /// master has fields the members do not. Copying must not invent them.
+    #[test]
+    fn fields_the_target_lacks_are_skipped_not_invented() {
+        let mut map = Mapping::new();
+        let member = target("MLI-2", "BAT 24V Service2", &[0x001, 0x002]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src_mapping(), &[member]);
+        assert_eq!((copied, skipped), (2, 1));
+        let d = &map.devices["MLI-2"];
+        assert!(!d.fields.contains_key(&field_key(0x071)));
+    }
+
+    #[test]
+    fn copying_records_the_target_identity_not_the_sources() {
+        let mut map = Mapping::new();
+        let mut t = target("MLI-2", "BAT 24V Service2", &[0x001]);
+        t.ident.firmware = "2.15".into();
+        copy_to_targets(&mut map, &src_mapping(), &[t]);
+        let d = &map.devices["MLI-2"];
+        assert_eq!(d.name, "BAT 24V Service2");
+        assert_eq!(d.firmware, "2.15");
+    }
+
+    /// An instance the user already chose is authoritative; copying must not
+    /// silently rename a device's Signal K node underneath them.
+    #[test]
+    fn an_existing_instance_on_the_target_is_kept() {
+        let mut map = Mapping::new();
+        map.devices.insert(
+            "MLI-2".into(),
+            DeviceMapping {
+                instance: "port-bank".into(),
+                ..Default::default()
+            },
+        );
+        let t = target("MLI-2", "BAT 24V Service2", &[0x001]);
+        copy_to_targets(&mut map, &src_mapping(), &[t]);
+        let d = &map.devices["MLI-2"];
+        assert_eq!(d.instance, "port-bank");
+        assert_eq!(
+            d.fields[&field_key(0x001)].path,
+            "electrical.batteries.port-bank.voltage"
+        );
+    }
+
+    /// From real use on a live boat: an `INT Nav Chg` was mapped by hand onto
+    /// `electrical.chargers.nav-battery`, because that is what it charges,
+    /// while the device's recorded instance was still `nav-chg`. Substituting
+    /// on the recorded instance copied nothing; substituting on the instance
+    /// the path itself uses copies it correctly, so a stale record no longer
+    /// matters.
+    #[test]
+    fn a_stale_recorded_instance_does_not_block_a_copy() {
+        let mut map = Mapping::new();
+        let mut src = DeviceMapping {
+            article: "77030450".into(),
+            instance: "nav-chg".into(),
+            ..Default::default()
+        };
+        src.fields.insert(
+            field_key(0x028),
+            FieldMapping {
+                path: "electrical.chargers.nav-battery.voltage".into(),
+                ..Default::default()
+            },
+        );
+        let t = target("X922S0096", "INT 24V DC/DC", &[0x028]);
+        let (copied, skipped) = copy_to_targets(&mut map, &src, &[t]);
+        assert_eq!((copied, skipped), (1, 0));
+        assert_eq!(
+            map.devices["X922S0096"].fields[&field_key(0x028)].path,
+            "electrical.chargers.24v-dc-dc.voltage"
+        );
+    }
+
+    #[test]
+    fn retarget_replaces_whole_segments_only() {
+        assert_eq!(
+            retarget("electrical.batteries.house.voltage", "house", "port"),
+            "electrical.batteries.port.voltage"
+        );
+        // A leaf that merely contains the instance as a substring is untouched.
+        assert_eq!(
+            retarget("electrical.batteries.house.household", "house", "port"),
+            "electrical.batteries.port.household"
+        );
+        // Nothing to substitute.
+        assert_eq!(retarget("a.b.c", "", "port"), "a.b.c");
+        assert_eq!(retarget("a.b.c", "b", "b"), "a.b.c");
+    }
+
+    /// The cluster-master case from the field report on #12: the master maps
+    /// its aggregate under one instance and its own cell under another. A copy
+    /// from the master must substitute on what each path uses, or nothing
+    /// matches the device's single recorded instance and every field skips.
+    #[test]
+    fn a_copy_substitutes_on_each_paths_own_instance() {
+        let mut map = Mapping::new();
+        let mut master = DeviceMapping {
+            article: "66026000".into(),
+            // Recorded from the last path saved: the cell's.
+            instance: "li-ion-1".into(),
+            ..Default::default()
+        };
+        // Cluster group: aggregate node.
+        master.fields.insert(
+            field_key(0x001),
+            FieldMapping {
+                path: "electrical.batteries.li-ion.voltage".into(),
+                ..Default::default()
+            },
+        );
+        // Own battery group: the cell's node.
+        master.fields.insert(
+            field_key(0x071),
+            FieldMapping {
+                path: "electrical.batteries.li-ion-1.voltage".into(),
+                ..Default::default()
+            },
+        );
+        // A plain member only has the 0x000-range group.
+        let member = target("MLI-2", "BAT li-ion 2", &[0x001]);
+        let (copied, skipped) = copy_to_targets(&mut map, &master, &[member]);
+        assert_eq!((copied, skipped), (1, 1));
+        assert_eq!(
+            map.devices["MLI-2"].fields[&field_key(0x001)].path,
+            "electrical.batteries.li-ion-2.voltage"
+        );
+    }
+
+    /// Everything an entry says about *how* to publish travels with the copy:
+    /// the truth table, the notification table, and the put flag.
+    #[test]
+    fn a_copy_carries_the_truth_notify_and_put_settings() {
+        let mut map = Mapping::new();
+        let mut src = DeviceMapping {
+            article: "77010100".into(),
+            instance: "out-1".into(),
+            ..Default::default()
+        };
+        src.fields.insert(
+            field_key(0x001),
+            FieldMapping {
+                path: "electrical.switches.out-1.state".into(),
+                truth: [
+                    ("Standby".to_string(), false),
+                    ("Activated".to_string(), true),
+                ]
+                .into(),
+                notify: [("Alarm".to_string(), NotifyState::Alarm)].into(),
+                put: true,
+                ..Default::default()
+            },
+        );
+        let t = target("MCO-2", "INT Out 2", &[0x001]);
+        copy_to_targets(&mut map, &src, &[t]);
+        let f = &map.devices["MCO-2"].fields[&field_key(0x001)];
+        assert_eq!(f.path, "electrical.switches.out-2.state");
+        assert_eq!(f.truth.len(), 2);
+        assert_eq!(f.notify.len(), 1);
+        assert!(f.put);
     }
 }

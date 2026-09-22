@@ -17,8 +17,13 @@
 #   mapping.json which MasterBus field publishes to which Signal K path,
 #                keyed on device serial and field id. Seeded from built-in
 #                heuristics on the first run that finds no file; curate it
-#                with `masterbus-tui --mapping`. The service re-reads the
-#                file when it changes, no restart needed.
+#                in the Signal K plugin (signalk-masterbus) or with
+#                `masterbus-tui --mapping`. The service re-reads the file
+#                when it changes, no restart needed.
+#
+# To let a Signal K server on another host run the plugin against this
+# service ("external" mode), set `api_listen` (e.g. 0.0.0.0:3010) and
+# `api_token` in config.ini and open the two ports; see docs/API.md.
 #
 # Upgrading from a release that used /etc/default/masterbus-signalk/: copy any
 # LISTEN= you set in that directory's `config` file into config.ini's `listen`
@@ -27,8 +32,10 @@
 # the first run writes a fresh mapping.json seeded from the same heuristics the
 # old build used.
 #
-# Then add a Signal K data connection of type "Signal K" over TCP pointing at
-# this host on the listen port (default 3009).
+# Then either install the signalk-masterbus plugin on the Signal K server and
+# point it at this host (external mode), or add a Signal K data connection of
+# type "Signal K" over TCP pointing at this host on the listen port (default
+# 3009) for values only.
 
 [Unit]
 Description=Mastervolt MasterBus to Signal K bridge

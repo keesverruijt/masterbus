@@ -1,18 +1,25 @@
-//! Signal K sidecar for Mastervolt MasterBus.
+//! Signal K daemon for Mastervolt MasterBus.
 //!
 //! Subscribes to the fields a curated mapping names and serves **Signal K
-//! deltas** as newline-delimited JSON over **TCP**. It listens on
-//! `0.0.0.0:3009` by default; a Signal K server connects to it as a client
-//! (data connection type: Signal K, over TCP).
+//! deltas** as newline-delimited JSON over **TCP** (`0.0.0.0:3009` by
+//! default), and an **HTTP control API** (off by default; `127.0.0.1:3010`
+//! when the Signal K plugin runs it) through which the plugin lists devices,
+//! edits the mapping and writes fields. The API is documented in
+//! `docs/API.md`.
 //!
 //! ```text
-//! masterbus-signalk [listen-addr]
+//! masterbus-signalk [listen-addr] [--stream ADDR] [--api ADDR]
+//!                   [--api-token-file PATH] [--config-dir DIR]
 //! ```
 //!
-//! Transport (USB / SocketCAN), master role, the schema cache directory and
-//! the default listen address all come from the per-host config file (see
-//! `masterbus::FileConfig`); the file is created on first run. A listen
-//! address given on the command line overrides the file.
+//! Transport (USB / SocketCAN), master role, the schema cache directory, the
+//! stream and API addresses and the API token all come from the per-host
+//! config file (see `masterbus::FileConfig`); the file is created on first
+//! run. Command-line flags override it, and `--config-dir` (or the
+//! `MASTERBUS_CONFIG_DIR` environment variable) says where the file is, so a
+//! supervisor can keep everything this daemon owns in one directory. Once
+//! both listeners are bound the daemon prints one `READY {...}` line on
+//! stdout naming them, which is what a supervisor waits for.
 //!
 //! # What gets published
 //!
@@ -22,25 +29,29 @@
 //! fixes — device, group and field *names* are installer-editable, and issue
 //! #12 has the bus that proves matching on them cannot work.
 //!
-//! The file is meant to be curated by a human in `masterbus-tui`. When it is
-//! missing or empty, this service seeds one from [`masterbus_tools::seed`] —
-//! the bundled per-model database first, then the per-class name heuristics —
-//! and writes it out, so an install that worked before keeps working and has
-//! something to edit.
+//! The file is meant to be curated by a human, in the plugin's editor or in
+//! `masterbus-tui --mapping`. When it is missing or empty, this daemon seeds
+//! one from [`masterbus_tools::seed`] — the bundled per-model database first,
+//! then the per-class name heuristics — and writes it out, so an install that
+//! worked before keeps working and has something to edit.
 //!
 //! Unit conversion and unit metadata are **derived** from the field's own
 //! unit, never stored (see [`masterbus_tools::units::to_si`]); the target
 //! leaf only cross-checks. A mapping entry whose units cannot be reconciled is
-//! reported at startup and skipped rather than published as a wrong number.
+//! reported and skipped rather than published as a wrong number. Every such
+//! report is a [`masterbus_tools::publish::Diagnostic`]: printed here, and
+//! served by the API so the editor can show it next to the entry.
 //!
-//! The mapping file is re-read when it changes on disk, so an edit in
-//! `masterbus-tui --mapping` takes effect within a couple of seconds without
-//! a restart.
+//! The mapping takes effect the moment it is replaced through the API, and
+//! the file is also re-read when it changes on disk, so an edit in
+//! `masterbus-tui --mapping` lands within a couple of seconds.
 //!
 //! Discovery does not end at startup. A device that announces itself after
 //! the initial pass — a quiet interface, or a charger switched on when shore
 //! power is connected — is identified as it appears and, if the mapping names
-//! its serial, starts publishing then (#22).
+//! its serial, starts publishing then (#22). A mapping that names a field
+//! outside the Monitoring menu (a writable setting exposed as a PUT target)
+//! has that device's Configuration menu discovered before it is resolved.
 //!
 //! An enum whose mapping names alarm labels (`"notify": {"Alarm": "alarm"}`)
 //! also drives `notifications.<path>`: the spec's `state` / `method` /
@@ -52,26 +63,21 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use masterbus::{Config, DeviceId, FieldId, MasterBus, Menu, Subscription, Value};
-use masterbus_tools::mapping::{
-    DeviceMapping, FieldMapping, Mapping, NotifyState, field_key, parse_field_key,
-};
-use masterbus_tools::seed;
-use masterbus_tools::signalk::{self, Plan};
+use masterbus_tools::api::{self, Info, Shared};
+use masterbus_tools::mapping::{Mapping, NotifyState};
+use masterbus_tools::publish::{self, DeviceRec, Emit};
+use masterbus_tools::signalk;
 use serde_json::json;
 
-/// Default TCP listen address.
+/// Default TCP listen address of the delta stream.
 const DEFAULT_LISTEN: &str = "0.0.0.0:3009";
-
-/// The menu whose fields are offered for mapping. Configuration and Service
-/// carry settings rather than measurements.
-const MENU: Menu = Menu::Monitoring;
 
 /// How often each value is (re)emitted.
 const RATE: Duration = Duration::from_millis(1000);
@@ -79,260 +85,226 @@ const RATE: Duration = Duration::from_millis(1000);
 /// How often the mapping file is checked for a change.
 const RELOAD_CHECK: Duration = Duration::from_secs(2);
 
+/// What the command line said.
+#[derive(Debug, Default, PartialEq)]
+struct Args {
+    /// `--stream ADDR`, or the bare positional address of older invocations.
+    stream: Option<String>,
+    /// `--api ADDR`.
+    api: Option<String>,
+    /// `--api-token-file PATH`.
+    api_token_file: Option<PathBuf>,
+    /// `--config-dir DIR`.
+    config_dir: Option<PathBuf>,
+    /// `--fake-bus`: serve a canned bus instead of real hardware.
+    fake_bus: bool,
+}
+
+const USAGE: &str = "\
+usage: masterbus-signalk [listen-addr] [options]
+
+  --stream ADDR          delta stream listen address (default: `listen` in
+                         config.ini, else 0.0.0.0:3009); the bare positional
+                         form is the same thing
+  --api ADDR             HTTP control API listen address (default: `api_listen`
+                         in config.ini, else off). Any address other than
+                         loopback needs a token.
+  --api-token-file PATH  file holding the API bearer token (default:
+                         `api_token` in config.ini)
+  --config-dir DIR       where config.ini and mapping.json live (default: the
+                         platform path, or $MASTERBUS_CONFIG_DIR)
+  --fake-bus             serve a canned three-device bus instead of hardware
+                         (builds with the `fake-bus` feature only)
+  --version, --help
+";
+
+/// Parse the command line; `Err` carries the message to print before exiting.
+fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
+    let mut args = Args::default();
+    let mut it = argv.into_iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))
+        };
+        match a.as_str() {
+            "--help" | "-h" => return Err(USAGE.to_string()),
+            "--version" | "-V" => {
+                return Err(format!("masterbus-signalk {}", env!("CARGO_PKG_VERSION")));
+            }
+            "--stream" => args.stream = Some(value("--stream")?),
+            "--api" => args.api = Some(value("--api")?),
+            "--api-token-file" => args.api_token_file = Some(value("--api-token-file")?.into()),
+            "--config-dir" => args.config_dir = Some(value("--config-dir")?.into()),
+            "--fake-bus" => args.fake_bus = true,
+            s if s.starts_with('-') => return Err(format!("unknown option {s}\n{USAGE}")),
+            s if args.stream.is_none() => args.stream = Some(s.to_string()),
+            s => return Err(format!("unexpected argument {s}\n{USAGE}")),
+        }
+    }
+    Ok(args)
+}
+
+/// Whether an address only loopback can reach, which is when the API may run
+/// without a token.
+fn is_loopback(addr: &str) -> bool {
+    match addr.parse::<SocketAddr>() {
+        Ok(a) => a.ip().is_loopback(),
+        Err(_) => addr.starts_with("localhost:"),
+    }
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let file_config = masterbus::FileConfig::load_or_create().ok();
-    // Listen address: command line wins, then `listen` in the per-host config
-    // file, then the built-in default. Having it in the config file is what
-    // lets the systemd unit drop its own environment file, so this project
-    // keeps exactly one configuration directory per host.
-    let listen = std::env::args().nth(1).unwrap_or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.listen.clone())
-            .unwrap_or_else(|| DEFAULT_LISTEN.to_string())
-    });
-    // Mapping file: `MAPPING` overrides, otherwise it sits beside config.ini.
-    let mapping_path: Option<PathBuf> = std::env::var_os("MAPPING")
-        .map(PathBuf::from)
-        .or_else(|| file_config.as_ref().map(|c| c.mapping_path()));
-
-    let bus = match MasterBus::auto(Config::default()) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("masterbus-signalk: connect failed: {e}");
-            std::process::exit(2);
+    let args = match parse_args(std::env::args().skip(1)) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(
+                if msg.starts_with("usage") || msg.starts_with("masterbus-signalk ") {
+                    0
+                } else {
+                    2
+                },
+            );
         }
     };
-    if let Err(e) = run(bus, &listen, mapping_path.as_deref()) {
+    if let Some(dir) = &args.config_dir {
+        // SAFETY: nothing else is running yet; the engine's threads start in
+        // `MasterBus::auto` below, after the variable is set.
+        unsafe { std::env::set_var(masterbus::settings::CONFIG_DIR_ENV, dir) };
+    }
+    let file_config = masterbus::FileConfig::load_or_create().ok();
+    // Precedence for every setting: command line, then config.ini, then the
+    // built-in default. Having them in the config file is what lets the
+    // systemd unit drop its own environment file, so this project keeps
+    // exactly one configuration directory per host.
+    let listen = args
+        .stream
+        .or_else(|| file_config.as_ref().and_then(|c| c.listen.clone()))
+        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    let api_listen = args
+        .api
+        .or_else(|| file_config.as_ref().and_then(|c| c.api_listen.clone()));
+    let token = match &args.api_token_file {
+        Some(p) => match std::fs::read_to_string(p) {
+            Ok(t) if !t.trim().is_empty() => Some(t.trim().to_string()),
+            Ok(_) => {
+                eprintln!("masterbus-signalk: {} is empty", p.display());
+                std::process::exit(2);
+            }
+            Err(e) => {
+                eprintln!("masterbus-signalk: reading {}: {e}", p.display());
+                std::process::exit(2);
+            }
+        },
+        None => file_config.as_ref().and_then(|c| c.api_token.clone()),
+    };
+    if let Some(a) = &api_listen
+        && !is_loopback(a)
+        && token.is_none()
+    {
+        eprintln!(
+            "masterbus-signalk: the API would listen on {a}, which is not loopback, with no \
+             token; set api_token in config.ini or pass --api-token-file"
+        );
+        std::process::exit(2);
+    }
+    // Mapping file: `MAPPING` overrides, otherwise it sits beside config.ini.
+    // A fake bus has no hardware to auto-detect, so there may be no
+    // config.ini; the mapping then lives in `--config-dir` if given.
+    let mapping_path: Option<PathBuf> = std::env::var_os("MAPPING")
+        .map(PathBuf::from)
+        .or_else(|| file_config.as_ref().map(|c| c.mapping_path()))
+        .or_else(|| {
+            args.fake_bus
+                .then(|| args.config_dir.as_ref().map(|d| d.join("mapping.json")))
+                .flatten()
+        });
+    let transport = match &file_config {
+        _ if args.fake_bus => "fake".to_string(),
+        Some(c) => match c.device_type {
+            masterbus::DeviceType::Can => format!("can:{}", c.device_name),
+            masterbus::DeviceType::Usb if c.device_name.is_empty() => "usb".to_string(),
+            masterbus::DeviceType::Usb => format!("usb:{}", c.device_name),
+        },
+        None => String::new(),
+    };
+
+    // The fake bus must outlive `run`, which never returns; holding it here
+    // does that.
+    #[cfg(feature = "fake-bus")]
+    let _fake: Option<masterbus::fakebus::FakeBus>;
+    let bus = if args.fake_bus {
+        #[cfg(feature = "fake-bus")]
+        {
+            let (fake, transport) = masterbus_tools::fake::canned();
+            masterbus_tools::fake::animate(&fake);
+            _fake = Some(fake);
+            eprintln!("masterbus-signalk: serving the canned fake bus (no hardware)");
+            match MasterBus::with_transport(transport, Config::default()) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("masterbus-signalk: fake bus failed: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        #[cfg(not(feature = "fake-bus"))]
+        {
+            eprintln!(
+                "masterbus-signalk: this build has no --fake-bus (needs the fake-bus feature)"
+            );
+            std::process::exit(2);
+        }
+    } else {
+        #[cfg(feature = "fake-bus")]
+        {
+            _fake = None;
+        }
+        match MasterBus::auto(Config::default()) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("masterbus-signalk: connect failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    };
+    let opts = Options {
+        listen,
+        api_listen,
+        token,
+        mapping_path,
+        transport,
+    };
+    if let Err(e) = run(bus, opts) {
         eprintln!("masterbus-signalk: {e}");
         std::process::exit(1);
     }
 }
 
-/// One discovered device, reduced to what mapping needs.
-struct DeviceRec {
-    /// Bus address.
-    id: DeviceId,
-    /// Serial number — the mapping file's key for this unit.
-    serial: String,
-    /// Article (model) number.
-    article: String,
-    /// Installer-assigned name. Displayed and recorded, never matched on.
-    name: String,
-    /// Firmware version.
-    firmware: String,
-    /// Proposed Signal K instance id, used when seeding.
-    instance: String,
-    /// Monitoring fields as the device reports them.
-    fields: Vec<FieldRec>,
-}
-
-/// One monitoring field, reduced to what mapping needs.
-#[derive(Clone)]
-struct FieldRec {
-    id: FieldId,
-    name: String,
-    unit: String,
-    /// Labels, for an enum; empty otherwise.
-    options: Vec<String>,
-}
-
-/// Everything needed to turn one field's updates into a Signal K value.
-struct Emit {
-    /// Target Signal K path.
-    path: String,
-    /// How to get there, derived from the field's unit and the mapping entry.
-    plan: Plan,
-    /// The device's name, for notification messages.
-    device: String,
+/// Everything `run` needs beyond the bus.
+struct Options {
+    listen: String,
+    api_listen: Option<String>,
+    token: Option<String>,
+    mapping_path: Option<PathBuf>,
+    transport: String,
 }
 
 /// Walk the bus and collect every device's monitoring fields.
 fn discover(bus: &MasterBus) -> Vec<DeviceRec> {
     let mut devices = bus.devices_all();
     devices.sort_by_key(|d| d.id());
-    devices.iter().map(discover_device).collect()
+    devices.iter().map(DeviceRec::discover).collect()
 }
 
-/// One device's identity and monitoring fields, as mapping needs them.
-fn discover_device(dev: &masterbus::Device) -> DeviceRec {
-    let identity = dev
-        .identity()
-        .unwrap_or_else(|_| masterbus::DeviceIdentity {
-            article: String::new(),
-            serial: String::new(),
-            revision: String::new(),
-            name: String::new(),
-            firmware: String::new(),
-        });
-    let mut fields = Vec::new();
-    for group in dev.tab_info(MENU).unwrap_or_default() {
-        for field in group.fields {
-            fields.push(FieldRec {
-                id: field.index,
-                name: field.name,
-                unit: field.unit,
-                options: field.options,
-            });
-        }
-    }
-    DeviceRec {
-        id: dev.id(),
-        instance: seed::instance_of(&identity.name, dev.id()),
-        serial: identity.serial,
-        article: identity.article,
-        name: identity.name,
-        firmware: identity.firmware,
-        fields,
-    }
-}
-
-/// Build a mapping from the per-class name heuristics — the migration path for
-/// an install that has no curated file yet, and the starting point a human
-/// edits in the TUI.
-fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
-    let mut m = Mapping::new();
-    for d in devices {
-        if d.serial.is_empty() {
-            continue;
-        }
-        let class = seed::class_of(&d.name).to_string();
-        let mut dm = DeviceMapping {
-            article: d.article.clone(),
-            firmware: d.firmware.clone(),
-            name: d.name.clone(),
-            instance: d.instance.clone(),
-            ..Default::default()
-        };
-        // Two fields of one device that seed to the same path would just
-        // coalesce to whichever arrives last, which is a mapping file that
-        // silently disagrees with itself. Real devices do this: a battery
-        // reports the same six measurements once for its cluster and once for
-        // itself, and an alternator reports battery voltage in both its Battery
-        // and Shunt groups. The first field id wins and the rest are left out
-        // for a human to add deliberately if they want them.
-        let mut taken: HashMap<String, FieldId> = HashMap::new();
-        let mut ordered: Vec<_> = d.fields.iter().collect();
-        ordered.sort_by_key(|f| f.id);
-        for f in ordered {
-            let Some((s, _tier)) = seed::suggest_best(
-                &d.article,
-                &d.firmware,
-                &class,
-                &d.instance,
-                f.id,
-                &f.name,
-                &f.unit,
-            ) else {
-                continue;
-            };
-            if let Some(first) = taken.get(s.path.as_str()) {
-                log::debug!(
-                    "{}: {} would publish to {}, already taken by {}; skipped",
-                    d.name,
-                    field_key(f.id),
-                    s.path,
-                    field_key(*first)
-                );
-                continue;
-            }
-            taken.insert(s.path.clone(), f.id);
-            dm.fields.insert(
-                field_key(f.id),
-                FieldMapping {
-                    path: s.path,
-                    invert: s.invert,
-                    ..Default::default()
-                },
-            );
-        }
-        if !dm.fields.is_empty() {
-            m.devices.insert(d.serial.clone(), dm);
-        }
-    }
-    m
-}
-
-/// Resolve the mapping against the live bus: which (device, field) pairs to
-/// subscribe to, and how to encode each one. Entries that cannot be honoured
-/// are reported once at startup rather than failing silently.
-fn resolve(devices: &[DeviceRec], mapping: &Mapping) -> HashMap<(DeviceId, FieldId), Emit> {
-    let mut emit = HashMap::new();
-    let by_serial: HashMap<&str, &DeviceRec> = devices
-        .iter()
-        .filter(|d| !d.serial.is_empty())
-        .map(|d| (d.serial.as_str(), d))
-        .collect();
-
-    for (serial, dm) in &mapping.devices {
-        let Some(dev) = by_serial.get(serial.as_str()) else {
-            eprintln!(
-                "masterbus-signalk: mapping lists serial {serial:?}, which is not on the bus \
-                 (yet — it is picked up if it announces itself later)"
-            );
-            continue;
-        };
-        if !dm.firmware.is_empty() && dm.firmware != dev.firmware {
-            eprintln!(
-                "masterbus-signalk: {} ({serial}) is running firmware {} but its mapping was \
-                 written for {}; field ids may have moved — check it in `masterbus-tui --mapping`",
-                dev.name, dev.firmware, dm.firmware
-            );
-        }
-        for (key, fm) in &dm.fields {
-            let Some(id) = parse_field_key(key) else {
-                eprintln!("masterbus-signalk: {serial}: {key:?} is not a field id");
-                continue;
-            };
-            let Some(f) = dev.fields.iter().find(|f| f.id == id) else {
-                eprintln!(
-                    "masterbus-signalk: {} ({serial}) has no monitoring field {key}",
-                    dev.name
-                );
-                continue;
-            };
-            // The unit and conversion follow from the field's own unit; the
-            // leaf only cross-checks. What cannot work is skipped here, with
-            // the reason, rather than published as a wrong number.
-            let plan = match signalk::plan(&fm.path, &f.unit, &f.options, fm) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!(
-                        "masterbus-signalk: {} ({serial}) {key} → {}: {e}; skipped — fix it in \
-                         `masterbus-tui --mapping`",
-                        dev.name, fm.path
-                    );
-                    continue;
-                }
-            };
-            if let Some(w) = &plan.warning {
-                eprintln!(
-                    "masterbus-signalk: {} ({serial}) {key} → {}: {w}",
-                    dev.name, fm.path
-                );
-            }
-            emit.insert(
-                (dev.id, id),
-                Emit {
-                    path: fm.path.clone(),
-                    plan,
-                    device: dev.name.clone(),
-                },
-            );
-        }
-    }
-    emit
-}
-
-fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Result<()> {
+fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
     // TCP server: clients (e.g. a Signal K server) connect and receive the delta
     // stream. The listener thread appends new connections to the shared set.
-    let listener = TcpListener::bind(listen)?;
-    eprintln!(
-        "masterbus-signalk: listening on {} (Signal K delta, ndjson)",
-        listener.local_addr()?
-    );
+    let listener = TcpListener::bind(&opts.listen)?;
+    let stream_addr = listener.local_addr()?;
+    eprintln!("masterbus-signalk: listening on {stream_addr} (Signal K delta, ndjson)");
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
     // Connections accepted so far. A new one needs the current notification
     // states, which are only ever sent on change.
@@ -341,10 +313,34 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
     // completes. Replayed to every client the moment it connects so late joiners
     // still learn each device's identity without waiting for a value change.
     let static_batch: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // The state the API and this loop share. The mapping is loaded below,
+    // once the bus has been walked, because seeding needs the devices.
+    let (reload_tx, reload_rx) = crossbeam_channel::unbounded::<()>();
+    let shared = Arc::new(Shared {
+        bus: Box::new(bus.clone()),
+        devices: Mutex::new(Vec::new()),
+        mapping: Mutex::new(Mapping::new()),
+        diagnostics: Mutex::new(Vec::new()),
+        values: Mutex::new(HashMap::new()),
+        mapping_path: opts.mapping_path.clone(),
+        reload: reload_tx,
+        started: Instant::now(),
+        info: Info {
+            transport: opts.transport.clone(),
+            stream: stream_addr.to_string(),
+            api: opts.api_listen.clone().unwrap_or_default(),
+        },
+        token: opts.token.clone(),
+        streaming: AtomicUsize::new(0),
+        clients: AtomicUsize::new(0),
+    });
+
     {
         let clients = clients.clone();
         let static_batch = static_batch.clone();
         let connections = connections.clone();
+        let shared = shared.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 connections.fetch_add(1, Ordering::Relaxed);
@@ -358,16 +354,45 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                 if !sb.is_empty() {
                     let _ = (&stream).write_all(&sb).and_then(|()| (&stream).flush());
                 }
-                clients.lock().unwrap().push(stream);
+                let mut cs = clients.lock().unwrap();
+                cs.push(stream);
+                shared.clients.store(cs.len(), Ordering::Relaxed);
             }
         });
     }
 
-    let mut devices = discover(&bus);
+    // The control API, when asked for. Bound before READY so the supervisor
+    // can connect to both at once.
+    let mut api_addr = None;
+    if let Some(addr) = &opts.api_listen {
+        let server = tiny_http::Server::http(addr)
+            .map_err(|e| std::io::Error::other(format!("API listen on {addr}: {e}")))?;
+        let bound = server.server_addr().to_string();
+        eprintln!(
+            "masterbus-signalk: API on http://{bound}/api/ ({})",
+            if opts.token.is_some() {
+                "bearer token required"
+            } else {
+                "loopback, no token"
+            }
+        );
+        let server = Arc::new(server);
+        let shared = shared.clone();
+        std::thread::spawn(move || api::serve(server, shared));
+        api_addr = Some(bound);
+    }
+    // One line a supervisor can wait for.
+    println!(
+        "READY {}",
+        json!({ "stream": stream_addr.to_string(), "api": api_addr, "version": env!("CARGO_PKG_VERSION") })
+    );
+    let _ = std::io::stdout().flush();
+
+    *shared.devices.lock().unwrap() = discover(&bus);
 
     // Load the curated mapping; seed one on first run so there is something to
     // publish and, more importantly, something to edit.
-    let mut mapping = match mapping_path {
+    let mut mapping = match &opts.mapping_path {
         Some(p) => Mapping::load(p).unwrap_or_else(|e| {
             eprintln!("masterbus-signalk: {e}; starting from an empty mapping");
             Mapping::new()
@@ -375,12 +400,13 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         None => Mapping::new(),
     };
     if mapping.is_empty() {
-        mapping = seed_mapping(&devices);
-        match mapping_path {
+        mapping = publish::seed_mapping(&shared.devices.lock().unwrap());
+        match &opts.mapping_path {
             Some(p) if !mapping.is_empty() => match mapping.save(p) {
                 Ok(()) => eprintln!(
                     "masterbus-signalk: no mapping yet — seeded {} field(s) from the built-in \
-                     heuristics and wrote {}. Review it with `masterbus-tui --mapping`.",
+                     heuristics and wrote {}. Review it in the Signal K plugin or with \
+                     `masterbus-tui --mapping`.",
                     mapping.len(),
                     p.display()
                 ),
@@ -392,8 +418,10 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             ),
         }
     }
+    *shared.mapping.lock().unwrap() = mapping;
 
-    let mut active = activate(&bus, &devices, &mapping, &clients, &static_batch);
+    let mut active = activate(&bus, &shared, &clients, &static_batch);
+    let mapping_path = opts.mapping_path.as_deref();
     let mut stamp = mtime(mapping_path);
     let mut last_check = Instant::now();
 
@@ -412,18 +440,23 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             let masterbus::DeviceEvent::Alive(id) = ev else {
                 continue;
             };
-            if devices.iter().any(|d| d.id == id) || !pending.insert(id) {
+            if shared.devices.lock().unwrap().iter().any(|d| d.id == id) || !pending.insert(id) {
                 continue;
             }
             let dev = bus.device(id);
             let tx = found_tx.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(discover_device(&dev));
+                let _ = tx.send(DeviceRec::discover(&dev));
             });
         }
         while let Ok(rec) = found_rx.try_recv() {
             pending.remove(&rec.id);
-            let mapped = mapping.devices.contains_key(&rec.serial);
+            let mapped = shared
+                .mapping
+                .lock()
+                .unwrap()
+                .devices
+                .contains_key(&rec.serial);
             eprintln!(
                 "masterbus-signalk: {} ({}) [{:06X}] joined the bus late; {}",
                 rec.name,
@@ -434,14 +467,26 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                 } else if rec.serial.is_empty() {
                     "it did not identify itself, so it cannot be mapped"
                 } else {
-                    "it is not in the mapping — add it in `masterbus-tui --mapping`"
+                    "it is not in the mapping — add it in the Signal K plugin or `masterbus-tui --mapping`"
                 }
             );
-            devices.push(rec);
-            devices.sort_by_key(|d| d.id);
-            if mapped {
-                active = activate(&bus, &devices, &mapping, &clients, &static_batch);
+            {
+                let mut devices = shared.devices.lock().unwrap();
+                devices.push(rec);
+                devices.sort_by_key(|d| d.id);
             }
+            if mapped {
+                active = activate(&bus, &shared, &clients, &static_batch);
+            }
+        }
+
+        // A mapping replaced through the API is already in `shared`; just
+        // re-activate. Coalesce a burst of edits into one activation.
+        if reload_rx.try_recv().is_ok() {
+            while reload_rx.try_recv().is_ok() {}
+            eprintln!("masterbus-signalk: mapping replaced over the API; reloading");
+            stamp = mtime(mapping_path);
+            active = activate(&bus, &shared, &clients, &static_batch);
         }
 
         // Pick up edits made in `masterbus-tui --mapping` without a restart:
@@ -457,8 +502,8 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
                 match Mapping::load(p) {
                     Ok(m) => {
                         eprintln!("masterbus-signalk: {} changed; reloading", p.display());
-                        mapping = m;
-                        active = activate(&bus, &devices, &mapping, &clients, &static_batch);
+                        *shared.mapping.lock().unwrap() = m;
+                        active = activate(&bus, &shared, &clients, &static_batch);
                     }
                     Err(e) => eprintln!("masterbus-signalk: {e}; keeping the previous mapping"),
                 }
@@ -466,7 +511,8 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
         }
 
         // Skip building deltas when nobody is listening (the channels are still
-        // drained below so they don't grow unbounded).
+        // drained below so they don't grow unbounded, and the API's value
+        // cache is still fed).
         let have_clients = !clients.lock().unwrap().is_empty();
         // A new client has not seen the notification states; forget what was
         // sent so each is re-sent with the next value.
@@ -483,15 +529,24 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             // values rapidly, and we emit those too).
             let mut latest: HashMap<String, serde_json::Value> = HashMap::new();
             while let Some(u) = sub.try_recv() {
-                if have_clients && let Some(e) = active.emit.get(&(u.device, u.field)) {
-                    if let Some(value) =
-                        signalk::encode(&u.value, e.plan.conv, e.plan.invert, &e.plan.truth)
-                    {
-                        latest.insert(e.path.clone(), value);
-                    }
-                    if let Some((path, value)) = notification(e, &u.value, &mut active.notified) {
-                        latest.insert(path, value);
-                    }
+                let Some(e) = active.emit.get(&(u.device, u.field)) else {
+                    continue;
+                };
+                shared
+                    .values
+                    .lock()
+                    .unwrap()
+                    .insert((u.device, u.field), u.value.clone());
+                if !have_clients {
+                    continue;
+                }
+                if let Some(value) =
+                    signalk::encode(&u.value, e.plan.conv, e.plan.invert, &e.plan.truth)
+                {
+                    latest.insert(e.path.clone(), value);
+                }
+                if let Some((path, value)) = notification(e, &u.value, &mut active.notified) {
+                    latest.insert(path, value);
                 }
             }
             if !latest.is_empty() {
@@ -538,6 +593,7 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
             let dropped = before - cs.len();
             if dropped > 0 {
                 eprintln!("masterbus-signalk: {dropped} client(s) disconnected");
+                shared.clients.store(cs.len(), Ordering::Relaxed);
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -546,7 +602,7 @@ fn run(bus: MasterBus, listen: &str, mapping_path: Option<&Path>) -> std::io::Re
 
 /// The live state a mapping resolves to: what to publish, the subscriptions
 /// feeding it, and the unit metadata each path carries. Rebuilt whole when
-/// the mapping file changes; dropping the old one unsubscribes.
+/// the mapping changes; dropping the old one unsubscribes.
 struct Active {
     emit: HashMap<(DeviceId, FieldId), Emit>,
     subs: Vec<Subscription>,
@@ -581,16 +637,49 @@ fn notification(
     Some((path, signalk::notification_value(&e.device, label, state)))
 }
 
-/// Resolve a mapping against the bus, subscribe to what it names, and
+/// A mapping that names a field the device record has not discovered yet is
+/// most likely pointing at a Configuration setting (a PUT target). Discover
+/// that menu once per device before resolving, so the entry can be honoured
+/// rather than reported as "no such field".
+fn ensure_menus(bus: &MasterBus, devices: &mut [DeviceRec], mapping: &Mapping) {
+    for d in devices.iter_mut() {
+        if d.menus.contains(&Menu::Configuration) || publish::unknown_fields(d, mapping).is_empty()
+        {
+            continue;
+        }
+        match bus.device(d.id).tab_info(Menu::Configuration) {
+            Ok(groups) => {
+                eprintln!(
+                    "masterbus-signalk: {} ({}): mapping names a field outside Monitoring; \
+                     discovered its Configuration menu",
+                    d.name, d.serial
+                );
+                d.merge_groups(Menu::Configuration, groups);
+            }
+            Err(e) => eprintln!(
+                "masterbus-signalk: {} ({}): could not discover Configuration: {e}",
+                d.name, d.serial
+            ),
+        }
+    }
+}
+
+/// Resolve the mapping against the bus, subscribe to what it names, and
 /// (re)publish the static per-device metadata.
 fn activate(
     bus: &MasterBus,
-    devices: &[DeviceRec],
-    mapping: &Mapping,
+    shared: &Shared,
     clients: &Mutex<Vec<TcpStream>>,
     static_batch: &Mutex<Vec<u8>>,
 ) -> Active {
-    let emit = resolve(devices, mapping);
+    let mapping = shared.mapping.lock().unwrap().clone();
+    let mut devices = shared.devices.lock().unwrap();
+    ensure_menus(bus, &mut devices, &mapping);
+    let resolved = publish::resolve(&devices, &mapping);
+    for d in &resolved.diagnostics {
+        eprintln!("masterbus-signalk: {d}");
+    }
+    let emit = resolved.emit;
     let mut per_device: HashMap<DeviceId, Vec<FieldId>> = HashMap::new();
     for (device, field) in emit.keys() {
         per_device.entry(*device).or_default().push(*field);
@@ -607,7 +696,7 @@ fn activate(
 
     // Render the static metadata batch and hand it to the accept thread (for
     // future clients) and to any client already connected.
-    let sb = static_meta_batch(devices, &emit, &published);
+    let sb = static_meta_batch(&devices, &emit, &published);
     *static_batch.lock().unwrap() = sb.clone();
     if !sb.is_empty() {
         let mut cs = clients.lock().unwrap();
@@ -616,11 +705,14 @@ fn activate(
 
     let total: usize = devices.iter().map(|d| d.fields.len()).sum();
     eprintln!(
-        "masterbus-signalk: streaming {} of {total} monitoring fields from {} of {} device(s)",
+        "masterbus-signalk: streaming {} of {total} known fields from {} of {} device(s)",
         emit.len(),
         published.len(),
         devices.len(),
     );
+    drop(devices);
+    *shared.diagnostics.lock().unwrap() = resolved.diagnostics;
+    shared.streaming.store(emit.len(), Ordering::Relaxed);
     Active {
         emit,
         subs,
@@ -723,6 +815,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use masterbus_tools::mapping::{DeviceMapping, FieldMapping, field_key};
+    use masterbus_tools::publish::FieldRec;
+    use masterbus_tools::seed;
 
     fn dev(serial: &str, name: &str, fields: &[(FieldId, &str, &str)]) -> DeviceRec {
         DeviceRec {
@@ -739,12 +834,15 @@ mod tests {
                     name: n.to_string(),
                     unit: u.to_string(),
                     options: Vec::new(),
+                    writable: false,
+                    menu: publish::MENU,
+                    group: "Battery".into(),
                 })
                 .collect(),
+            menus: vec![publish::MENU],
         }
     }
 
-    /// The MLI Ultra field names that the old per-class table silently dropped.
     fn mli() -> DeviceRec {
         dev(
             "MLI-1",
@@ -759,169 +857,52 @@ mod tests {
         )
     }
 
-    /// Two devices that both advertise as `CHG` with unrelated field sets. The
-    /// class-and-name table maps neither; the article-keyed database maps both,
-    /// differently, which is the case that motivated #12.
-    #[test]
-    fn seeding_tells_the_two_charger_articles_apart() {
-        let mut mass = dev(
-            "MASS-1",
-            "CHG 24V Ch.U4-1",
-            &[
-                (0x00E, "Battery voltage", "V"),
-                (0x00F, "Battery current", "A"),
-            ],
-        );
-        mass.article = "40021006".into();
-        mass.firmware = "7.9".into();
-        // The renamed outputs from the boat in #6.
-        let mut cm = dev(
-            "CM-1",
-            "CHG 12V ChargerE",
-            &[(0x002, "Eng.batt", "V"), (0x004, "Gen.batt", "V")],
-        );
-        cm.article = "44010250".into();
-        cm.firmware = "0.5".into();
+    fn emit_for(devices: &[DeviceRec], m: &Mapping) -> HashMap<(DeviceId, FieldId), Emit> {
+        publish::resolve(devices, m).emit
+    }
 
-        let m = seed_mapping(&[mass, cm]);
+    #[test]
+    fn the_command_line_is_parsed_with_the_old_positional_form_kept() {
+        let p = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
+        assert_eq!(p(&[]).unwrap(), Args::default());
         assert_eq!(
-            m.devices["MASS-1"].fields[&field_key(0x00E)].path,
-            "electrical.chargers.24v-ch-u4-1.voltage"
+            p(&["0.0.0.0:3009"]).unwrap().stream.as_deref(),
+            Some("0.0.0.0:3009")
         );
-        assert_eq!(
-            m.devices["CM-1"].fields[&field_key(0x002)].path,
-            "electrical.chargers.12v-chargere.output.1.voltage"
+        let a = p(&[
+            "--stream",
+            "127.0.0.1:3009",
+            "--api",
+            "127.0.0.1:3010",
+            "--api-token-file",
+            "/run/t",
+            "--config-dir",
+            "/var/lib/sk",
+        ])
+        .unwrap();
+        assert_eq!(a.stream.as_deref(), Some("127.0.0.1:3009"));
+        assert_eq!(a.api.as_deref(), Some("127.0.0.1:3010"));
+        assert_eq!(a.api_token_file, Some(PathBuf::from("/run/t")));
+        assert_eq!(a.config_dir, Some(PathBuf::from("/var/lib/sk")));
+        assert!(p(&["--api"]).unwrap_err().contains("needs a value"));
+        assert!(p(&["--bogus"]).unwrap_err().contains("unknown option"));
+        assert!(p(&["a", "b"]).unwrap_err().contains("unexpected"));
+        assert!(p(&["--help"]).unwrap_err().starts_with("usage"));
+        assert!(
+            p(&["--version"])
+                .unwrap_err()
+                .starts_with("masterbus-signalk ")
         );
     }
 
     #[test]
-    fn seeding_covers_the_battery_names_the_old_table_missed() {
-        let m = seed_mapping(&[mli()]);
-        let d = &m.devices["MLI-1"];
-        assert_eq!(
-            d.fields[&field_key(0x001)].path,
-            "electrical.batteries.24v-service.voltage"
-        );
-        assert_eq!(
-            d.fields[&field_key(0x005)].path,
-            "electrical.batteries.24v-service.temperature"
-        );
-        // A relay has no Signal K home, so it is simply absent.
-        assert!(!d.fields.contains_key(&field_key(0x022)));
-    }
-
-    /// Found by deploying onto a live boat: a battery reports the same six
-    /// measurements once for its cluster and once for itself, so the seed
-    /// produced two fields writing the same Signal K path. They would coalesce
-    /// to whichever arrived last, giving a file that silently disagrees with
-    /// itself. The lowest field id wins; the rest are left for a human to add
-    /// deliberately.
-    #[test]
-    fn a_device_never_seeds_two_fields_onto_one_path() {
-        let d = dev(
-            "MLI-CLUSTER",
-            "BAT Main Batt",
-            &[
-                // Cluster group.
-                (0x000, "State of charge", "%"),
-                (0x001, "Battery", "V"),
-                (0x005, "Battery", "\u{b0}C"),
-                // The device's own battery group: same measurements again.
-                (0x088, "State of charge", "%"),
-                (0x08B, "Battery", "V"),
-                (0x08D, "Battery", "\u{b0}C"),
-            ],
-        );
-        let m = seed_mapping(&[d]);
-        let f = &m.devices["MLI-CLUSTER"].fields;
-        let paths: Vec<&str> = f.values().map(|v| v.path.as_str()).collect();
-        let unique: HashSet<&str> = paths.iter().copied().collect();
-        assert_eq!(paths.len(), unique.len(), "duplicate paths: {paths:?}");
-        // The lower id of each pair survives.
-        assert!(f.contains_key(&field_key(0x001)));
-        assert!(!f.contains_key(&field_key(0x08B)));
-    }
-
-    /// The alternator case, which the old code documented as harmless: battery
-    /// voltage appears in both the Battery and Shunt groups.
-    #[test]
-    fn the_alternators_repeated_battery_reading_is_seeded_once() {
-        let mut d = dev(
-            "APR-1",
-            "APR Alternator",
-            &[
-                (0x006, "Battery voltage", "V"),
-                (0x014, "Battery voltage", "V"),
-            ],
-        );
-        d.article = "45512000".into();
-        let m = seed_mapping(&[d]);
-        let f = &m.devices["APR-1"].fields;
-        assert_eq!(f.len(), 1);
-        assert!(f.contains_key(&field_key(0x006)));
-    }
-
-    #[test]
-    fn seeding_records_identity_for_later_editing() {
-        let m = seed_mapping(&[mli()]);
-        let d = &m.devices["MLI-1"];
-        assert_eq!(d.article, "66026000");
-        assert_eq!(d.firmware, "2.14");
-        assert_eq!(d.name, "BAT 24V Service");
-        assert_eq!(d.instance, "24v-service");
-    }
-
-    #[test]
-    fn a_device_with_no_serial_cannot_be_keyed_and_is_skipped() {
-        let mut d = mli();
-        d.serial = String::new();
-        assert!(seed_mapping(&[d]).is_empty());
-    }
-
-    #[test]
-    fn resolve_derives_the_conversion_from_the_units() {
-        let devices = vec![mli()];
-        let m = seed_mapping(&devices);
-        let emit = resolve(&devices, &m);
-        let id = devices[0].id;
-        // Celsius into a kelvin leaf.
-        let t = &emit[&(id, 0x005)];
-        assert!((t.plan.conv.apply(20.0) - 293.15).abs() < 1e-9);
-        assert_eq!(t.plan.unit, Some("K"));
-        // Percent into a ratio leaf.
-        let soc = &emit[&(id, 0x000)];
-        assert!((soc.plan.conv.apply(87.0) - 0.87).abs() < 1e-9);
-        // Volts into a volts leaf.
-        assert!(emit[&(id, 0x001)].plan.conv.is_identity());
-    }
-
-    #[test]
-    fn resolve_skips_entries_the_bus_cannot_honour() {
-        let devices = vec![mli()];
-        let mut m = Mapping::new();
-        let mut dm = DeviceMapping::default();
-        // A field this device does not have.
-        dm.fields.insert(
-            field_key(0x0FF),
-            FieldMapping {
-                path: "electrical.batteries.x.voltage".into(),
-                ..Default::default()
-            },
-        );
-        // A field whose unit cannot reach the target leaf.
-        dm.fields.insert(
-            field_key(0x002),
-            FieldMapping {
-                path: "electrical.batteries.x.temperature".into(),
-                ..Default::default()
-            },
-        );
-        m.devices.insert("MLI-1".into(), dm);
-        // An entire device that is not on the bus.
-        m.devices.insert("GHOST".into(), DeviceMapping::default());
-
-        let emit = resolve(&devices, &m);
-        assert!(emit.is_empty(), "nothing publishable should survive");
+    fn only_loopback_may_run_the_api_without_a_token() {
+        assert!(is_loopback("127.0.0.1:3010"));
+        assert!(is_loopback("[::1]:3010"));
+        assert!(is_loopback("localhost:3010"));
+        assert!(!is_loopback("0.0.0.0:3010"));
+        assert!(!is_loopback("192.168.1.5:3010"));
+        assert!(!is_loopback("pi.local:3010"));
     }
 
     /// The one-shot metadata batch: one delta per published device, naming
@@ -929,7 +910,7 @@ mod tests {
     #[test]
     fn the_static_metadata_batch_names_each_published_device() {
         let devices = vec![mli()];
-        let emit = resolve(&devices, &seed_mapping(&devices));
+        let emit = emit_for(&devices, &publish::seed_mapping(&devices));
         let published: HashSet<DeviceId> = [devices[0].id].into_iter().collect();
 
         let batch = static_meta_batch(&devices, &emit, &published);
@@ -958,7 +939,7 @@ mod tests {
     #[test]
     fn an_unpublished_device_contributes_no_metadata() {
         let devices = vec![mli()];
-        let emit = resolve(&devices, &seed_mapping(&devices));
+        let emit = emit_for(&devices, &publish::seed_mapping(&devices));
         let batch = static_meta_batch(&devices, &emit, &HashSet::new());
         assert!(batch.is_empty());
     }
@@ -973,7 +954,7 @@ mod tests {
         let devices = vec![d];
         // Seed from the named version so the paths exist, then blank it.
         let named = vec![mli()];
-        let emit = resolve(&named, &seed_mapping(&named));
+        let emit = emit_for(&named, &publish::seed_mapping(&named));
         let published: HashSet<DeviceId> = [devices[0].id].into_iter().collect();
 
         let text = String::from_utf8(static_meta_batch(&devices, &emit, &published)).unwrap();
@@ -1029,8 +1010,7 @@ mod tests {
     #[test]
     fn nodes_come_from_the_paths_a_device_actually_uses() {
         let devices = vec![mli()];
-        let m = seed_mapping(&devices);
-        let emit = resolve(&devices, &m);
+        let emit = emit_for(&devices, &publish::seed_mapping(&devices));
         assert_eq!(
             nodes_of(devices[0].id, &emit),
             vec!["electrical.batteries.24v-service".to_string()]
@@ -1048,7 +1028,7 @@ mod tests {
             ],
         );
         let devices = vec![d];
-        let emit = resolve(&devices, &seed_mapping(&devices));
+        let emit = emit_for(&devices, &publish::seed_mapping(&devices));
         assert_eq!(
             nodes_of(devices[0].id, &emit),
             vec![
@@ -1061,7 +1041,7 @@ mod tests {
     #[test]
     fn every_published_leaf_carries_unit_metadata() {
         let devices = vec![mli()];
-        let emit = resolve(&devices, &seed_mapping(&devices));
+        let emit = emit_for(&devices, &publish::seed_mapping(&devices));
         for e in emit.values() {
             // Either the leaf has a unit, or it is a string/boolean leaf.
             let unitless = matches!(
@@ -1093,7 +1073,7 @@ mod tests {
             },
         );
         m.devices.insert("MLI-1".into(), dm);
-        let emit = resolve(&devices, &m);
+        let emit = emit_for(&devices, &m);
         let e = &emit[&(devices[0].id, 0x005)];
         assert_eq!(e.path, "electrical.converters.house.temperature");
         // The conversion still follows from the unit, not from the category.
@@ -1131,7 +1111,7 @@ mod tests {
             );
         }
         m.devices.insert("SCM-1".into(), dm);
-        let emit = resolve(&devices, &m);
+        let emit = emit_for(&devices, &m);
         let id = devices[0].id;
         assert_eq!(emit[&(id, 0x004)].plan.unit, Some("V"));
         let e = &emit[&(id, 0x009)];
@@ -1165,7 +1145,7 @@ mod tests {
             );
         }
         m.devices.insert("MCO-1".into(), dm);
-        let emit = resolve(&devices, &m);
+        let emit = emit_for(&devices, &m);
         let id = devices[0].id;
         assert!(emit[&(id, 0x001)].plan.truth["Activated"]);
         assert!(!emit.contains_key(&(id, 0x002)), "Alarm is ambiguous");
@@ -1190,6 +1170,7 @@ mod tests {
             )
             .unwrap(),
             device: "INT Inverter 1".into(),
+            put: false,
         };
         let options: Vec<String> = ["Standby", "On", "Alarm"]
             .iter()

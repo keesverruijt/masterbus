@@ -118,7 +118,18 @@ cache_dir = /var/lib/masterbus
 # Address masterbus-signalk listens on. Comment out for its default
 # (0.0.0.0:3009). A command-line argument still wins over this.
 # listen = 0.0.0.0:3009
+
+# Address masterbus-signalk serves its HTTP control API on (what the
+# Signal K plugin talks to). Comment out to leave the API off. Any
+# address other than loopback also needs api_token.
+# api_listen = 127.0.0.1:3010
+# api_token = change-me
 ```
+
+On every platform `MASTERBUS_CONFIG_DIR` (or `--config-dir` on
+`masterbus-signalk`) overrides the location, which is how the Signal K
+plugin keeps a daemon's config, mapping and cache under its own data
+directory.
 
 That directory is the only one this project configures per host. The Signal K
 sidecar's field mapping lives beside `config.ini` in the same directory, so
@@ -148,23 +159,28 @@ mapping to every other device with the same article, and `w` writes the file.
 The `+` prompt pre-fills a suggestion and shows the unit conversion the path
 implies.
 
-### Signal K sidecar
+### Signal K daemon
 
-`masterbus-signalk` is a long-running service that publishes MasterBus monitoring
-values as **Signal K deltas** (newline-delimited JSON) over TCP (default
-`0.0.0.0:3009`), with SI-unit conversion. A curated `mapping.json` beside
-`config.ini` says which field publishes to which Signal K path, keyed on device
-serial and field id; it is seeded on first run from a bundled per-model
-database, falling back to per-class name heuristics. Ships
-with a hardened systemd unit.
+`masterbus-signalk` is a long-running service that publishes MasterBus values
+as **Signal K deltas** (newline-delimited JSON) over TCP (default
+`0.0.0.0:3009`), with SI-unit conversion, and serves an **HTTP control API**
+(`docs/API.md`; off unless `api_listen` is set) through which the
+`signalk-masterbus` plugin browses devices, edits the mapping and writes
+fields. A curated `mapping.json` beside `config.ini` says which field publishes
+to which Signal K path, keyed on device serial and field id; it is seeded on
+first run from a bundled per-model database, falling back to per-class name
+heuristics. Ships with a hardened systemd unit for the case where the machine
+on the bus is not the one running Signal K.
 
 ```sh
-masterbus-signalk [listen-addr]
-# e.g. masterbus-signalk 0.0.0.0:3009
+masterbus-signalk [listen-addr] [--stream ADDR] [--api ADDR] [--api-token-file PATH] [--config-dir DIR]
+# e.g. masterbus-signalk --api 127.0.0.1:3010
 ```
 
-Without an argument it uses the `listen` key from `config.ini`, falling back to
-`0.0.0.0:3009`.
+Flags override `config.ini`; without any it uses the file's `listen` and
+`api_listen` keys, falling back to `0.0.0.0:3009` and no API. `--fake-bus`
+(with the `fake-bus` cargo feature) serves a canned three-device bus for
+trying things without hardware.
 
 ### Bus dump
 

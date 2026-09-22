@@ -25,11 +25,21 @@
 //!   the old per-class name table, both proposals with no authority.
 //! - [`database`] — bundled per-model suggestions keyed on article and field
 //!   id, for the models a name table cannot tell apart.
+//! - [`publish`] — what a mapping resolves to against the live bus: device
+//!   records, the per-field publishing plan, and structured diagnostics.
+//! - [`api`] — the HTTP control API `masterbus-signalk` serves to the Signal
+//!   K plugin, over the same records.
+//! - `fake` (feature `fake-bus`) — a canned three-device bus, for running the
+//!   daemon with no hardware.
 
 #![doc(hidden)]
 
+pub mod api;
 pub mod database;
+#[cfg(feature = "fake-bus")]
+pub mod fake;
 pub mod mapping;
+pub mod publish;
 pub mod seed;
 pub mod signalk;
 pub mod units;

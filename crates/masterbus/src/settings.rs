@@ -11,6 +11,12 @@
 //! - **macOS**: `$HOME/Library/Application Support/masterbus/config.ini`.
 //! - **Windows**: `%APPDATA%\masterbus\config.ini`.
 //!
+//! On every platform the `MASTERBUS_CONFIG_DIR` environment variable overrides
+//! all of the above: `config.ini` is then `$MASTERBUS_CONFIG_DIR/config.ini`,
+//! and a config file created there defaults its schema cache to
+//! `$MASTERBUS_CONFIG_DIR/cache`. That is how a supervisor such as the Signal K
+//! plugin keeps a daemon's whole state in one directory of its own choosing.
+//!
 //! Everything else this project stores per host lives in that same directory.
 //! In particular the Signal K sidecar's field mapping is `mapping.json` beside
 //! `config.ini` — see [`FileConfig::mapping_path`]. There is deliberately no
@@ -83,6 +89,12 @@ pub struct FileConfig {
     /// Address `masterbus-signalk` listens on; `None` = the tool's own default.
     /// Kept here so the systemd unit needs no environment file of its own.
     pub listen: Option<String>,
+    /// Address `masterbus-signalk` serves its HTTP control API on; `None` =
+    /// the API is off. The Signal K plugin talks to this.
+    pub api_listen: Option<String>,
+    /// Bearer token the control API requires. Optional on a loopback
+    /// `api_listen`, mandatory on any other address.
+    pub api_token: Option<String>,
     /// Path the file was loaded from / created at.
     pub path: PathBuf,
 }
@@ -139,7 +151,18 @@ impl FileConfig {
 /// file is being created. Mirrors the systemd unit's `StateDirectory` when the
 /// system path is chosen, so root-run daemons and user-run tools share schemas.
 fn default_cache_dir(config_path: &std::path::Path) -> Option<PathBuf> {
-    if config_path.starts_with("/etc/") {
+    default_cache_dir_with(config_path, config_dir_override())
+}
+
+/// [`default_cache_dir`] with the `MASTERBUS_CONFIG_DIR` override passed in,
+/// so it can be exercised without touching the process environment.
+fn default_cache_dir_with(
+    config_path: &std::path::Path,
+    config_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(dir) = config_dir {
+        Some(dir.join("cache"))
+    } else if config_path.starts_with("/etc/") {
         Some(PathBuf::from("/var/lib/masterbus"))
     } else {
         user_cache_dir()
@@ -196,6 +219,14 @@ fn try_use_dir(dir: &std::path::Path) -> bool {
 /// location on Linux when one is readable or writable; otherwise the
 /// OS-native per-user path.
 fn resolve_path() -> Result<PathBuf> {
+    resolve_path_with(config_dir_override())
+}
+
+/// [`resolve_path`] with the `MASTERBUS_CONFIG_DIR` override passed in.
+fn resolve_path_with(config_dir: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(dir) = config_dir {
+        return Ok(dir.join("config.ini"));
+    }
     #[cfg(target_os = "linux")]
     {
         let sys_dir = Path::new("/etc/default/masterbus");
@@ -216,6 +247,19 @@ fn resolve_path() -> Result<PathBuf> {
     user_config_path().ok_or_else(|| {
         Error::Connection("could not determine the per-user config path (no HOME?)".into())
     })
+}
+
+/// Environment variable that pins the configuration directory on every
+/// platform (see the module docs).
+pub const CONFIG_DIR_ENV: &str = "MASTERBUS_CONFIG_DIR";
+
+/// The directory `MASTERBUS_CONFIG_DIR` names, if it is set and not blank.
+fn config_dir_override() -> Option<PathBuf> {
+    let v = std::env::var_os(CONFIG_DIR_ENV)?;
+    if v.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(v))
 }
 
 #[cfg(unix)]
@@ -319,6 +363,8 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
     let mut device_name = String::new();
     let mut cache_dir: Option<PathBuf> = None;
     let mut listen: Option<String> = None;
+    let mut api_listen: Option<String> = None;
+    let mut api_token: Option<String> = None;
     for (lineno, line) in raw.lines().enumerate() {
         let lineno = lineno + 1;
         let stripped = line.split(['#', ';']).next().unwrap_or("").trim();
@@ -365,6 +411,8 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
                 cache_dir = Some(PathBuf::from(value));
             }
             "listen" if !value.is_empty() => listen = Some(value.to_string()),
+            "api_listen" if !value.is_empty() => api_listen = Some(value.to_string()),
+            "api_token" if !value.is_empty() => api_token = Some(value.to_string()),
             _ => {} // forward-compat: ignore unknown keys + empty cache_dir
         }
     }
@@ -376,6 +424,8 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
         device_name,
         cache_dir,
         listen,
+        api_listen,
+        api_token,
         path,
     })
 }
@@ -393,6 +443,14 @@ fn render(cfg: &FileConfig) -> String {
     let listen = match &cfg.listen {
         Some(a) => format!("listen = {a}\n"),
         None => "# listen = 0.0.0.0:3009\n".to_string(),
+    };
+    let api_listen = match &cfg.api_listen {
+        Some(a) => format!("api_listen = {a}\n"),
+        None => "# api_listen = 127.0.0.1:3010\n".to_string(),
+    };
+    let api_token = match &cfg.api_token {
+        Some(t) => format!("api_token = {t}\n"),
+        None => "# api_token = change-me\n".to_string(),
     };
     format!(
         "# masterbus configuration.\n\
@@ -414,7 +472,12 @@ fn render(cfg: &FileConfig) -> String {
          {cache}\n\
          # Address masterbus-signalk listens on. Comment out for its default\n\
          # (0.0.0.0:3009). A command-line argument still wins over this.\n\
-         {listen}",
+         {listen}\n\
+         # Address masterbus-signalk serves its HTTP control API on (what the\n\
+         # Signal K plugin talks to: devices, the mapping, writes). Comment out\n\
+         # to leave the API off. Any address other than loopback also needs\n\
+         # api_token, which a client sends as `Authorization: Bearer <token>`.\n\
+         {api_listen}{api_token}",
         dt = match cfg.device_type {
             DeviceType::Can => "can",
             DeviceType::Usb => "usb",
@@ -435,6 +498,8 @@ fn autodetect() -> Result<FileConfig> {
             device_name: serial,
             cache_dir: None,
             listen: None,
+            api_listen: None,
+            api_token: None,
             path: PathBuf::new(),
         });
     }
@@ -539,6 +604,47 @@ mod tests {
         assert_eq!(again.listen.as_deref(), Some("127.0.0.1:4000"));
     }
 
+    /// The control API is off unless asked for, so an install that predates
+    /// it does not silently open a port; and its keys survive a rewrite.
+    #[test]
+    fn api_keys_are_optional_and_round_trip() {
+        let cfg = parse("device_type = usb\ndevice_name =\n", PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.api_listen, None);
+        assert_eq!(cfg.api_token, None);
+        let rendered = render(&cfg);
+        assert!(rendered.contains("# api_listen = 127.0.0.1:3010"));
+        assert!(rendered.contains("# api_token = "));
+
+        let raw = "device_type = usb\ndevice_name =\napi_listen = 0.0.0.0:3010\napi_token = abc\n";
+        let cfg = parse(raw, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(cfg.api_listen.as_deref(), Some("0.0.0.0:3010"));
+        assert_eq!(cfg.api_token.as_deref(), Some("abc"));
+        let again = parse(&render(&cfg), PathBuf::from("t.ini")).unwrap();
+        assert_eq!(again.api_listen.as_deref(), Some("0.0.0.0:3010"));
+        assert_eq!(again.api_token.as_deref(), Some("abc"));
+    }
+
+    /// `MASTERBUS_CONFIG_DIR` pins the whole configuration directory, so a
+    /// supervisor can keep a daemon's config, mapping and cache together.
+    /// Tested through the `_with` variants: the environment is process-wide
+    /// and other tests here read it concurrently.
+    #[test]
+    fn config_dir_override_pins_config_and_cache_together() {
+        let over = Some(PathBuf::from("/tmp/mb-plugin-state"));
+        let p = resolve_path_with(over.clone()).unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/mb-plugin-state/config.ini"));
+        assert_eq!(
+            default_cache_dir_with(&p, over),
+            Some(PathBuf::from("/tmp/mb-plugin-state/cache"))
+        );
+        // Without the override the platform rules apply, and a system config
+        // still caches in the state directory.
+        assert_eq!(
+            default_cache_dir_with(Path::new("/etc/default/masterbus/config.ini"), None),
+            Some(PathBuf::from("/var/lib/masterbus"))
+        );
+    }
+
     #[test]
     fn parses_valid_file() {
         let raw = "\
@@ -589,10 +695,14 @@ mod tests {
             device_name: "can0".into(),
             cache_dir: Some(PathBuf::from("/var/lib/masterbus")),
             listen: Some("0.0.0.0:3009".into()),
+            api_listen: Some("0.0.0.0:3010".into()),
+            api_token: Some("s3cret".into()),
             path: PathBuf::from("t.ini"),
         };
         let s = render(&cfg);
         let back = parse(&s, PathBuf::from("t.ini")).unwrap();
+        assert_eq!(back.api_listen.as_deref(), Some("0.0.0.0:3010"));
+        assert_eq!(back.api_token.as_deref(), Some("s3cret"));
         assert_eq!(back.heartbeat_master, Some(1));
         assert_eq!(back.device_type, DeviceType::Can);
         assert_eq!(back.device_name, "can0");
@@ -662,9 +772,15 @@ mod tests {
             device_name: String::new(),
             cache_dir: None,
             listen: None,
+            api_listen: None,
+            api_token: None,
             path: PathBuf::from("t.ini"),
         };
         let rendered = render(&cfg);
+        assert!(
+            rendered.contains("# api_listen = 127.0.0.1:3010"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("# heartbeat_master = 000001"),
             "{rendered}"

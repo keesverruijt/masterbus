@@ -59,17 +59,37 @@ quits.
 
 ## `masterbus-signalk`
 
-[Signal K](https://signalk.org) sidecar: subscribes to the monitoring
-values of every device and serves Signal K deltas as newline-delimited
-JSON over TCP (default `0.0.0.0:3009`), with values converted to SI
-units. Which field lands where is a curated file, not a built-in table;
-see below. When that file is seeded, the instance id proposed for a
-device is its name lowercased and stripped of its leading class word
-(e.g. `BAT Main Batt 4` → `main-batt-4`).
+The [Signal K](https://signalk.org) daemon: subscribes to the fields the
+mapping names and serves Signal K deltas as newline-delimited JSON over
+TCP (default `0.0.0.0:3009`), with values converted to SI units, plus an
+HTTP control API (off by default) that the `signalk-masterbus` plugin
+uses to browse devices, edit the mapping and write fields. Which field
+lands where is a curated file, not a built-in table; see below. When
+that file is seeded, the instance id proposed for a device is its name
+lowercased and stripped of its leading class word (e.g. `BAT Main Batt
+4` → `main-batt-4`).
 
-    masterbus-signalk [listen-addr]
-    # e.g.: masterbus-signalk                # config.ini's `listen`, else 0.0.0.0:3009
-    #       masterbus-signalk 0.0.0.0:4000   # bind elsewhere
+    masterbus-signalk [listen-addr] [--stream ADDR] [--api ADDR]
+                      [--api-token-file PATH] [--config-dir DIR] [--fake-bus]
+    # e.g.: masterbus-signalk                       # config.ini's `listen`, else 0.0.0.0:3009
+    #       masterbus-signalk 0.0.0.0:4000          # bind the stream elsewhere
+    #       masterbus-signalk --api 127.0.0.1:3010  # also serve the control API
+
+The usual way to run it is **under the Signal K plugin**, which spawns it
+with `--config-dir` pointing into the plugin's own data directory and an
+API on loopback, so nothing here needs installing by hand. Run it
+yourself (the systemd unit below) when the machine on the bus is not the
+one running Signal K; the plugin then connects to it in *external* mode
+over `api_listen` / `api_token` from `config.ini`. The API is documented
+in [`docs/API.md`](../../docs/API.md). Once both listeners are bound the
+daemon prints one `READY {...}` line on stdout.
+
+`--fake-bus` (a build with the `fake-bus` cargo feature) serves a canned
+three-device bus instead of hardware, for trying the stream, the API or
+the plugin on a laptop:
+
+    cargo run -p masterbus-tools --features fake-bus --bin masterbus-signalk -- \
+        --fake-bus --api 127.0.0.1:3010 --config-dir /tmp/mb
 
 Sample delta:
 
@@ -153,7 +173,18 @@ number, falling back to per-class field-name heuristics. The database is
 the tier that can tell apart two models sharing a class code, and the tier a renamed field cannot fool.
 
 **Edits take effect live.** The service re-reads the file within a couple
-of seconds of it changing, so `w` in the editor is enough; no restart.
+of seconds of it changing, so `w` in the editor is enough; no restart. A
+mapping replaced through the API takes effect at once.
+
+**Writes.** An entry may carry `"put": true`, which tells the Signal K
+plugin to accept PUTs on the path: a switch in Signal K then sets the
+field, with the unit conversion run backwards (a `true` on an inverted
+boolean writes `false`; `293.15` on a `°C` field writes `20`). Writable
+settings live on a device's Configuration menu rather than Monitoring;
+the daemon discovers that menu when the mapping names one of its
+fields. The field still publishes as usual, so Signal K shows the state
+it set. A field that is read-only at the device's current access level
+needs an installer login, which the plugin can supply.
 
 ### Run as a systemd service
 

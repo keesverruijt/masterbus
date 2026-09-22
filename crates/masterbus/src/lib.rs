@@ -147,3 +147,9 @@ pub use protocol::VisualizationType;
 pub use runtime::{Config, DeviceEvent, ValueUpdate};
 pub use settings::{DeviceType, FileConfig};
 pub use value::{Date, Time, Value, WriteValue};
+
+/// A scriptable in-process MasterBus device and the transport to reach it
+/// over, built with the `fake-bus` feature. What the engine's own tests run
+/// against, and what `masterbus-signalk --fake-bus` serves.
+#[cfg(feature = "fake-bus")]
+pub use runtime::fakebus;

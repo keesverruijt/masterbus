@@ -30,7 +30,7 @@ use crate::protocol::{BTM1_META_ADDR_FLAG, can_class, meta_op};
 use crate::transport::{Transport, TransportRx, TransportTx};
 
 /// The fake device's address (a CombiMaster's, from the captures).
-pub(crate) const ADDR: u32 = 0x188EA2;
+pub const ADDR: u32 = 0x188EA2;
 
 /// How often the device announces itself. A real one broadcasts every second
 /// or two; a test shouldn't wait that long to connect.
@@ -46,7 +46,7 @@ fn id(class: u8, addr: u32) -> u32 {
 
 /// One field's metadata, as the per-field opcodes report it.
 #[derive(Clone)]
-pub(crate) struct FakeField {
+pub struct FakeField {
     /// String id of the field name (0 = no name).
     pub name_sid: u16,
     /// String id of the unit (0 = none).
@@ -66,7 +66,7 @@ pub(crate) struct FakeField {
 
 /// One group, as the schema channel reports it.
 #[derive(Clone)]
-pub(crate) struct FakeGroup {
+pub struct FakeGroup {
     /// String id of the group name.
     pub name_sid: u16,
     /// Btm1 wire indices of the group's fields, in display order.
@@ -74,7 +74,7 @@ pub(crate) struct FakeGroup {
 }
 
 /// A scriptable MasterBus device.
-pub(crate) struct Device {
+pub struct Device {
     /// The device's bus address.
     pub addr: u32,
     /// Device-family byte in the broadcast.
@@ -112,6 +112,12 @@ pub(crate) struct Device {
     pub meta: HashMap<FieldId, FakeField>,
     /// Next string id handed out by the `with_*` builders.
     next_sid: u16,
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Device::new()
+    }
 }
 
 impl Device {
@@ -434,7 +440,13 @@ impl Device {
             [0x30, lo, hi, seq] => {
                 let sid = u16::from_le_bytes([*lo, *hi]);
                 let s = self.strings.get(&sid).cloned().unwrap_or_default();
-                let rest = s.as_bytes().get(*seq as usize * 4..).unwrap_or(&[]);
+                // On the wire a string is Latin-1, one byte per char (`°` is
+                // 0xB0), which is how the engine decodes it.
+                let bytes: Vec<u8> = s
+                    .chars()
+                    .map(|c| u8::try_from(c as u32).unwrap_or(b'?'))
+                    .collect();
+                let rest = bytes.get(*seq as usize * 4..).unwrap_or(&[]);
                 let chunk = &rest[..rest.len().min(4)];
                 let mut d = vec![0x30, *lo, *hi, *seq];
                 d.extend_from_slice(chunk);
@@ -514,10 +526,13 @@ impl Device {
 
 /// A running fake bus: the device thread plus a record of everything the
 /// engine transmitted. Dropping it stops the thread.
-pub(crate) struct FakeBus {
+pub struct FakeBus {
     sent: Arc<Mutex<Vec<Frame>>>,
-    /// The device itself, for mid-test inspection and reconfiguration.
+    /// The device itself (the first, on a bus of several), for mid-test
+    /// inspection and reconfiguration.
     pub device: Arc<Mutex<Device>>,
+    /// Every device on the bus, in the order given to [`FakeBus::start_many`].
+    pub devices: Vec<Arc<Mutex<Device>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -525,38 +540,53 @@ pub(crate) struct FakeBus {
 impl FakeBus {
     /// Start the device thread and hand back the transport to connect over.
     pub fn start(device: Device) -> (FakeBus, Box<dyn Transport>) {
+        Self::start_many(vec![device])
+    }
+
+    /// Several devices on one bus, each answering the frames addressed to it
+    /// and announcing itself on its own. `device` is the first of them.
+    pub fn start_many(devices: Vec<Device>) -> (FakeBus, Box<dyn Transport>) {
+        assert!(!devices.is_empty(), "a fake bus needs at least one device");
         let (down_tx, down_rx) = unbounded::<Frame>();
         let (up_tx, up_rx) = unbounded::<Frame>();
-        let device = Arc::new(Mutex::new(device));
+        let devices: Vec<Arc<Mutex<Device>>> = devices
+            .into_iter()
+            .map(|d| Arc::new(Mutex::new(d)))
+            .collect();
+        let device = devices[0].clone();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let thread = {
-            let (device, sent, stop) = (device.clone(), sent.clone(), stop.clone());
+            let (devices, sent, stop) = (devices.clone(), sent.clone(), stop.clone());
             std::thread::Builder::new()
                 .name("fake-device".into())
                 .spawn(move || {
                     let mut next_broadcast = Instant::now();
                     while !stop.load(Ordering::Relaxed) {
                         if Instant::now() >= next_broadcast {
-                            let frame = {
-                                let d = device.lock().unwrap();
-                                (!d.quiet).then(|| d.broadcast())
-                            };
-                            if let Some(f) = frame
-                                && up_tx.send(f).is_err()
-                            {
-                                return;
+                            for device in &devices {
+                                let frame = {
+                                    let d = device.lock().unwrap();
+                                    (!d.quiet).then(|| d.broadcast())
+                                };
+                                if let Some(f) = frame
+                                    && up_tx.send(f).is_err()
+                                {
+                                    return;
+                                }
                             }
                             next_broadcast = Instant::now() + BROADCAST_INTERVAL;
                         }
                         match down_rx.recv_timeout(Duration::from_millis(1)) {
                             Ok((raw_id, data)) => {
                                 sent.lock().unwrap().push((raw_id, data.clone()));
-                                let replies = device.lock().unwrap().respond(raw_id, &data);
-                                for r in replies {
-                                    if up_tx.send(r).is_err() {
-                                        return;
+                                for device in &devices {
+                                    let replies = device.lock().unwrap().respond(raw_id, &data);
+                                    for r in replies {
+                                        if up_tx.send(r).is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -572,6 +602,7 @@ impl FakeBus {
             FakeBus {
                 sent,
                 device,
+                devices,
                 stop,
                 thread: Some(thread),
             },

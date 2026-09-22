@@ -13,6 +13,11 @@ categories = ["embedded", "hardware-support", "network-programming"]
 [lib]
 name = "masterbus"
 
+[features]
+# Build the scriptable fake device (`masterbus::fakebus`) into the library,
+# so a program can run against a canned bus with no hardware.
+fake-bus = []
+
 [dependencies]
 thiserror.workspace = true
 crossbeam-channel.workspace = true

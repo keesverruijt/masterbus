@@ -36,6 +36,11 @@ path = "src/bin/masterbus-set-field.rs"
 name = "masterbus-dump"
 path = "src/bin/masterbus-dump.rs"
 
+[features]
+# `masterbus-signalk --fake-bus`: a canned three-device bus with no hardware,
+# for smoke tests and the Signal K plugin's CI.
+fake-bus = ["masterbus/fake-bus"]
+
 [dependencies]
 masterbus.workspace = true
 ratatui.workspace = true
@@ -45,3 +50,6 @@ serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
 tui-logger = { version = "0.18", default-features = false, features = ["crossterm"] }
+# The HTTP control API of masterbus-signalk. Synchronous and thread-based,
+# like the rest of the engine; no async runtime.
+tiny_http = "0.12"

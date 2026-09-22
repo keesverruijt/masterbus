@@ -41,6 +41,12 @@ impl Conversion {
         raw * self.scale + self.offset
     }
 
+    /// The inverse: from an SI value back to what the device wants written.
+    /// What a Signal K PUT of `293.15` on a `°C` field turns into `20`.
+    pub fn unapply(self, si: f64) -> f64 {
+        (si - self.offset) / self.scale
+    }
+
     /// Whether this conversion leaves the value untouched.
     pub fn is_identity(self) -> bool {
         self.scale == 1.0 && self.offset == 0.0
@@ -177,6 +183,22 @@ mod tests {
     #[test]
     fn percent_becomes_ratio() {
         assert!((conv("%", "ratio").apply(87.0) - 0.87).abs() < 1e-9);
+    }
+
+    /// A write goes the other way: the SI number Signal K holds becomes the
+    /// device's own unit, exactly undoing the read conversion.
+    #[test]
+    fn unapply_undoes_apply() {
+        for (dev, sk, raw) in [
+            ("\u{b0}C", "K", 20.0),
+            ("%", "ratio", 87.0),
+            ("kWh", "J", 1.5),
+        ] {
+            let c = conv(dev, sk);
+            assert!((c.unapply(c.apply(raw)) - raw).abs() < 1e-9, "{dev}");
+        }
+        assert!((conv("\u{b0}C", "K").unapply(293.15) - 20.0).abs() < 1e-9);
+        assert_eq!(Conversion::IDENTITY.unapply(12.5), 12.5);
     }
 
     #[test]

@@ -391,11 +391,283 @@ pub fn encode(
     }
 }
 
+/// Decode the JSON a Signal K PUT carries into the [`Value`] to write to the
+/// field: [`encode`] run backwards.
+///
+/// `template` is the field's current value, which says what kind of value
+/// the field holds (and, for an enum, carries its labels). The rules mirror
+/// the encoder's: a number is converted from SI back to the device unit; a
+/// boolean is negated by `invert`; an enum with a truth table accepts a
+/// boolean and picks the first label that means it; an enum without one
+/// accepts its label, case-insensitively, or a bare option index. The
+/// message on `Err` is meant for the person who sent the PUT.
+pub fn decode(
+    json: &serde_json::Value,
+    template: &Value,
+    conv: Conversion,
+    invert: bool,
+    truth: &BTreeMap<String, bool>,
+) -> Result<Value, String> {
+    let labels: &[String] = match template {
+        Value::List { options, .. } => options,
+        Value::Eventable { labels, .. } => labels,
+        _ => &[],
+    };
+    match template {
+        Value::Float(_) => {
+            let si = json
+                .as_f64()
+                .ok_or_else(|| format!("expected a number, got {json}"))?;
+            Ok(Value::Float(conv.unapply(si) as f32))
+        }
+        Value::Boolean(_) => {
+            let b = as_bool(json).ok_or_else(|| format!("expected true or false, got {json}"))?;
+            Ok(Value::Boolean(b ^ invert))
+        }
+        Value::List { .. } | Value::Eventable { .. } if !truth.is_empty() => {
+            let want = as_bool(json)
+                .ok_or_else(|| format!("expected true or false, got {json}"))?
+                ^ invert;
+            let index = labels
+                .iter()
+                .position(|l| {
+                    truth
+                        .iter()
+                        .any(|(k, v)| k.eq_ignore_ascii_case(l) && *v == want)
+                })
+                .ok_or_else(|| format!("no label of this field means {want}"))?;
+            Ok(with_index(template, index as i32))
+        }
+        Value::List { .. } | Value::Eventable { .. } => {
+            let index = match json {
+                serde_json::Value::String(s) => labels
+                    .iter()
+                    .position(|l| l.eq_ignore_ascii_case(s.trim()))
+                    .ok_or_else(|| format!("{s:?} is not one of {}", labels.join(" / ")))?,
+                serde_json::Value::Number(n) => {
+                    let i = n
+                        .as_u64()
+                        .filter(|i| (*i as usize) < labels.len().max(1))
+                        .ok_or_else(|| format!("{n} is not an option index of this field"))?;
+                    i as usize
+                }
+                other => return Err(format!("expected a label or an index, got {other}")),
+            };
+            Ok(with_index(template, index as i32))
+        }
+        Value::Text { sid, .. } => {
+            let text = json
+                .as_str()
+                .ok_or_else(|| format!("expected a string, got {json}"))?;
+            Ok(Value::Text {
+                sid: *sid,
+                text: text.to_string(),
+            })
+        }
+        Value::Time(_) | Value::Date(_) | Value::DeviceRef { .. } | Value::Invalid => {
+            Err("this kind of field cannot be written through Signal K".into())
+        }
+    }
+}
+
+/// A JSON boolean, or the strings and numbers people send as one.
+fn as_bool(json: &serde_json::Value) -> Option<bool> {
+    match json {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::Number(n) => n.as_f64().map(|x| x != 0.0),
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "on" | "1" | "yes" => Some(true),
+            "false" | "off" | "0" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The template enum with a different selection.
+fn with_index(template: &Value, index: i32) -> Value {
+    match template {
+        Value::List { options, .. } => Value::List {
+            index,
+            options: options.clone(),
+        },
+        Value::Eventable { labels, .. } => Value::Eventable {
+            index,
+            labels: labels.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::units::conversion;
     use masterbus::value::Time;
+
+    fn list(labels: &[&str]) -> Value {
+        Value::List {
+            index: 0,
+            options: labels.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A PUT of the SI number Signal K holds becomes the device's own unit.
+    #[test]
+    fn decode_converts_numbers_back_to_the_device_unit() {
+        let c = conv("\u{b0}C", "electrical.batteries.x.temperature");
+        let v = decode(
+            &serde_json::json!(293.15),
+            &Value::Float(0.0),
+            c,
+            false,
+            NO_TRUTH,
+        )
+        .unwrap();
+        let Value::Float(x) = v else { panic!("float") };
+        assert!((x - 20.0).abs() < 1e-4);
+        assert!(
+            decode(
+                &serde_json::json!("warm"),
+                &Value::Float(0.0),
+                c,
+                false,
+                NO_TRUTH
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn decode_honours_invert_on_booleans() {
+        let c = Conversion::IDENTITY;
+        let t = Value::Boolean(false);
+        assert_eq!(
+            decode(&serde_json::json!(true), &t, c, false, NO_TRUTH).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            decode(&serde_json::json!(true), &t, c, true, NO_TRUTH).unwrap(),
+            Value::Boolean(false)
+        );
+        // The lenient spellings a switch UI may send.
+        assert_eq!(
+            decode(&serde_json::json!("on"), &t, c, false, NO_TRUTH).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            decode(&serde_json::json!(0), &t, c, false, NO_TRUTH).unwrap(),
+            Value::Boolean(false)
+        );
+    }
+
+    /// An enum on a boolean leaf: `true` selects the label the truth table
+    /// says is true, which is the write a Signal K switch wants to make.
+    #[test]
+    fn decode_picks_the_enum_label_a_truth_table_maps_to() {
+        let t = list(&["Standby", "Activated"]);
+        let truth: BTreeMap<String, bool> = [
+            ("Standby".to_string(), false),
+            ("Activated".to_string(), true),
+        ]
+        .into();
+        let v = decode(
+            &serde_json::json!(true),
+            &t,
+            Conversion::IDENTITY,
+            false,
+            &truth,
+        )
+        .unwrap();
+        assert_eq!(v.index(), Some(1));
+        let v = decode(
+            &serde_json::json!(false),
+            &t,
+            Conversion::IDENTITY,
+            false,
+            &truth,
+        )
+        .unwrap();
+        assert_eq!(v.index(), Some(0));
+        // Invert flips which label is meant.
+        let v = decode(
+            &serde_json::json!(true),
+            &t,
+            Conversion::IDENTITY,
+            true,
+            &truth,
+        )
+        .unwrap();
+        assert_eq!(v.index(), Some(0));
+        // A table with no label for the requested meaning is refused.
+        let only_true: BTreeMap<String, bool> = [("Activated".to_string(), true)].into();
+        assert!(
+            decode(
+                &serde_json::json!(false),
+                &t,
+                Conversion::IDENTITY,
+                false,
+                &only_true
+            )
+            .is_err()
+        );
+    }
+
+    /// An enum published as a mode string is written back by label (the
+    /// lowercase the encoder emits is accepted) or by index.
+    #[test]
+    fn decode_accepts_a_label_or_an_index_for_a_mode_enum() {
+        let t = list(&["Off", "Bulk", "Float"]);
+        let c = Conversion::IDENTITY;
+        assert_eq!(
+            decode(&serde_json::json!("float"), &t, c, false, NO_TRUTH)
+                .unwrap()
+                .index(),
+            Some(2)
+        );
+        assert_eq!(
+            decode(&serde_json::json!(1), &t, c, false, NO_TRUTH)
+                .unwrap()
+                .index(),
+            Some(1)
+        );
+        let e = decode(&serde_json::json!("Trickle"), &t, c, false, NO_TRUTH).unwrap_err();
+        assert!(e.contains("Off / Bulk / Float"), "{e}");
+        assert!(decode(&serde_json::json!(7), &t, c, false, NO_TRUTH).is_err());
+    }
+
+    #[test]
+    fn decode_keeps_a_text_fields_string_slot() {
+        let t = Value::Text {
+            sid: 0x104,
+            text: "Old".into(),
+        };
+        let v = decode(
+            &serde_json::json!("Nav Chg"),
+            &t,
+            Conversion::IDENTITY,
+            false,
+            NO_TRUTH,
+        )
+        .unwrap();
+        assert_eq!(
+            v,
+            Value::Text {
+                sid: 0x104,
+                text: "Nav Chg".into()
+            }
+        );
+        assert!(
+            decode(
+                &serde_json::json!(1),
+                &Value::Invalid,
+                Conversion::IDENTITY,
+                false,
+                NO_TRUTH
+            )
+            .is_err()
+        );
+    }
 
     const NO_TRUTH: &BTreeMap<String, bool> = &BTreeMap::new();
     fn conv(dev: &str, path: &str) -> Conversion {

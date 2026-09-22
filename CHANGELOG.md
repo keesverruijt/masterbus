@@ -7,6 +7,44 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`masterbus-signalk` is now a daemon with an HTTP control API**, the
+  half the new Signal K plugin talks to; the delta stream is unchanged. Off
+  unless `api_listen` is set in `config.ini` (or `--api` is passed), so an
+  existing install opens no new port. The API lists devices and fields
+  (`GET /api/devices`, discovering Configuration on request), reads and
+  replaces the mapping with the same diagnostics the daemon logs
+  (`GET`/`PUT /api/mapping`), proposes and validates entries the way the
+  TUI's editor does (`POST /api/mapping/suggest`, `/validate`,
+  `/apply-article`), and writes a field from a Signal K PUT with the
+  mapping's unit conversion run backwards, logging in first when asked
+  (`PUT /api/devices/{serial}/fields/{id}`). A bearer token (`api_token`, or
+  `--api-token-file`) is required on any address other than loopback. The
+  contract is in `docs/API.md`, versioned by `apiVersion`.
+- **Running under a supervisor.** `--config-dir DIR` (or
+  `MASTERBUS_CONFIG_DIR`, honoured on every platform) keeps `config.ini`,
+  `mapping.json` and the schema cache under one directory; `--stream ADDR`
+  is the flag form of the old positional listen address; and once both
+  listeners are bound the daemon prints one `READY {...}` line on stdout.
+- **`"put": true` on a mapping entry** marks a writable field as a Signal K
+  PUT target. The daemon discovers a device's Configuration menu when its
+  mapping names a field outside Monitoring, since that is where the
+  writable settings live; the entry publishes like any other, so Signal K
+  shows the state it set.
+- **`masterbus-signalk --fake-bus`** (a `fake-bus` cargo feature on both
+  crates) runs the daemon against a canned three-device bus: two batteries
+  of one article, and an inverter with an enum that cycles through `Alarm`
+  and a writable checkbox on Configuration. Enough to exercise the stream,
+  the API and the plugin without hardware; the engine's own test fake,
+  extended to several devices per bus.
+
+### Changed
+- Mapping diagnostics are structured (`publish::Diagnostic`: severity,
+  serial, device, field, path, message) and shared between the daemon's
+  log and the API, rather than `eprintln!`ed on the spot. "Apply to this
+  article" moved from the TUI into the library so the API and the TUI run
+  one implementation.
+
+### Added
 - **A fake-bus test harness, and workspace coverage from 38% to 83%.** Below
   the pure-logic modules the engine had no tests at all: the scheduler, the
   reader, the shared device state and the whole discovery path were at 0%, as

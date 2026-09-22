@@ -1,8 +1,10 @@
 //! Runtime engine: reader thread, single bus scheduler, shared state.
 
 mod discovery;
-#[cfg(test)]
-pub(crate) mod fakebus;
+// Also built behind the `fake-bus` feature, so `masterbus-signalk --fake-bus`
+// can run a canned bus for smoke tests and the Signal K plugin's CI.
+#[cfg(any(test, feature = "fake-bus"))]
+pub mod fakebus;
 mod framelog;
 mod reader;
 mod scheduler;
