@@ -18,6 +18,11 @@ name = "masterbus"
 # so a program can run against a canned bus with no hardware.
 fake-bus = []
 
+# docs.rs documents the fake bus too, so its API is visible without
+# enabling the feature locally.
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 thiserror.workspace = true
 crossbeam-channel.workspace = true

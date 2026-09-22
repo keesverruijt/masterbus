@@ -81,7 +81,7 @@ API on loopback, so nothing here needs installing by hand. Run it
 yourself (the systemd unit below) when the machine on the bus is not the
 one running Signal K; the plugin then connects to it in *external* mode
 over `api_listen` / `api_token` from `config.ini`. The API is documented
-in [`docs/API.md`](../../docs/API.md). Once both listeners are bound the
+in [`docs/API.md`](https://github.com/keesverruijt/masterbus/blob/main/docs/API.md). Once both listeners are bound the
 daemon prints one `READY {...}` line on stdout.
 
 `--fake-bus` (a build with the `fake-bus` cargo feature) serves a canned
