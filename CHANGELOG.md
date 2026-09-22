@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-22
+
 ### Added
 - **`masterbus-signalk` is now a daemon with an HTTP control API**, the
   half the new Signal K plugin talks to; the delta stream is unchanged. Off
