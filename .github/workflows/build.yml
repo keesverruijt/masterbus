@@ -75,7 +75,10 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
+          # The fake bus is feature-gated; lint and test it too, or it rots.
+          cargo clippy --workspace --all-targets --features masterbus-tools/fake-bus -- -D warnings
           cargo test --workspace
+          cargo test --workspace --features masterbus-tools/fake-bus
           cargo doc --workspace --no-deps
 
       - name: Build release (whole workspace)
