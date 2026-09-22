@@ -85,8 +85,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
-      # Shippable artifacts: the four `masterbus-tools` binaries (TUI
-      # + set-field + dump everywhere, signalk on Linux only), the FFI
+      # Shippable artifacts: the four `masterbus-tools` binaries, the FFI
       # library + header, and (Linux only) the signalk systemd unit. On
       # Linux (musl) rustc drops the cdylib crate type, so only the
       # static libmasterbus_ffi.a ships there, no .so. The
@@ -100,8 +99,10 @@ jobs:
           dist="masterbus-${{ matrix.target }}"
           mkdir -p "$dist"
           cp crates/masterbus-ffi/include/masterbus.h "$dist/"
-          # Cross-platform tools (with or without .exe)
-          for b in masterbus-tui masterbus-set-field masterbus-dump; do
+          # Cross-platform tools (with or without .exe). masterbus-signalk
+          # ships everywhere too: the USB link works on every platform, and
+          # the signalk-masterbus plugin bundles the daemon for each.
+          for b in masterbus-tui masterbus-set-field masterbus-dump masterbus-signalk; do
             if [ -f "$out/$b.exe" ]; then cp "$out/$b.exe" "$dist/"; else cp "$out/$b" "$dist/"; fi
           done
           # FFI library + static lib (whichever names this platform produced)
@@ -109,12 +110,9 @@ jobs:
                    masterbus_ffi.dll masterbus_ffi.dll.lib masterbus_ffi.lib; do
             [ -f "$out/$f" ] && cp "$out/$f" "$dist/"
           done
-          # Signal K sidecar is Linux/SocketCAN-only.
+          # The systemd unit only makes sense on Linux.
           case "${{ matrix.target }}" in
-            *linux*)
-              cp "$out/masterbus-signalk" "$dist/"
-              cp crates/masterbus-tools/etc/masterbus-signalk.service "$dist/"
-              ;;
+            *linux*) cp crates/masterbus-tools/etc/masterbus-signalk.service "$dist/" ;;
           esac
           echo "DIST=$dist" >> "$GITHUB_ENV"
 
