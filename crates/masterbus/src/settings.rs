@@ -519,6 +519,8 @@ fn autodetect() -> Result<FileConfig> {
                 device_name: one.clone(),
                 cache_dir: None,
                 listen: None,
+                api_listen: None,
+                api_token: None,
                 path: PathBuf::new(),
             }),
             many => Err(Error::Connection(format!(
