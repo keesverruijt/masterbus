@@ -776,20 +776,37 @@ fn key_hints(app: &App) -> &'static str {
         return "Esc close";
     }
     if app.login.is_some() {
-        return "↑/↓ select · Enter ok · Esc cancel";
+        return if app.login_at_password_stage() {
+            "type the code · Enter submit · Esc cancel"
+        } else {
+            "↑/↓ select · Enter next · Esc cancel"
+        };
     }
     if app.discovering() {
         return "Esc cancel · q quit";
     }
-    match (&app.focus, app.mapping_mode()) {
-        (Focus::Devices, true) => {
+    // The Summary tab has no fields, so nothing to edit or map.
+    if app.focus == Focus::Fields && app.cur_tab == TabKind::Summary {
+        return if app.mapping_mode() {
+            "w write mapping · Tab tabs · l login · Esc back · q quit"
+        } else {
+            "Tab tabs · l login · Esc back · q quit"
+        };
+    }
+    // `~` only does something when logs go to the in-TUI pane.
+    match (&app.focus, app.mapping_mode(), app.logs_in_tui) {
+        (Focus::Devices, true, true) => {
             "w write mapping · ↑/↓ select · Enter open · l login · ~ logs · q quit"
         }
-        (Focus::Devices, false) => "↑/↓ select · Enter open · l login · ~ logs · q quit",
-        (Focus::Fields, true) => {
-            "+ map · - unmap · a copy to same model · w write · ↑/↓ move · Tab tabs · Enter edit · Esc back · q quit"
+        (Focus::Devices, true, false) => {
+            "w write mapping · ↑/↓ select · Enter open · l login · q quit"
         }
-        (Focus::Fields, false) => {
+        (Focus::Devices, false, true) => "↑/↓ select · Enter open · l login · ~ logs · q quit",
+        (Focus::Devices, false, false) => "↑/↓ select · Enter open · l login · q quit",
+        (Focus::Fields, true, _) => {
+            "+ map · - unmap · a copy to same model · w write · ↑/↓ move · Tab tabs · Enter edit · ? values · Esc back · q quit"
+        }
+        (Focus::Fields, false, _) => {
             "↑/↓ move · Tab/⇧Tab tabs · Enter edit · r reread · ? values · l login · Esc back · q quit"
         }
     }

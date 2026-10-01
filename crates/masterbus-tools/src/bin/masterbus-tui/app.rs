@@ -238,11 +238,9 @@ impl App {
             login: None,
             pending: None,
             tick: 0,
-            status: if logs_in_tui {
-                "scanning bus… ↑/↓ select · Enter open · l login · ~ logs · q quit".into()
-            } else {
-                "scanning bus… ↑/↓ select · Enter open · l login · q quit".into()
-            },
+            // Key help has a footer line of its own (`ui::key_hints`); the
+            // status line says where you are and what just happened.
+            status: "scanning bus…".into(),
             should_quit: false,
             show_logs: false,
             logs_in_tui,
@@ -343,10 +341,7 @@ impl App {
             self.idents.lock().unwrap().insert(id, i.clone());
         }
         self.cur_access_level = self.bus.device(id).access_level().ok();
-        self.status = format!(
-            "{} / Summary — Tab switch · Esc back",
-            self.device_label(id)
-        );
+        self.status = format!("{} / Summary", self.device_label(id));
     }
 
     fn switch_tab(&mut self, tab: TabKind) {
@@ -509,16 +504,7 @@ impl App {
         };
         self.row_sel = 0;
         self.select_first_field();
-        self.status = format!(
-            "{} / {} — Tab switch · Enter edit · ? values{} · Esc back",
-            self.device_label(id),
-            menu_label(menu),
-            if self.mapping_mode() {
-                " · + map · - unmap · a apply to article · w write"
-            } else {
-                ""
-            }
-        );
+        self.status = format!("{} / {}", self.device_label(id), menu_label(menu));
     }
 
     fn show_settings(&mut self, id: u32, fields: Vec<FieldInfo>) {
@@ -539,7 +525,7 @@ impl App {
         self.row_sel = 0;
         self.select_first_field();
         self.status = format!(
-            "{} / Settings ({} Btm3 fields) — Tab switch · Enter edit · ? values · Esc back",
+            "{} / Settings ({} Btm3 fields)",
             self.device_label(id),
             fields.len()
         );
@@ -566,7 +552,7 @@ impl App {
         self.cur_info = None;
         self.cur_access_level = None;
         self.cur_device = None;
-        self.status = "↑/↓ select · Enter open · q quit".into();
+        self.status.clear();
     }
 
     // ---- field pane -------------------------------------------------------
@@ -874,7 +860,7 @@ impl App {
             current,
             stage: LoginStage::PickLevel,
         });
-        self.status = "select access level — ↑/↓ pick · Enter next · Esc cancel".into();
+        self.status = "select access level".into();
     }
 
     pub fn login_move(&mut self, delta: i32) {
@@ -943,7 +929,7 @@ impl App {
                         level,
                         buf: String::new(),
                     };
-                    self.status = "enter password — type · Enter submit · Esc cancel".into();
+                    self.status = "enter password".into();
                     self.login = Some(p);
                 }
             }
@@ -1403,7 +1389,7 @@ impl App {
                         ed.mode_leaf()
                     )
                 } else {
-                    "boolean leaf: say which labels mean true (Space toggles, Enter saves)".into()
+                    "boolean leaf: say which labels mean true".into()
                 };
                 self.path_editor = Some(ed);
                 return;
@@ -1422,9 +1408,7 @@ impl App {
             ed.notify = signalk::notify_default(&ed.options);
             ed.notify_offered = true;
             ed.stage = Stage::Notify(0);
-            self.status =
-                "labels that should raise a Signal K notification (Space cycles, Enter saves)"
-                    .into();
+            self.status = "labels that should raise a Signal K notification".into();
             self.path_editor = Some(ed);
             return;
         }
