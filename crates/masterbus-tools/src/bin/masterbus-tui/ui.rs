@@ -161,11 +161,17 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect, avoid: Option<Rect>) {
     let Some(ed) = app.path_editor.as_ref() else {
         return;
     };
+    // Where the value comes from, in full: the field name alone does not
+    // say which of ten identical batteries is being mapped.
+    let source = match app.cur_device {
+        Some(id) => format!("{} > {}", app.device_label(id), ed.field_name),
+        None => ed.field_name.clone(),
+    };
     if let Stage::Truth(sel) = ed.stage {
-        return draw_truth_modal(f, ed, sel, area, avoid);
+        return draw_truth_modal(f, ed, &source, sel, area, avoid);
     }
     if let Stage::Notify(sel) = ed.stage {
-        return draw_notify_modal(f, ed, sel, area, avoid);
+        return draw_notify_modal(f, ed, &source, sel, area, avoid);
     }
     let w = area.width.saturating_sub(4).clamp(30, 84);
 
@@ -199,7 +205,7 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect, avoid: Option<Rect>) {
     }
     let body = vec![
         Line::from(Span::styled(
-            format!("{} ({unit})", ed.field_name),
+            format!("{source} ({unit})"),
             Style::new().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(origin, Style::new().fg(Color::DarkGray))),
@@ -276,6 +282,7 @@ fn wrapped_rows(width: usize, cols: usize) -> u16 {
 fn draw_truth_modal(
     f: &mut Frame,
     ed: &crate::app::PathEditor,
+    source: &str,
     sel: usize,
     area: Rect,
     avoid: Option<Rect>,
@@ -283,7 +290,7 @@ fn draw_truth_modal(
     let w = area.width.saturating_sub(4).clamp(30, 84);
     let mut body = vec![
         Line::from(Span::styled(
-            format!("{} → {}", ed.field_name, ed.buf.trim()),
+            format!("{source} → {}", ed.buf.trim()),
             Style::new().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -327,6 +334,7 @@ fn draw_truth_modal(
 fn draw_notify_modal(
     f: &mut Frame,
     ed: &crate::app::PathEditor,
+    source: &str,
     sel: usize,
     area: Rect,
     avoid: Option<Rect>,
@@ -334,7 +342,7 @@ fn draw_notify_modal(
     let w = area.width.saturating_sub(4).clamp(30, 84);
     let mut body = vec![
         Line::from(Span::styled(
-            format!("{} → {}", ed.field_name, ed.buf.trim()),
+            format!("{source} → {}", ed.buf.trim()),
             Style::new().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -1527,6 +1535,16 @@ mod render_tests {
             );
             assert!(s.contains("Signal K path"), "{h}:\n{s}");
         }
+    }
+
+    #[test]
+    fn the_path_modal_names_the_device_field_and_unit() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.names.lock().unwrap().insert(ADDR, "BAT House".into());
+        app.path_editor = Some(path_editor("electrical.batteries.house.voltage"));
+        let s = screen(&app);
+        assert!(s.contains("BAT House > Voltage (in V)"), "{s}");
     }
 
     #[test]
