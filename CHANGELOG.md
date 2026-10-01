@@ -7,6 +7,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`--version` on every tool**: `masterbus-tui`, `masterbus-set-field`
+  and `masterbus-dump` now print their version, as `masterbus-signalk`
+  already did.
 - **`masterbus-tui --fake-bus`** (with the `fake-bus` cargo feature): the
   canned three-device bus `masterbus-signalk --fake-bus` already serves,
   now browsable and mappable in the TUI with no hardware. The mapping goes
@@ -14,6 +17,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trial run cannot touch the real one.
 
 ### Changed
+- **`--help` says where the settings are.** Instead of pointing at
+  `masterbus::FileConfig`, which means nothing to someone running the
+  tool, every tool's help prints the actual `config.ini` and
+  `mapping.json` paths on this machine. `masterbus-set-field --help` now
+  exits successfully, and its usage keeps its indentation.
 - **The TUI's mapping editor is easier to drive** (from a tester's first
   session on a Pi 3B+):
   - The Signal K path can be edited in place: ←/→, Home/End, Delete, and

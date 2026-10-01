@@ -43,3 +43,21 @@ pub mod publish;
 pub mod seed;
 pub mod signalk;
 pub mod units;
+
+/// The help-text paragraph that says where the settings live: the actual
+/// paths on this host, which is what a person reading `--help` can use.
+pub fn config_help() -> String {
+    match masterbus::FileConfig::location() {
+        Some(p) => format!(
+            "settings (interface, bus-master role, schema cache):\n  {}\n\
+             Signal K mapping:\n  {}\n\
+             (created on first run; set MASTERBUS_CONFIG_DIR to keep both elsewhere)",
+            p.display(),
+            p.with_file_name(masterbus::settings::MAPPING_FILE)
+                .display()
+        ),
+        None => "settings and the Signal K mapping live in the per-user configuration\n\
+                 directory; set MASTERBUS_CONFIG_DIR to choose another."
+            .to_string(),
+    }
+}

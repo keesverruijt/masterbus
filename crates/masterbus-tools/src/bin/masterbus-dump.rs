@@ -17,6 +17,7 @@
 //!       --probe           also flat-probe the field-index space per device
 //!                         (slow; finds fields no menu lists)
 //!       --compact         one-line JSON instead of pretty-printed
+//!   -V, --version         print the version
 //!   -h, --help            this text
 //! ```
 //!
@@ -105,6 +106,7 @@ Usage: masterbus-dump [options] [output.json]
       --device <hex>    only this device address (repeatable, e.g. 286CA9)
       --probe           also flat-probe the field-index space per device (slow)
       --compact         one-line JSON instead of pretty-printed
+  -V, --version         print the version
   -h, --help            show this help
 ";
 
@@ -151,7 +153,11 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args, Strin
     while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => {
-                print!("{USAGE}");
+                print!("{USAGE}\n{}\n", masterbus_tools::config_help());
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("masterbus-dump {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "-o" | "--output" => {

@@ -113,6 +113,14 @@ impl FileConfig {
             .join(MAPPING_FILE)
     }
 
+    /// Where [`Self::load_or_create`] would read or create `config.ini` on
+    /// this host, without reading, creating or auto-detecting anything. For
+    /// help text: a person needs the path, not the name of this type.
+    /// `None` when no location can be determined (no home directory).
+    pub fn location() -> Option<PathBuf> {
+        resolve_path().ok()
+    }
+
     /// Load the standard config file, creating one with auto-detected values
     /// on first run. Reasons for failure: no writable location to create the
     /// file, or ambiguous hardware (multiple CAN interfaces, no USB link).

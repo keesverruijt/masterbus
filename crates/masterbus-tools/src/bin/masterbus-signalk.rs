@@ -128,7 +128,9 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
                 .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))
         };
         match a.as_str() {
-            "--help" | "-h" => return Err(USAGE.to_string()),
+            "--help" | "-h" => {
+                return Err(format!("{USAGE}\n{}", masterbus_tools::config_help()));
+            }
             "--version" | "-V" => {
                 return Err(format!("masterbus-signalk {}", env!("CARGO_PKG_VERSION")));
             }

@@ -45,8 +45,12 @@ use masterbus_tools::mapping::{Mapping, NotifyState};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logging_in_tui = init_logger();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("masterbus-tui {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: masterbus-tui [--mapping] [--fake-bus]");
+        eprintln!("usage: masterbus-tui [--mapping] [--fake-bus] [--version]");
         eprintln!();
         eprintln!("  --mapping   edit the Signal K mapping file alongside browsing:");
         eprintln!("              + map the selected field, - unmap, a apply to every");
@@ -55,8 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("              the mapping goes to a scratch file unless MAPPING is set");
         eprintln!("              (builds with the `fake-bus` feature only)");
         eprintln!();
-        eprintln!("transport, heartbeat-master role, and schema cache come from");
-        eprintln!("the config file (see `masterbus::FileConfig`)");
+        eprintln!("{}", masterbus_tools::config_help());
         eprintln!();
         eprintln!("logs go to an in-TUI pane (toggle with `~`), level `info`.");
         eprintln!("set MASTERBUS_TUI_LOG=<path> to redirect to a file instead.");

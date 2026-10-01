@@ -26,21 +26,30 @@ use std::time::Duration;
 
 use masterbus::{Config, DeviceId, FieldId, MasterBus, Value, VisualizationType};
 
+const USAGE: &str = "\
+usage: masterbus-set-field <device_id> <field_id> <value>
+       masterbus-set-field --version
+
+  <device_id>   hex 24-bit address (e.g. 188EA2)
+  <field_id>    hex u16; bit 8 selects Btm1 (0) or Btm3 (1) channel
+  <value>       boolean (true/false), number, list index OR option label,
+                or free text — interpreted per the field's type
+";
+
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Only as the first argument: a value may legitimately start with `-`.
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("masterbus-set-field {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
+        println!("{USAGE}\n{}", masterbus_tools::config_help());
+        return ExitCode::SUCCESS;
+    }
     if args.len() != 3 {
-        eprintln!(
-            "usage: masterbus-set-field <device_id> <field_id> <value>\n\
-             \n\
-             <device_id>   hex 24-bit address (e.g. 188EA2)\n\
-             <field_id>    hex u16; bit 8 selects Btm1 (0) or Btm3 (1) channel\n\
-             <value>       boolean (true/false), number, list index OR option label,\n\
-                           or free text — interpreted per the field's type\n\
-             \n\
-             Transport + heartbeat-master role come from the config file\n\
-             (see `masterbus::FileConfig` for the location and format)."
-        );
+        eprintln!("{USAGE}\n{}", masterbus_tools::config_help());
         return ExitCode::from(1);
     }
     let device_id = match parse_hex_u32(&args[0]) {
