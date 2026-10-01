@@ -53,9 +53,18 @@ Devices are listed on the left with liveness; the selected device's
 groups and fields are on the right. `Tab` / `Shift-Tab` switch between
 the Summary / Monitoring / Configuration / Service / Settings tabs (each
 discovered on demand). `Enter` edits a writable field — booleans toggle,
-numbers / lists / text open a centred edit modal. `l` opens the
+numbers / lists / text open an edit modal. `l` opens the
 access-level (login) modal — higher levels unlock more fields. `q`
-quits.
+quits; with unsaved mapping changes it first asks whether to write or
+discard them. The bottom line lists the keys that work at that moment.
+
+No bus at hand? `--fake-bus` (a build with the `fake-bus` cargo feature)
+browses the same canned three-device bus as `masterbus-signalk
+--fake-bus`, and keeps the mapping in a scratch file in the temp
+directory unless `MAPPING` is set:
+
+    cargo run -p masterbus-tools --features fake-bus --bin masterbus-tui -- \
+        --mapping --fake-bus
 
 ## `masterbus-signalk`
 

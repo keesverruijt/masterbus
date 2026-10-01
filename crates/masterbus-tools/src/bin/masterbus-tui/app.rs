@@ -197,6 +197,9 @@ pub struct App {
     pub mapping: Option<MappingSession>,
     /// Open path-editor modal.
     pub path_editor: Option<PathEditor>,
+    /// The "unsaved changes" box shown on quit, with the button that has
+    /// focus.
+    pub quit_prompt: Option<QuitChoice>,
     /// Serial number of the open device, cached when it is opened.
     pub cur_serial: Option<String>,
     /// Signal K instance proposed for the open device.
@@ -246,6 +249,7 @@ impl App {
             idents,
             mapping,
             path_editor: None,
+            quit_prompt: None,
             cur_serial: None,
             cur_instance: String::new(),
         }
@@ -256,10 +260,6 @@ impl App {
         if self.logs_in_tui {
             self.show_logs = !self.show_logs;
         }
-    }
-
-    pub fn quit(&mut self) {
-        self.should_quit = true;
     }
 
     // ---- device pane ------------------------------------------------------
@@ -1046,8 +1046,30 @@ pub struct MappingSession {
     pub map: Mapping,
     /// Unsaved changes.
     pub dirty: bool,
-    /// Set once the user has been warned about quitting with unsaved changes.
-    pub quit_armed: bool,
+}
+
+/// The buttons of the box that stops a quit with unsaved mapping changes, in
+/// the order they are drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuitChoice {
+    /// Write the mapping file, then quit. The default: Enter loses nothing.
+    Write,
+    /// Quit without writing.
+    Discard,
+    /// Close the box and carry on.
+    Stay,
+}
+
+impl QuitChoice {
+    pub const ALL: [QuitChoice; 3] = [QuitChoice::Write, QuitChoice::Discard, QuitChoice::Stay];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            QuitChoice::Write => "Write and quit",
+            QuitChoice::Discard => "Discard changes",
+            QuitChoice::Stay => "Keep editing",
+        }
+    }
 }
 
 /// Where a pre-filled path suggestion came from, so the editor can say how much
@@ -1087,6 +1109,10 @@ pub struct PathEditor {
     pub options: Vec<String>,
     /// The path being typed.
     pub buf: String,
+    /// Byte offset of the text cursor in `buf`, always on a char boundary.
+    /// Paths are long and mostly right, so a fix belongs in the middle,
+    /// not at the end after backspacing over everything.
+    pub cursor: usize,
     /// Whether to publish the boolean negated.
     pub invert: bool,
     /// Label → boolean, for an enum published to a boolean leaf. Empty until
@@ -1292,6 +1318,7 @@ impl App {
             field_name: field.name.clone(),
             unit: field.unit.clone(),
             options: field.options.clone(),
+            cursor: buf.len(),
             buf,
             invert,
             truth,
@@ -1617,13 +1644,62 @@ impl App {
 
     pub fn map_editor_char(&mut self, c: char) {
         if let Some(ed) = self.path_editor.as_mut() {
-            ed.buf.push(c);
+            ed.buf.insert(ed.cursor, c);
+            ed.cursor += c.len_utf8();
         }
     }
 
     pub fn map_editor_backspace(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && let Some(c) = ed.buf[..ed.cursor].chars().next_back()
+        {
+            ed.cursor -= c.len_utf8();
+            ed.buf.remove(ed.cursor);
+        }
+    }
+
+    /// Delete the character under the cursor.
+    pub fn map_editor_delete(&mut self) {
+        if let Some(ed) = self.path_editor.as_mut()
+            && ed.cursor < ed.buf.len()
+        {
+            ed.buf.remove(ed.cursor);
+        }
+    }
+
+    /// Move the cursor a character left (`-1`) or right (`1`).
+    pub fn map_editor_move(&mut self, delta: i32) {
         if let Some(ed) = self.path_editor.as_mut() {
-            ed.buf.pop();
+            if delta < 0 {
+                if let Some(c) = ed.buf[..ed.cursor].chars().next_back() {
+                    ed.cursor -= c.len_utf8();
+                }
+            } else if let Some(c) = ed.buf[ed.cursor..].chars().next() {
+                ed.cursor += c.len_utf8();
+            }
+        }
+    }
+
+    /// Move the cursor a whole path segment: to the previous or next `.`,
+    /// which is the unit people edit in a Signal K path.
+    pub fn map_editor_move_segment(&mut self, delta: i32) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.cursor = if delta < 0 {
+                ed.buf[..ed.cursor.saturating_sub(1)]
+                    .rfind('.')
+                    .map_or(0, |i| i + 1)
+            } else {
+                ed.buf[ed.cursor..]
+                    .find('.')
+                    .map_or(ed.buf.len(), |i| ed.cursor + i + 1)
+            };
+        }
+    }
+
+    /// Cursor to the start (`false`) or end (`true`) of the path.
+    pub fn map_editor_home_end(&mut self, end: bool) {
+        if let Some(ed) = self.path_editor.as_mut() {
+            ed.cursor = if end { ed.buf.len() } else { 0 };
         }
     }
 
@@ -1752,18 +1828,54 @@ impl App {
         }
     }
 
-    /// Quit, refusing once if there are unsaved changes.
+    /// Quit, or, with unsaved mapping changes, open a box that asks what to
+    /// do with them. Pressing `q` again is not an answer: discarding takes
+    /// `d` or moving to the button, so a reflexive second `q` cannot throw
+    /// an evening of mapping away.
     pub fn quit_checked(&mut self) {
-        let unsaved = self.mapping.as_ref().is_some_and(|s| s.dirty);
-        let armed = self.mapping.as_ref().is_some_and(|s| s.quit_armed);
-        if unsaved && !armed {
-            if let Some(s) = self.mapping.as_mut() {
-                s.quit_armed = true;
-            }
-            self.status = "unsaved mapping changes — w to write, q again to discard".into();
-            return;
+        if self.mapping.as_ref().is_some_and(|s| s.dirty) {
+            self.quit_prompt = Some(QuitChoice::Write);
+        } else {
+            self.should_quit = true;
         }
-        self.should_quit = true;
+    }
+
+    /// Whether the unsaved-changes box is open.
+    pub fn quit_prompting(&self) -> bool {
+        self.quit_prompt.is_some()
+    }
+
+    /// Move the focus between the box's buttons, wrapping.
+    pub fn quit_prompt_move(&mut self, delta: i32) {
+        if let Some(c) = self.quit_prompt {
+            let n = QuitChoice::ALL.len() as i32;
+            let i = QuitChoice::ALL.iter().position(|&x| x == c).unwrap_or(0) as i32;
+            self.quit_prompt = Some(QuitChoice::ALL[(i + delta).rem_euclid(n) as usize]);
+        }
+    }
+
+    /// Act on the focused button.
+    pub fn quit_prompt_commit(&mut self) {
+        if let Some(c) = self.quit_prompt {
+            self.quit_prompt_choose(c);
+        }
+    }
+
+    /// Act on a button directly (its hotkey).
+    pub fn quit_prompt_choose(&mut self, choice: QuitChoice) {
+        self.quit_prompt = None;
+        match choice {
+            QuitChoice::Write => {
+                self.save_mapping();
+                // A failed write leaves the changes dirty and the error in
+                // the status line; staying is the only safe thing to do.
+                if !self.mapping.as_ref().is_some_and(|s| s.dirty) {
+                    self.should_quit = true;
+                }
+            }
+            QuitChoice::Discard => self.should_quit = true,
+            QuitChoice::Stay => self.status.clear(),
+        }
     }
 }
 
@@ -1778,6 +1890,7 @@ mod mapping_tests {
             unit: unit.into(),
             options: Vec::new(),
             buf: buf.into(),
+            cursor: buf.len(),
             invert: false,
             truth: BTreeMap::new(),
             notify: BTreeMap::new(),
@@ -1888,6 +2001,87 @@ mod mapping_tests {
             panic!("a complete table is fine")
         };
         assert!(h.contains("Standby→true"), "{h}");
+    }
+
+    /// An app with the path editor open on `buf`, cursor at the end.
+    fn editing(buf: &str) -> (App, super::app_tests::Bus) {
+        let (mut app, bus) = super::app_tests::app();
+        app.path_editor = Some(editor("V", buf));
+        (app, bus)
+    }
+
+    fn buf_and_cursor(app: &App) -> (String, usize) {
+        let ed = app.path_editor.as_ref().unwrap();
+        (ed.buf.clone(), ed.cursor)
+    }
+
+    #[test]
+    fn the_path_cursor_edits_in_the_middle() {
+        let (mut app, _bus) = editing("electrical.batteries.house.voltag");
+        // Fix "batteries" → "battery" without retyping the rest.
+        app.map_editor_home_end(false);
+        app.map_editor_move_segment(1); // start of "batteries"
+        for _ in 0.."batter".len() {
+            app.map_editor_move(1);
+        }
+        app.map_editor_delete();
+        app.map_editor_delete();
+        app.map_editor_delete();
+        app.map_editor_char('y');
+        assert_eq!(
+            buf_and_cursor(&app),
+            (
+                "electrical.battery.house.voltag".into(),
+                "electrical.battery".len()
+            )
+        );
+        app.map_editor_home_end(true);
+        app.map_editor_char('e');
+        assert_eq!(buf_and_cursor(&app).0, "electrical.battery.house.voltage");
+    }
+
+    #[test]
+    fn backspace_deletes_before_the_cursor_and_stops_at_the_start() {
+        let (mut app, _bus) = editing("ab.cd");
+        app.map_editor_move(-1);
+        app.map_editor_backspace();
+        assert_eq!(buf_and_cursor(&app), ("ab.d".into(), 3));
+        app.map_editor_home_end(false);
+        app.map_editor_backspace();
+        app.map_editor_move(-1);
+        assert_eq!(buf_and_cursor(&app), ("ab.d".into(), 0));
+        app.map_editor_home_end(true);
+        app.map_editor_delete();
+        app.map_editor_move(1);
+        assert_eq!(buf_and_cursor(&app), ("ab.d".into(), 4));
+    }
+
+    #[test]
+    fn segment_moves_land_at_the_start_of_a_segment() {
+        let (mut app, _bus) = editing("a.bb.ccc");
+        app.map_editor_move_segment(-1);
+        assert_eq!(buf_and_cursor(&app).1, 5); // ccc
+        app.map_editor_move_segment(-1);
+        assert_eq!(buf_and_cursor(&app).1, 2); // bb
+        app.map_editor_move_segment(-1);
+        assert_eq!(buf_and_cursor(&app).1, 0);
+        app.map_editor_move_segment(-1);
+        assert_eq!(buf_and_cursor(&app).1, 0);
+        app.map_editor_move_segment(1);
+        assert_eq!(buf_and_cursor(&app).1, 2);
+        app.map_editor_move_segment(1);
+        app.map_editor_move_segment(1);
+        assert_eq!(buf_and_cursor(&app).1, 8); // end
+    }
+
+    #[test]
+    fn the_cursor_steps_over_multibyte_characters() {
+        let (mut app, _bus) = editing("a°b");
+        app.map_editor_move(-1);
+        app.map_editor_move(-1);
+        assert_eq!(buf_and_cursor(&app).1, 1);
+        app.map_editor_delete();
+        assert_eq!(buf_and_cursor(&app).0, "ab");
     }
 
     #[test]
@@ -2811,11 +3005,71 @@ pub(crate) mod app_tests {
         assert!(!app.show_logs);
     }
 
+    fn dirty_session(app: &mut App, path: PathBuf) {
+        app.mapping = Some(MappingSession {
+            path,
+            map: Mapping::default(),
+            dirty: true,
+        });
+    }
+
     #[test]
-    fn quitting_sets_the_flag() {
+    fn quitting_with_unsaved_changes_asks_first() {
         let (mut app, _bus) = app();
+        dirty_session(&mut app, PathBuf::from("/nonexistent/dir/mapping.json"));
+        app.quit_checked();
         assert!(!app.should_quit);
-        app.quit();
+        assert_eq!(app.quit_prompt, Some(QuitChoice::Write));
+        // Asking again does not get past the box.
+        app.quit_checked();
+        assert!(!app.should_quit);
+        // Keep editing closes it.
+        app.quit_prompt_choose(QuitChoice::Stay);
+        assert!(!app.quit_prompting() && !app.should_quit);
+    }
+
+    #[test]
+    fn a_failed_write_does_not_quit() {
+        let (mut app, _bus) = app();
+        dirty_session(&mut app, PathBuf::from("/nonexistent/dir/mapping.json"));
+        app.quit_checked();
+        app.quit_prompt_commit();
+        assert!(!app.should_quit, "{}", app.status);
+        assert!(app.status.contains("could not write"), "{}", app.status);
+    }
+
+    #[test]
+    fn write_and_quit_writes_the_file() {
+        let (mut app, _bus) = app();
+        let dir = std::env::temp_dir().join(format!("mb-quit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mapping.json");
+        dirty_session(&mut app, path.clone());
+        app.quit_checked();
+        app.quit_prompt_commit();
         assert!(app.should_quit);
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn discarding_needs_the_button_and_wraps() {
+        let (mut app, _bus) = app();
+        dirty_session(&mut app, PathBuf::from("/nonexistent/dir/mapping.json"));
+        app.quit_checked();
+        app.quit_prompt_move(1);
+        assert_eq!(app.quit_prompt, Some(QuitChoice::Discard));
+        app.quit_prompt_move(-2);
+        assert_eq!(app.quit_prompt, Some(QuitChoice::Stay));
+        app.quit_prompt_move(-1);
+        app.quit_prompt_commit();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn quitting_without_changes_just_quits() {
+        let (mut app, _bus) = app();
+        app.quit_checked();
+        assert!(app.should_quit && !app.quit_prompting());
     }
 }

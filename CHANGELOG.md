@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`masterbus-tui --fake-bus`** (with the `fake-bus` cargo feature): the
+  canned three-device bus `masterbus-signalk --fake-bus` already serves,
+  now browsable and mappable in the TUI with no hardware. The mapping goes
+  to a scratch file in the temp directory unless `MAPPING` is set, so a
+  trial run cannot touch the real one.
+
+### Changed
+- **The TUI's mapping editor is easier to drive** (from a tester's first
+  session on a Pi 3B+):
+  - The Signal K path can be edited in place: ←/→, Home/End, Delete, and
+    Ctrl+←/→ to jump a path segment. Before, the only correction was
+    backspacing over everything after the mistake.
+  - The path, truth-table, notification, edit and values popups no longer
+    cover the row they are about; they open below it, or above it near the
+    bottom of the screen.
+  - The footer has a second line listing the keys that work right now, and
+    marks unsaved mapping changes, so a status message can no longer hide
+    that `w` saves.
+  - `+`, `-`, `a` and `w` without `--mapping` now say the editor is off
+    instead of doing nothing.
+  - Quitting with unsaved mapping changes opens a box — Write and quit,
+    Discard changes, Keep editing — instead of asking for a second `q`.
+    Discarding takes `d` or moving to that button; `q` in the box keeps
+    editing. Quitting while a tab was still loading skipped the check
+    altogether; it no longer does.
+
 ## [0.4.2] - 2026-09-22
 
 ### Fixed

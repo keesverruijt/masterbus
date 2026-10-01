@@ -19,6 +19,13 @@
 //! mapping on the selected field. `+` pre-fills a suggestion; `a` copies the
 //! open device's mapping to every other device with the same article; `w`
 //! writes the file.
+//!
+//! # Without hardware
+//!
+//! `--fake-bus` (a build with the `fake-bus` feature) browses the canned
+//! three-device bus `masterbus-signalk --fake-bus` serves. It never reads
+//! the real config, and its mapping defaults to a scratch file in the temp
+//! directory, so trying the editor cannot touch the real `mapping.json`.
 
 mod app;
 mod ui;
@@ -31,7 +38,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, unbounded};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use app::{App, Focus, Idents, MappingSession, Names};
+use app::{App, Focus, Idents, MappingSession, Names, QuitChoice};
 use masterbus::{Config, MasterBus};
 use masterbus_tools::mapping::{Mapping, NotifyState};
 
@@ -39,11 +46,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logging_in_tui = init_logger();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: masterbus-tui [--mapping]");
+        eprintln!("usage: masterbus-tui [--mapping] [--fake-bus]");
         eprintln!();
         eprintln!("  --mapping   edit the Signal K mapping file alongside browsing:");
         eprintln!("              + map the selected field, - unmap, a apply to every");
         eprintln!("              device with the same article, w write the file.");
+        eprintln!("  --fake-bus  browse a canned three-device bus, no hardware needed;");
+        eprintln!("              the mapping goes to a scratch file unless MAPPING is set");
+        eprintln!("              (builds with the `fake-bus` feature only)");
         eprintln!();
         eprintln!("transport, heartbeat-master role, and schema cache come from");
         eprintln!("the config file (see `masterbus::FileConfig`)");
@@ -53,16 +63,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let want_mapping = args.iter().any(|a| a == "--mapping");
+    let fake_bus = args.iter().any(|a| a == "--fake-bus");
 
     // Resolve and load the mapping before taking over the terminal, so a
     // malformed file is reported plainly rather than behind a TUI.
     let mapping = if want_mapping {
-        let path = std::env::var_os("MAPPING")
-            .map(std::path::PathBuf::from)
-            .map_or_else(
-                || masterbus::FileConfig::load_or_create().map(|c| c.mapping_path()),
-                Ok,
-            )?;
+        let path = match std::env::var_os("MAPPING").map(std::path::PathBuf::from) {
+            Some(p) => p,
+            // A fake bus is for trying things out: keep it away from the
+            // real mapping, and from a config file that would go looking
+            // for hardware.
+            None if fake_bus => std::env::temp_dir().join("masterbus-fake-mapping.json"),
+            None => masterbus::FileConfig::load_or_create()?.mapping_path(),
+        };
         // A hand-edited file is the normal case, so a syntax error has to read
         // like a syntax error rather than a debug-printed io::Error.
         let map = match Mapping::load(&path) {
@@ -78,13 +91,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             map,
             dirty: false,
-            quit_armed: false,
         })
     } else {
         None
     };
 
-    let bus = MasterBus::auto(Config::default())?;
+    // The fake bus stops when dropped, so it is held until the TUI exits.
+    #[cfg(feature = "fake-bus")]
+    let _fake: Option<masterbus::fakebus::FakeBus>;
+    let bus = if fake_bus {
+        #[cfg(feature = "fake-bus")]
+        {
+            let (fake, transport) = masterbus_tools::fake::canned();
+            masterbus_tools::fake::animate(&fake);
+            _fake = Some(fake);
+            println!("serving the canned fake bus (no hardware)");
+            MasterBus::with_transport(transport, Config::default())?
+        }
+        #[cfg(not(feature = "fake-bus"))]
+        {
+            eprintln!("masterbus-tui: this build has no --fake-bus (needs the fake-bus feature)");
+            std::process::exit(2);
+        }
+    } else {
+        MasterBus::auto(Config::default())?
+    };
     println!("connected; scanning the bus…");
     run_tui(bus, mapping, logging_in_tui)?;
     Ok(())
@@ -206,6 +237,21 @@ fn spawn_key_reader() -> Receiver<KeyEvent> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // The unsaved-changes box on quit outranks everything, including a
+    // discovery in flight. `q` here means "no, wait", never "discard".
+    if app.quit_prompting() {
+        match key.code {
+            KeyCode::Tab | KeyCode::Right => app.quit_prompt_move(1),
+            KeyCode::BackTab | KeyCode::Left => app.quit_prompt_move(-1),
+            KeyCode::Enter => app.quit_prompt_commit(),
+            KeyCode::Char('w') => app.quit_prompt_choose(QuitChoice::Write),
+            KeyCode::Char('d') => app.quit_prompt_choose(QuitChoice::Discard),
+            KeyCode::Esc | KeyCode::Char('q' | 'k') => app.quit_prompt_choose(QuitChoice::Stay),
+            _ => {}
+        }
+        return;
+    }
+
     // The path editor owns every key while open: a Signal K path is free text
     // and may contain any of the letters the browse-mode bindings use.
     if app.path_editing() {
@@ -250,6 +296,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Enter => app.commit_map(),
             KeyCode::Esc => app.cancel_map(),
             KeyCode::Backspace => app.map_editor_backspace(),
+            KeyCode::Delete => app.map_editor_delete(),
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.map_editor_move_segment(-1)
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.map_editor_move_segment(1)
+            }
+            KeyCode::Left => app.map_editor_move(-1),
+            KeyCode::Right => app.map_editor_move(1),
+            KeyCode::Home => app.map_editor_home_end(false),
+            KeyCode::End => app.map_editor_home_end(true),
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.map_editor_home_end(true)
+            }
             // Ctrl-N toggles the inverted-boolean flag; a bare letter would be
             // swallowed by the text field.
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -313,7 +373,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // While a device is being enumerated, only quit or cancel are allowed.
     if app.discovering() {
         match key.code {
-            KeyCode::Char('q') => app.quit(),
+            KeyCode::Char('q') => app.quit_checked(),
             KeyCode::Esc => app.cancel_pending(),
             _ => {}
         }
@@ -325,6 +385,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') | KeyCode::Char('L') => app.open_login(),
         KeyCode::Char('~') => app.toggle_logs(),
         KeyCode::Char('w') if app.mapping_mode() => app.save_mapping(),
+        // The mapping keys do nothing without `--mapping`; say so rather
+        // than leave someone pressing `+` at a field that never changes.
+        KeyCode::Char('+' | '=' | '-' | 'a' | 'w')
+            if !app.mapping_mode() && app.focus == Focus::Fields =>
+        {
+            app.status = "the mapping editor is off: restart as `masterbus-tui --mapping`".into()
+        }
         _ => match app.focus {
             Focus::Devices => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => app.move_device(-1),

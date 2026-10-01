@@ -20,20 +20,22 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 const VALUE_COL: usize = 21;
 
 pub fn draw(f: &mut Frame, app: &App) {
+    // The footer is two lines: what just happened, and which keys work here.
+    // On one line the status overwrote the key list, and `w` went with it.
     let outer = if app.show_logs {
         // Main pane shrinks; 8-line log pane above the footer.
         Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(8),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(f.area())
     } else {
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(f.area())
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(f.area())
     };
     let panes = Layout::horizontal([Constraint::Length(34), Constraint::Min(0)]).split(outer[0]);
     draw_devices(f, app, panes[0]);
-    draw_fields(f, app, panes[1]);
+    let sel_row = draw_fields(f, app, panes[1]);
     if app.show_logs {
         draw_logs(f, outer[1]);
         draw_footer(f, app, outer[2]);
@@ -44,13 +46,107 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_login(f, app, f.area());
     }
     if app.editor.is_some() {
-        draw_edit_modal(f, app, f.area());
+        draw_edit_modal(f, app, f.area(), sel_row);
     }
     if app.values_modal.is_some() {
-        draw_values_modal(f, app, f.area());
+        draw_values_modal(f, app, f.area(), sel_row);
     }
     if app.path_editor.is_some() {
-        draw_path_modal(f, app, f.area());
+        draw_path_modal(f, app, f.area(), sel_row);
+    }
+    if let Some(choice) = app.quit_prompt {
+        draw_quit_modal(f, app, choice, f.area());
+    }
+}
+
+/// The box that stops a quit with unsaved mapping changes. Loud on purpose:
+/// red border, the count of what would be lost, and buttons rather than a
+/// repeat-the-key convention nobody outside Unix has heard of.
+fn draw_quit_modal(f: &mut Frame, app: &App, choice: crate::app::QuitChoice, area: Rect) {
+    use crate::app::QuitChoice;
+    let path = app
+        .mapping
+        .as_ref()
+        .map(|s| s.path.display().to_string())
+        .unwrap_or_default();
+    let mut buttons = vec![];
+    for c in QuitChoice::ALL {
+        let style = if c == choice {
+            Style::new()
+                .fg(Color::Black)
+                .bg(if c == QuitChoice::Discard {
+                    Color::Red
+                } else {
+                    Color::Cyan
+                })
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        if buttons.is_empty() {
+            buttons.push(Span::raw(" "));
+        } else {
+            buttons.push(Span::raw("  "));
+        }
+        buttons.push(Span::styled(format!("[ {} ]", c.label()), style));
+    }
+    let body = vec![
+        Line::from(Span::styled(
+            "The mapping has changes that are not written yet.",
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "If you quit without writing, they are lost.",
+            Style::new().fg(Color::Red),
+        )),
+        Line::from(Span::styled(path, Style::new().fg(Color::DarkGray))),
+        Line::raw(""),
+        Line::from(buttons),
+    ];
+    let w = area.width.saturating_sub(4).clamp(30, 64);
+    let inner = w.saturating_sub(4) as usize;
+    let rows: u16 = body.iter().map(|l| wrapped_rows(l.width(), inner)).sum();
+    let rect = place(area, w, rows + 2, None);
+    f.render_widget(ratatui::widgets::Clear, rect);
+    let p = Paragraph::new(body).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(Color::Red).add_modifier(Modifier::BOLD))
+            .padding(ratatui::widgets::Padding::horizontal(1))
+            .title(" Unsaved changes ")
+            .title_bottom(" Tab move · Enter choose · Esc keep editing "),
+    );
+    f.render_widget(p, rect);
+}
+
+/// Where to put a `w`×`h` popup: centred, unless that would cover `avoid`
+/// (the field row being edited or mapped), in which case directly below it,
+/// or above it when there is no room below. Mapping a field means reading
+/// its name, unit and value while typing; a box on top of it hides exactly
+/// that.
+fn place(area: Rect, w: u16, h: u16, avoid: Option<Rect>) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    let x = area.x + (area.width - w) / 2;
+    let centred = Rect::new(x, area.y + (area.height - h) / 2, w, h);
+    let Some(row) = avoid else {
+        return centred;
+    };
+    if !centred.intersects(row) {
+        return centred;
+    }
+    let below = area.bottom().saturating_sub(row.bottom());
+    let above = row.y.saturating_sub(area.y);
+    if below >= h {
+        Rect::new(x, row.bottom(), w, h)
+    } else if above >= h {
+        Rect::new(x, row.y - h, w, h)
+    } else if below >= above {
+        // Neither side fits whole: take the roomier one and let the box
+        // overlap as little as it can.
+        Rect::new(x, area.bottom() - h, w, h)
+    } else {
+        Rect::new(x, area.y, w, h)
     }
 }
 
@@ -60,16 +156,16 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// Showing the conversion is the point. The mapping file stores no scale
 /// factor, so the only moment a human can check that °C is about to become
 /// kelvin is while they are choosing the path.
-fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
+fn draw_path_modal(f: &mut Frame, app: &App, area: Rect, avoid: Option<Rect>) {
     use crate::app::{Hint, Origin, Stage};
     let Some(ed) = app.path_editor.as_ref() else {
         return;
     };
     if let Stage::Truth(sel) = ed.stage {
-        return draw_truth_modal(f, ed, sel, area);
+        return draw_truth_modal(f, ed, sel, area, avoid);
     }
     if let Stage::Notify(sel) = ed.stage {
-        return draw_notify_modal(f, ed, sel, area);
+        return draw_notify_modal(f, ed, sel, area, avoid);
     }
     let w = area.width.saturating_sub(4).clamp(30, 84);
 
@@ -108,10 +204,7 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(Span::styled(origin, Style::new().fg(Color::DarkGray))),
         Line::raw(""),
-        Line::from(Span::styled(
-            format!("{}\u{2588}", ed.buf),
-            Style::new().fg(Color::Cyan),
-        )),
+        path_line(&ed.buf, ed.cursor),
         Line::from(Span::styled(hint, hint_style)),
         Line::from(Span::styled(invert_line, Style::new().fg(Color::DarkGray))),
     ];
@@ -122,19 +215,39 @@ fn draw_path_modal(f: &mut Frame, app: &App, area: Rect) {
         &body,
         format!(" Signal K path for {} ", field_id_tag(ed.field)),
         " Enter save · Esc cancel ",
+        avoid,
     );
+}
+
+/// The path being typed, with a block cursor on the character it sits in
+/// front of (or after the end).
+fn path_line(buf: &str, cursor: usize) -> Line<'static> {
+    let text = Style::new().fg(Color::Cyan);
+    let (before, rest) = buf.split_at(cursor.min(buf.len()));
+    let mut chars = rest.chars();
+    let under = chars.next().map_or(" ".to_string(), String::from);
+    Line::from(vec![
+        Span::styled(before.to_string(), text),
+        Span::styled(under, text.add_modifier(Modifier::REVERSED)),
+        Span::styled(chars.as_str().to_string(), text),
+    ])
 }
 
 /// A centred, bordered box sized to its wrapped content. Signal K paths and
 /// the hints about them run long, and an 80-column terminal is normal on a
 /// boat, so everything wraps rather than being cut off at the border.
-fn draw_modal(f: &mut Frame, area: Rect, w: u16, body: &[Line<'_>], title: String, foot: &str) {
+fn draw_modal(
+    f: &mut Frame,
+    area: Rect,
+    w: u16,
+    body: &[Line<'_>],
+    title: String,
+    foot: &str,
+    avoid: Option<Rect>,
+) {
     let inner = w.saturating_sub(4) as usize; // borders + one column padding
     let rows: u16 = body.iter().map(|l| wrapped_rows(l.width(), inner)).sum();
-    let h = (rows + 2).min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let rect = Rect::new(x, y, w, h);
+    let rect = place(area, w, rows + 2, avoid);
     f.render_widget(ratatui::widgets::Clear, rect);
     let p = Paragraph::new(body.to_vec())
         .wrap(Wrap { trim: false })
@@ -160,7 +273,13 @@ fn wrapped_rows(width: usize, cols: usize) -> u16 {
 /// leaf and this build could not classify every label, so the user says which
 /// labels mean `true`. Conventional labels arrive pre-filled; the rest are
 /// blank until chosen.
-fn draw_truth_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area: Rect) {
+fn draw_truth_modal(
+    f: &mut Frame,
+    ed: &crate::app::PathEditor,
+    sel: usize,
+    area: Rect,
+    avoid: Option<Rect>,
+) {
     let w = area.width.saturating_sub(4).clamp(30, 84);
     let mut body = vec![
         Line::from(Span::styled(
@@ -198,13 +317,20 @@ fn draw_truth_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area
         &body,
         format!(" Truth table for {} ", field_id_tag(ed.field)),
         " Space/t/f set · ^N flip all · Enter save · Esc back ",
+        avoid,
     );
 }
 
 /// The notification stage of the path prompt: which of an enum's labels
 /// should raise a Signal K notification, and how loudly. Labels that sound
 /// like trouble arrive pre-filled.
-fn draw_notify_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, area: Rect) {
+fn draw_notify_modal(
+    f: &mut Frame,
+    ed: &crate::app::PathEditor,
+    sel: usize,
+    area: Rect,
+    avoid: Option<Rect>,
+) {
     let w = area.width.saturating_sub(4).clamp(30, 84);
     let mut body = vec![
         Line::from(Span::styled(
@@ -244,6 +370,7 @@ fn draw_notify_modal(f: &mut Frame, ed: &crate::app::PathEditor, sel: usize, are
         &body,
         format!(" Notifications for {} ", field_id_tag(ed.field)),
         " Space cycle · a alarm · w warn · e emergency · n normal · Enter save · Esc back ",
+        avoid,
     );
 }
 
@@ -319,10 +446,12 @@ fn draw_devices(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
+/// Draw the field pane. Returns where the selected row ended up on screen,
+/// so a popup about that row can keep out of its way.
+fn draw_fields(f: &mut Frame, app: &App, area: Rect) -> Option<Rect> {
     let Some(id) = app.cur_device else {
         f.render_widget(bordered("Fields".into(), app.focus == Focus::Fields), area);
-        return;
+        return None;
     };
 
     let level_suffix = app
@@ -353,7 +482,7 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
     // Summary tab: device identity, not a field list.
     if app.cur_tab == TabKind::Summary {
         draw_info(f, app, id, content);
-        return;
+        return None;
     }
 
     // While a tab is being discovered, show an animated progress panel.
@@ -380,7 +509,7 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
             )),
         ];
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), content);
-        return;
+        return None;
     }
 
     // Snapshot device-name map once for resolving event-target device refs.
@@ -470,10 +599,25 @@ fn draw_fields(f: &mut Frame, app: &App, area: Rect) {
         state.select(Some(app.row_sel));
     }
 
+    let heights: Vec<u16> = items.iter().map(|i| i.height() as u16).collect();
     let list = List::new(items)
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("› ");
     f.render_stateful_widget(list, content, &mut state);
+
+    // The list scrolled to keep the selection visible; `offset` says from
+    // where, and the selected row sits below the items drawn above it.
+    let sel = state.selected()?;
+    let top: u16 = heights.get(state.offset()..sel)?.iter().sum();
+    let h = *heights.get(sel)?;
+    (top < content.height).then(|| {
+        Rect::new(
+            content.x,
+            content.y + top,
+            content.width,
+            h.min(content.height - top),
+        )
+    })
 }
 
 fn draw_info(f: &mut Frame, app: &App, id: u32, area: Rect) {
@@ -590,24 +734,74 @@ fn draw_login(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    // The status line; the in-progress edit moves to a centred modal
-    // (see [`draw_edit_modal`]).
+    // The status line, then the keys that work right now; the in-progress
+    // edit moves to a modal (see [`draw_edit_modal`]).
     let style = Style::new().fg(Color::Gray);
-    f.render_widget(
-        Paragraph::new(format!(" {}", app.status)).style(style),
-        area,
-    );
+    let mut lines = vec![Line::styled(format!(" {}", app.status), style)];
+    let mut keys = vec![Span::raw(" ")];
+    if app.mapping.as_ref().is_some_and(|s| s.dirty) {
+        keys.push(Span::styled(
+            "● unsaved  ",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
+    keys.push(Span::styled(
+        key_hints(app),
+        Style::new().fg(Color::DarkGray),
+    ));
+    lines.push(Line::from(keys));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
+/// The keys that do something in the current state, most specific first so
+/// that a narrow terminal cuts off the generic ones.
+fn key_hints(app: &App) -> &'static str {
+    use crate::app::Stage;
+    if app.quit_prompt.is_some() {
+        return "Tab/←/→ move · Enter choose · w write and quit · d discard and quit · Esc keep editing";
+    }
+    if let Some(ed) = &app.path_editor {
+        return match ed.stage {
+            Stage::Path => {
+                "Enter save · Esc cancel · ←/→ Home/End move · ^←/^→ by segment · Del delete · ^N invert · ^A notify"
+            }
+            Stage::Truth(_) => "↑/↓ select · Space/t/f set · ^N flip all · Enter save · Esc back",
+            Stage::Notify(_) => "↑/↓ select · Space cycle · a/w/e/l/n set · Enter save · Esc back",
+        };
+    }
+    if app.editor.is_some() {
+        return "Enter ok · Esc cancel · ←/→ change a choice";
+    }
+    if app.values_open() {
+        return "Esc close";
+    }
+    if app.login.is_some() {
+        return "↑/↓ select · Enter ok · Esc cancel";
+    }
+    if app.discovering() {
+        return "Esc cancel · q quit";
+    }
+    match (&app.focus, app.mapping_mode()) {
+        (Focus::Devices, true) => {
+            "w write mapping · ↑/↓ select · Enter open · l login · ~ logs · q quit"
+        }
+        (Focus::Devices, false) => "↑/↓ select · Enter open · l login · ~ logs · q quit",
+        (Focus::Fields, true) => {
+            "+ map · - unmap · a copy to same model · w write · ↑/↓ move · Tab tabs · Enter edit · Esc back · q quit"
+        }
+        (Focus::Fields, false) => {
+            "↑/↓ move · Tab/⇧Tab tabs · Enter edit · r reread · ? values · l login · Esc back · q quit"
+        }
+    }
+}
+
+fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect, avoid: Option<Rect>) {
     let Some(ed) = &app.editor else { return };
-    // 60×9 centred (clamped to terminal size). Wide enough for a 22-char
-    // field name + the 16-char text limit + a margin.
+    // 60×9 (clamped to terminal size), clear of the row being edited. Wide
+    // enough for a 22-char field name + the 16-char text limit + a margin.
     let w = 60u16.min(area.width.saturating_sub(2));
     let h = 9u16.min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect::new(x, y, w, h);
+    let popup = place(area, w, h, avoid);
 
     f.render_widget(ratatui::widgets::Clear, popup);
     let block = Block::default()
@@ -651,7 +845,7 @@ fn draw_edit_modal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
-fn draw_values_modal(f: &mut Frame, app: &App, area: Rect) {
+fn draw_values_modal(f: &mut Frame, app: &App, area: Rect, avoid: Option<Rect>) {
     let Some(view) = &app.values_modal else {
         return;
     };
@@ -667,9 +861,7 @@ fn draw_values_modal(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(20);
     let w = (widest as u16 + 4).clamp(28, area.width.saturating_sub(2));
     let h = (view.options.len() as u16 + 2).clamp(5, area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect::new(x, y, w, h);
+    let popup = place(area, w, h, avoid);
 
     f.render_widget(ratatui::widgets::Clear, popup);
     let block = Block::default()
@@ -1283,6 +1475,91 @@ mod render_tests {
             "expected a spinner frame:\n{s}"
         );
         assert!(s.contains("Combi"), "{s}");
+    }
+
+    fn path_editor(buf: &str) -> crate::app::PathEditor {
+        crate::app::PathEditor {
+            field: field_id::btm1(0x17),
+            field_name: "Voltage".into(),
+            unit: "V".into(),
+            options: Vec::new(),
+            buf: buf.into(),
+            cursor: buf.len(),
+            invert: false,
+            truth: Default::default(),
+            notify: Default::default(),
+            origin: crate::app::Origin::Blank,
+            stage: crate::app::Stage::Path,
+            notify_offered: false,
+        }
+    }
+
+    /// The row being mapped stays readable: the popup goes beside it, not on
+    /// top of it.
+    #[test]
+    fn the_path_modal_leaves_the_selected_row_visible() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.path_editor = Some(path_editor("electrical.batteries.house.voltage"));
+        for h in [12, 16, 30] {
+            let s = screen_at(&app, 100, h);
+            let row = s.lines().find(|l| l.contains("0x017")).unwrap_or_default();
+            assert!(
+                row.contains("Voltage") && row.contains("26.35"),
+                "{h}:\n{s}"
+            );
+            assert!(s.contains("Signal K path"), "{h}:\n{s}");
+        }
+    }
+
+    #[test]
+    fn a_popup_is_centred_unless_it_would_cover_the_row() {
+        let area = Rect::new(0, 0, 80, 40);
+        let row = |y| Some(Rect::new(0, y, 80, 1));
+        assert_eq!(place(area, 40, 10, row(2)), Rect::new(20, 15, 40, 10));
+        assert_eq!(place(area, 40, 10, row(18)), Rect::new(20, 19, 40, 10));
+        assert_eq!(place(area, 40, 10, row(35)), Rect::new(20, 15, 40, 10));
+        assert_eq!(place(area, 40, 20, row(28)), Rect::new(20, 8, 40, 20));
+        assert_eq!(place(area, 40, 10, None), Rect::new(20, 15, 40, 10));
+        // No room either side: the roomier side, clamped to the screen.
+        let small = Rect::new(0, 0, 80, 12);
+        assert_eq!(place(small, 40, 10, Some(Rect::new(0, 8, 80, 1))).y, 0);
+    }
+
+    /// The key list has a line of its own, so a status message cannot hide
+    /// `w`.
+    #[test]
+    fn the_key_hints_survive_a_status_message() {
+        let (mut app, _bus) = app();
+        with_rows(&mut app);
+        app.status = "x".repeat(200);
+        let s = screen(&app);
+        assert!(s.contains("Enter edit"), "{s}");
+    }
+
+    #[test]
+    fn the_quit_box_names_the_loss_and_the_buttons() {
+        let (mut app, _bus) = app();
+        app.quit_prompt = Some(crate::app::QuitChoice::Write);
+        let s = screen(&app);
+        assert!(s.contains("Unsaved changes"), "{s}");
+        assert!(s.contains("they are lost"), "{s}");
+        for c in crate::app::QuitChoice::ALL {
+            assert!(s.contains(c.label()), "{s}");
+        }
+        // Still readable on a small screen.
+        let s = screen_at(&app, 40, 12);
+        assert!(s.contains("Discard"), "{s}");
+    }
+
+    #[test]
+    fn the_path_cursor_is_drawn_where_it_is() {
+        let line = path_line("abc", 1);
+        let spans: Vec<_> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(spans, ["a", "b", "c"]);
+        let line = path_line("abc", 3);
+        let spans: Vec<_> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(spans, ["abc", " ", ""]);
     }
 
     #[test]
