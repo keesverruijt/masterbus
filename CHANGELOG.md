@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-02
+
 ### Added
 - **Suggestions learned from a 19-device bus** (`samples/mcu-czone-19-devices.json`):
   - The bundled catalog knows the MCU charger/inverter/solar combi
