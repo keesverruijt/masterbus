@@ -538,11 +538,11 @@ pub(crate) mod tests {
         let m = seed_mapping(&[mass, cm]);
         assert_eq!(
             m.devices["MASS-1"].fields[&field_key(0x00E)].path,
-            "electrical.chargers.24v-ch-u4-1.voltage"
+            "electrical.chargers.24vChU41.voltage"
         );
         assert_eq!(
             m.devices["CM-1"].fields[&field_key(0x002)].path,
-            "electrical.chargers.12v-chargere.output.1.voltage"
+            "electrical.chargers.12vChargerE.output.1.voltage"
         );
     }
 
@@ -552,11 +552,11 @@ pub(crate) mod tests {
         let d = &m.devices["MLI-1"];
         assert_eq!(
             d.fields[&field_key(0x001)].path,
-            "electrical.batteries.24v-service.voltage"
+            "electrical.batteries.24vService.voltage"
         );
         assert_eq!(
             d.fields[&field_key(0x005)].path,
-            "electrical.batteries.24v-service.temperature"
+            "electrical.batteries.24vService.temperature"
         );
         // A relay has no Signal K home, so it is simply absent.
         assert!(!d.fields.contains_key(&field_key(0x022)));
@@ -620,7 +620,7 @@ pub(crate) mod tests {
         assert_eq!(d.article, "66026000");
         assert_eq!(d.firmware, "2.14");
         assert_eq!(d.name, "BAT 24V Service");
-        assert_eq!(d.instance, "24v-service");
+        assert_eq!(d.instance, "24vService");
     }
 
     /// Configuration fields are settings, not measurements: they are never

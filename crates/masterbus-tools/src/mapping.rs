@@ -532,7 +532,7 @@ mod tests {
             article: "66026000".into(),
             firmware: "2.14".into(),
             name: "BAT 24V Service".into(),
-            instance: "24v-service".into(),
+            instance: "24vService".into(),
             ..Default::default()
         };
         for (id, leaf) in [
@@ -543,7 +543,7 @@ mod tests {
             d.fields.insert(
                 field_key(id),
                 FieldMapping {
-                    path: format!("electrical.batteries.24v-service.{leaf}"),
+                    path: format!("electrical.batteries.24vService.{leaf}"),
                     ..Default::default()
                 },
             );
@@ -566,10 +566,10 @@ mod tests {
         let (copied, skipped) = copy_to_targets(&mut map, &src_mapping(), &[t]);
         assert_eq!((copied, skipped), (3, 0));
         let d = &map.devices["MLI-2"];
-        assert_eq!(d.instance, "24v-service2");
+        assert_eq!(d.instance, "24vService2");
         assert_eq!(
             d.fields[&field_key(0x001)].path,
-            "electrical.batteries.24v-service2.voltage"
+            "electrical.batteries.24vService2.voltage"
         );
     }
 
@@ -644,7 +644,7 @@ mod tests {
         assert_eq!((copied, skipped), (1, 0));
         assert_eq!(
             map.devices["X922S0096"].fields[&field_key(0x028)].path,
-            "electrical.chargers.24v-dc-dc.voltage"
+            "electrical.chargers.24vDcDc.voltage"
         );
     }
 
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!((copied, skipped), (1, 1));
         assert_eq!(
             map.devices["MLI-2"].fields[&field_key(0x001)].path,
-            "electrical.batteries.li-ion-2.voltage"
+            "electrical.batteries.liIon2.voltage"
         );
     }
 
@@ -730,7 +730,7 @@ mod tests {
         let t = target("MCO-2", "INT Out 2", &[0x001]);
         copy_to_targets(&mut map, &src, &[t]);
         let f = &map.devices["MCO-2"].fields[&field_key(0x001)];
-        assert_eq!(f.path, "electrical.switches.out-2.state");
+        assert_eq!(f.path, "electrical.switches.out2.state");
         assert_eq!(f.truth.len(), 2);
         assert_eq!(f.notify.len(), 1);
         assert!(f.put);

@@ -1009,7 +1009,7 @@ mod tests {
         let d = &r.body[0];
         assert_eq!(d["serial"], "MLI-1");
         assert_eq!(d["id"], "100005");
-        assert_eq!(d["instance"], "24v-service");
+        assert_eq!(d["instance"], "24vService");
         assert_eq!(d["menus"], json!(["monitoring"]));
         let temp = d["fields"]
             .as_array()
@@ -1017,7 +1017,7 @@ mod tests {
             .iter()
             .find(|f| f["id"] == "0x005")
             .unwrap();
-        assert_eq!(temp["path"], "electrical.batteries.24v-service.temperature");
+        assert_eq!(temp["path"], "electrical.batteries.24vService.temperature");
         assert_eq!(temp["value"], 20.0);
         assert_eq!(temp["put"], false);
         assert_eq!(temp["menu"], "monitoring");
@@ -1250,7 +1250,7 @@ mod tests {
             json!({"serial": "MLI-1", "field": "0x001"}),
         );
         assert_eq!(r.status, 200);
-        assert_eq!(r.body["path"], "electrical.batteries.24v-service.voltage");
+        assert_eq!(r.body["path"], "electrical.batteries.24vService.voltage");
         assert_eq!(r.body["tier"], "name");
         // No rule knows it: a path built from its group, name and unit.
         let r = send(
@@ -1261,7 +1261,7 @@ mod tests {
         );
         assert_eq!(
             r.body["path"],
-            "electrical.batteries.24v-service.misc.something-odd.voltage"
+            "electrical.batteries.24vService.misc.somethingOdd.voltage"
         );
         assert_eq!(r.body["tier"], "built");
         // Once something is mapped, a built path joins it; and an existing
@@ -1285,7 +1285,7 @@ mod tests {
         );
         assert_eq!(
             r.body["path"],
-            "electrical.batteries.house.misc.something-odd.voltage"
+            "electrical.batteries.house.misc.somethingOdd.voltage"
         );
         let r = send(
             &shared,
@@ -1428,20 +1428,20 @@ mod tests {
         let mut m = Mapping::new();
         let mut dm = DeviceMapping {
             article: "66026000".into(),
-            instance: "24v-service".into(),
+            instance: "24vService".into(),
             ..Default::default()
         };
         dm.fields.insert(
             field_key(0x001),
             FieldMapping {
-                path: "electrical.batteries.24v-service.voltage".into(),
+                path: "electrical.batteries.24vService.voltage".into(),
                 ..Default::default()
             },
         );
         dm.fields.insert(
             field_key(0x005),
             FieldMapping {
-                path: "electrical.batteries.24v-service.temperature".into(),
+                path: "electrical.batteries.24vService.temperature".into(),
                 ..Default::default()
             },
         );
@@ -1461,7 +1461,7 @@ mod tests {
         let m = shared.mapping.lock().unwrap().clone();
         assert_eq!(
             m.devices["MLI-2"].fields[&field_key(0x001)].path,
-            "electrical.batteries.24v-service2.voltage"
+            "electrical.batteries.24vService2.voltage"
         );
         // Nothing mapped on the source: a request error, not a copy of nothing.
         assert_eq!(
@@ -1720,10 +1720,7 @@ mod tests {
             "POST /api/mapping/suggest HTTP/1.0\r\nAuthorization: Bearer tok\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ));
-        assert!(
-            r.contains("electrical.batteries.24v-service.voltage"),
-            "{r}"
-        );
+        assert!(r.contains("electrical.batteries.24vService.voltage"), "{r}");
         server.unblock();
     }
 }

@@ -15,13 +15,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Name rules for MasterShunts (`MSH`, which report the battery
     monitors' fields under their own class word), the MAC's `On/Standby`,
     an interface's (`INT`) `State`, every channel of a digital switching
-    module (`DSD`), and both sides of an isolation transformer (`ISO`,
-    to `electrical.ac.<id>.shore|output.phase.A.*`). Names now match
+    module (`DSD`), and an isolation transformer's output (`ISO`, to the
+    specification's `electrical.ac.<id>.phase.single.*`; its shore side
+    would need a second bus id and is left to a human). Names now match
     regardless of case (`State of Charge`), and `Remaining` is a time
     remaining.
   - Where no rule knows a field, the mapping editors (TUI and the plugin's
     API, `tier: "built"`) now pre-fill a path built from the field's group,
-    name and unit — `…ac-inputs.generator.voltage` — under the node the
+    name and unit — `…acInputs.generator.voltage` — under the node the
     device already publishes into, instead of a bare `electrical.`. Seeding
     a first `mapping.json` still uses only the evidence-based tiers.
   - A proposal never lands on a path another field of the device already
@@ -29,6 +30,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     is added instead.
   - The TUI proposes paths under the instance the device's mapping already
     uses, as the plugin's editor did.
+
+### Changed
+- **Proposed instance ids and built path segments are camelCase, letters
+  and digits only** (`BAT 24V Service` → `24vService`, was `24v-service`).
+  The Signal K specification keys every `electrical` category on
+  `^[A-Za-z0-9]+$`. Existing mapping files are untouched and keep
+  publishing where they did; the change is in what new suggestions and a
+  newly seeded `mapping.json` propose.
 
 ## [0.4.3] - 2026-10-01
 

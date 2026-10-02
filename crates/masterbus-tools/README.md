@@ -75,8 +75,9 @@ HTTP control API (off by default) that the `signalk-masterbus` plugin
 uses to browse devices, edit the mapping and write fields. Which field
 lands where is a curated file, not a built-in table; see below. When
 that file is seeded, the instance id proposed for a device is its name
-lowercased and stripped of its leading class word (e.g. `BAT Main Batt
-4` → `main-batt-4`).
+stripped of its leading class word and written in camelCase, letters and
+digits only, as the Signal K specification wants its ids (e.g. `BAT Main
+Batt 4` → `mainBatt4`).
 
     masterbus-signalk [listen-addr] [--stream ADDR] [--api ADDR]
                       [--api-token-file PATH] [--config-dir DIR] [--fake-bus]
@@ -103,7 +104,7 @@ the plugin on a laptop:
 Sample delta:
 
 ```json
-{"updates":[{"$source":"masterbus","timestamp":"2026-05-25T18:00:00.000Z","values":[{"path":"electrical.batteries.main-batt-4.voltage","value":26.6}]}]}
+{"updates":[{"$source":"masterbus","timestamp":"2026-05-25T18:00:00.000Z","values":[{"path":"electrical.batteries.mainBatt4.voltage","value":26.6}]}]}
 ```
 
 ### What gets published: `mapping.json`

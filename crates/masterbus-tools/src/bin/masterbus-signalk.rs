@@ -908,12 +908,12 @@ mod tests {
         let values = delta["updates"][0]["values"].as_array().unwrap();
 
         let paths: Vec<&str> = values.iter().map(|v| v["path"].as_str().unwrap()).collect();
-        assert!(paths.contains(&"electrical.batteries.24v-service.name"));
-        assert!(paths.contains(&"electrical.batteries.24v-service.manufacturer.name"));
-        assert!(paths.contains(&"electrical.batteries.24v-service.manufacturer.model"));
+        assert!(paths.contains(&"electrical.batteries.24vService.name"));
+        assert!(paths.contains(&"electrical.batteries.24vService.manufacturer.name"));
+        assert!(paths.contains(&"electrical.batteries.24vService.manufacturer.model"));
         let maker = values
             .iter()
-            .find(|v| v["path"] == "electrical.batteries.24v-service.manufacturer.name")
+            .find(|v| v["path"] == "electrical.batteries.24vService.manufacturer.name")
             .unwrap();
         assert_eq!(maker["value"], "Mastervolt");
         assert_eq!(delta["updates"][0]["$source"], "masterbus");
@@ -952,7 +952,7 @@ mod tests {
             .collect();
         assert_eq!(
             paths,
-            vec!["electrical.batteries.24v-service.manufacturer.name"]
+            vec!["electrical.batteries.24vService.manufacturer.name"]
         );
     }
 
@@ -998,7 +998,7 @@ mod tests {
         let emit = emit_for(&devices, &publish::seed_mapping(&devices));
         assert_eq!(
             nodes_of(devices[0].id, &emit),
-            vec!["electrical.batteries.24v-service".to_string()]
+            vec!["electrical.batteries.24vService".to_string()]
         );
     }
 

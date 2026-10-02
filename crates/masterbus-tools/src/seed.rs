@@ -54,40 +54,19 @@ pub fn class_of(name: &str) -> &str {
 }
 
 /// The Signal K instance id proposed for a device: its name minus the leading
-/// class word, lowercased and reduced to path-safe characters.
+/// class word, in camelCase (`BAT 24V Aft Serv` → `24vAftServ`).
+///
+/// The specification keys every `electrical` category on `^[A-Za-z0-9]+$`,
+/// so no `-` or `_`; camelCase is how its own leaves join words.
 pub fn instance_of(name: &str, addr: DeviceId) -> String {
     let label = name
         .split_whitespace()
         .skip(1)
         .collect::<Vec<_>>()
         .join(" ");
-    if !label.is_empty() {
-        sanitize(&label)
-    } else if !name.trim().is_empty() {
-        sanitize(name)
-    } else {
-        format!("{addr:06x}")
-    }
-}
-
-/// Lowercase and keep only Signal K path-segment-safe characters (lowercase
-/// reads more idiomatically in Signal K paths).
-pub fn sanitize(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "0".into()
-    } else {
-        cleaned
-    }
+    segment(&label)
+        .or_else(|| segment(name))
+        .unwrap_or_else(|| format!("{addr:06x}"))
 }
 
 /// Where a suggestion came from, so the editor can say how much to trust it.
@@ -308,23 +287,19 @@ pub fn suggest(class: &str, instance: &str, f: &FieldCtx) -> Option<Suggestion> 
             let ch = segment(f.name)?;
             Suggestion::path(format!("electrical.switches.{instance}.{ch}.state"))
         }
-        // ISO — an isolation transformer: the shore side and the boat side
-        // of one AC supply, each a single phase.
-        "ISO" => {
-            let side = match name {
-                "shore" | "cos phi" => "shore",
-                "output" => "output",
+        // ISO — an isolation transformer. Its output is the boat's AC bus,
+        // single phase, in the specification's shape. The shore side is a
+        // second bus the spec would need a second id for, and one device
+        // with two ids defeats "copy to same model"; it is left to a human.
+        "ISO" if name == "output" => {
+            let leaf = match ut {
+                "V" => "lineNeutralVoltage",
+                "A" => "current",
+                "W" | "kW" => "realPower",
+                "Hz" => "frequency",
                 _ => return None,
             };
-            let leaf = match (name, ut) {
-                ("cos phi", _) => "powerFactor",
-                (_, "V") => "lineNeutralVoltage",
-                (_, "A") => "current",
-                (_, "W" | "kW") => "realPower",
-                (_, "Hz") => "frequency",
-                _ => return None,
-            };
-            Suggestion::path(format!("electrical.ac.{instance}.{side}.phase.A.{leaf}"))
+            Suggestion::path(format!("electrical.ac.{instance}.phase.single.{leaf}"))
         }
         _ => None,
     }
@@ -370,14 +345,15 @@ fn unit_leaf(unit: &str) -> Option<&'static str> {
 /// installer's.
 pub fn build(node: &str, f: &FieldCtx) -> Option<Suggestion> {
     let mut path = node.to_string();
-    let group = segment(f.group);
-    let name = segment(f.name);
-    if let Some(g) = &group
-        && name.as_deref() != Some(g.as_str())
-    {
+    // The group is kept even when the name repeats it. Collapsing
+    // `Sec. charger` / `Sec. charger` to `…secCharger` would make that a
+    // value while `…secCharger.secBattery.voltage` makes it a branch, and a
+    // Signal K node cannot be both.
+    if let Some(g) = segment(f.group) {
         path.push('.');
-        path.push_str(g);
+        path.push_str(&g);
     }
+    let name = segment(f.name);
     match (unit_leaf(f.unit), name) {
         (Some(leaf), Some(n)) => path = format!("{path}.{n}.{leaf}"),
         (Some(leaf), None) => path = format!("{path}.{leaf}"),
@@ -389,20 +365,31 @@ pub fn build(node: &str, f: &FieldCtx) -> Option<Suggestion> {
     Suggestion::path(path)
 }
 
-/// One path segment from free text: lowercase, runs of anything but letters
-/// and digits become one `-`, no `-` at either end. `None` when nothing is
-/// left.
+/// One path segment from free text, in camelCase and nothing but letters and
+/// digits, as the specification's ids and leaves are: `Battery (DC)` →
+/// `batteryDc`, `N2K net 1` → `n2kNet1`. A word in capitals is a word, not
+/// an acronym to keep (`START ALL` → `startAll`); one in mixed case keeps
+/// its inner capitals (`SonarHub`). `None` when nothing is left.
 pub fn segment(s: &str) -> Option<String> {
     let mut out = String::new();
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
+    for word in s
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let shouting = !word.chars().any(|c| c.is_ascii_lowercase());
+        let word = if shouting {
+            word.to_ascii_lowercase()
+        } else {
+            word.to_string()
+        };
+        let mut chars = word.chars();
+        let first = chars.next()?;
+        if out.is_empty() {
+            out.push(first.to_ascii_lowercase());
+        } else {
+            out.push(first.to_ascii_uppercase());
         }
-    }
-    while out.ends_with('-') {
-        out.pop();
+        out.push_str(chars.as_str());
     }
     (!out.is_empty()).then_some(out)
 }
@@ -411,7 +398,7 @@ pub fn segment(s: &str) -> Option<String> {
 /// already publishes to. Installers repeat channel names (`Spare`, twice, on
 /// one switch panel), and two fields on one path coalesce into whichever
 /// updates last. The field id goes onto the segment before the leaf:
-/// `…spare.state` becomes `…spare-0x015.state`.
+/// `…spare.state` becomes `…spare0x015.state`.
 pub fn unique<'a>(
     path: String,
     field: FieldId,
@@ -422,8 +409,8 @@ pub fn unique<'a>(
     }
     let tag = crate::mapping::field_key(field).to_lowercase();
     match path.rsplit_once('.') {
-        Some((head, leaf)) => format!("{head}-{tag}.{leaf}"),
-        None => format!("{path}-{tag}"),
+        Some((head, leaf)) => format!("{head}{tag}.{leaf}"),
+        None => format!("{path}{tag}"),
     }
 }
 
@@ -535,11 +522,9 @@ mod tests {
             ("MSH", "Battery", "\u{b0}C"),
             ("MAC", "On/Standby", ""),
             ("INT", "State", ""),
-            ("ISO", "Shore", "V"),
-            ("ISO", "Shore", "kW"),
-            ("ISO", "Shore", "Hz"),
+            ("ISO", "Output", "V"),
+            ("ISO", "Output", "kW"),
             ("ISO", "Output", "A"),
-            ("ISO", "cos phi", ""),
         ];
         for (class, name, unit) in cases {
             let s = suggest(class, "x", &ctx(name, unit))
@@ -554,8 +539,9 @@ mod tests {
 
     #[test]
     fn instance_strips_the_class_word_and_sanitizes() {
-        assert_eq!(instance_of("BAT 24V Aft Serv", 0x123456), "24v-aft-serv");
-        assert_eq!(instance_of("CHG 12V ChargerE", 0x123456), "12v-chargere");
+        assert_eq!(instance_of("BAT 24V Aft Serv", 0x123456), "24vAftServ");
+        assert_eq!(instance_of("CHG 12V ChargerE", 0x123456), "12vChargerE");
+        assert_eq!(instance_of("MCU Chg/Inv/Sol", 0x123456), "chgInvSol");
         // A single-word name keeps the whole thing.
         assert_eq!(instance_of("Repeater", 0x123456), "repeater");
         // No name at all falls back to the address.
@@ -647,32 +633,30 @@ mod tests {
             ..ctx("Bilge Pump Front", "")
         };
         assert_eq!(
-            suggest("DSD", "1-power", &f).unwrap().path,
-            "electrical.switches.1-power.bilge-pump-front.state"
+            suggest("DSD", "1Power", &f).unwrap().path,
+            "electrical.switches.1Power.bilgePumpFront.state"
         );
         // Outside its Channels group nothing is a channel.
         let f = FieldCtx {
             group: "Reset",
             ..ctx("Reset alarms", "")
         };
-        assert!(suggest("DSD", "1-power", &f).is_none());
+        assert!(suggest("DSD", "1Power", &f).is_none());
     }
 
     #[test]
-    fn an_isolation_transformer_publishes_both_sides_as_ac() {
+    fn an_isolation_transformers_output_is_a_single_phase_ac_bus() {
         assert_eq!(
-            path_of("ISO", "Shore", "V").as_deref(),
-            Some("electrical.ac.x.shore.phase.A.lineNeutralVoltage")
+            path_of("ISO", "Output", "V").as_deref(),
+            Some("electrical.ac.x.phase.single.lineNeutralVoltage")
         );
         assert_eq!(
             path_of("ISO", "Output", "kW").as_deref(),
-            Some("electrical.ac.x.output.phase.A.realPower")
+            Some("electrical.ac.x.phase.single.realPower")
         );
-        assert_eq!(
-            path_of("ISO", "cos phi", "").as_deref(),
-            Some("electrical.ac.x.shore.phase.A.powerFactor")
-        );
-        assert_eq!(path_of("ISO", "State", ""), None);
+        // The shore side would need a second bus id: left to a human.
+        assert_eq!(path_of("ISO", "Shore", "V"), None);
+        assert_eq!(path_of("ISO", "cos phi", ""), None);
     }
 
     #[test]
@@ -682,46 +666,47 @@ mod tests {
             ..ctx(name, unit)
         };
         let b = |class, f: FieldCtx| {
-            suggest_or_build("0", "0", class, "chg-inv-sol", None, &f).map(|(s, _)| s.path)
+            suggest_or_build("0", "0", class, "chgInvSol", None, &f).map(|(s, _)| s.path)
         };
         assert_eq!(
             b("MCU", f("AC inputs", "Generator", "V")).as_deref(),
-            Some("electrical.inverters.chg-inv-sol.ac-inputs.generator.voltage")
+            Some("electrical.inverters.chgInvSol.acInputs.generator.voltage")
         );
         // No unit: the name is the leaf.
         assert_eq!(
             b("MCU", f("General", "AC in state", "")).as_deref(),
-            Some("electrical.inverters.chg-inv-sol.general.ac-in-state")
+            Some("electrical.inverters.chgInvSol.general.acInState")
         );
-        // A group that repeats the name is said once.
+        // A group that repeats the name still gets its own segment, so the
+        // group stays a branch for its other fields.
         assert_eq!(
             b("MCU", f("Sec. charger", "Sec. charger", "")).as_deref(),
-            Some("electrical.inverters.chg-inv-sol.sec-charger")
+            Some("electrical.inverters.chgInvSol.secCharger.secCharger")
         );
         // An unknown class becomes its own category.
         assert_eq!(
             b("DIS", f("Power save", "Backlight", "%")).as_deref(),
-            Some("electrical.dis.chg-inv-sol.power-save.backlight")
+            Some("electrical.dis.chgInvSol.powerSave.backlight")
         );
         assert!(b("MCU", f("", "", "")).is_none());
         // A fuse distributor's state is not a switch's on/off.
         assert_eq!(
             b("DCD", f("Device", "State", "")).as_deref(),
-            Some("electrical.dcd.chg-inv-sol.device.state")
+            Some("electrical.dcd.chgInvSol.device.state")
         );
         // A device already mapped somewhere keeps its paths together.
         let (s, _) = suggest_or_build(
             "0",
             "0",
             "MCU",
-            "chg-inv-sol",
+            "chgInvSol",
             Some("electrical.chargers.ChgInvSol"),
             &f("AC inputs", "Generator", "V"),
         )
         .unwrap();
         assert_eq!(
             s.path,
-            "electrical.chargers.ChgInvSol.ac-inputs.generator.voltage"
+            "electrical.chargers.ChgInvSol.acInputs.generator.voltage"
         );
     }
 
@@ -734,17 +719,17 @@ mod tests {
         assert!(suggest_best("99999999", "1.0", "XYZ", "x", &f).is_none());
         let (s, tier) = suggest_or_build("99999999", "1.0", "XYZ", "x", None, &f).unwrap();
         assert_eq!(tier, Tier::Built);
-        assert_eq!(s.path, "electrical.xyz.x.ac-inputs.generator.voltage");
+        assert_eq!(s.path, "electrical.xyz.x.acInputs.generator.voltage");
     }
 
     #[test]
-    fn segments_are_tidy() {
-        assert_eq!(segment("Battery (DC)").as_deref(), Some("battery-dc"));
-        assert_eq!(segment("  N2K net 1 ").as_deref(), Some("n2k-net-1"));
-        assert_eq!(
-            segment("Radar+ SonarHub").as_deref(),
-            Some("radar-sonarhub")
-        );
+    fn segments_are_camel_case_letters_and_digits() {
+        assert_eq!(segment("Battery (DC)").as_deref(), Some("batteryDc"));
+        assert_eq!(segment("  N2K net 1 ").as_deref(), Some("n2kNet1"));
+        assert_eq!(segment("Radar+ SonarHub").as_deref(), Some("radarSonarHub"));
+        assert_eq!(segment("DCD 4 START ALL").as_deref(), Some("dcd4StartAll"));
+        assert_eq!(segment("Chg/Inv/Sol").as_deref(), Some("chgInvSol"));
+        assert_eq!(segment("Main_battery").as_deref(), Some("mainBattery"));
         assert_eq!(segment("--"), None);
     }
 
@@ -754,15 +739,16 @@ mod tests {
         let taken = [(0x009, "electrical.switches.x.spare.state")];
         assert_eq!(
             unique(p.clone(), 0x015, taken.iter().copied()),
-            "electrical.switches.x.spare-0x015.state"
+            "electrical.switches.x.spare0x015.state"
         );
         // The field's own entry is not a collision.
         assert_eq!(unique(p.clone(), 0x009, taken.iter().copied()), p);
     }
 
     /// Every Monitoring field of a real 19-device bus gets a proposal the
-    /// editor would accept on save, and no two fields of one device share a
-    /// path once [`unique`] has had its say. Reads the dump at run time, so a
+    /// editor would accept on save, no two fields of one device share a path
+    /// once [`unique`] has had its say, and none of one device's paths sits
+    /// inside another. Reads the dump at run time, so a
     /// packaged crate without `samples/` skips rather than fails.
     #[test]
     fn every_field_of_the_sample_bus_gets_a_path_that_would_save() {
@@ -830,6 +816,14 @@ mod tests {
                     assert!(
                         !taken.iter().any(|(_, q)| *q == p),
                         "{} {}: {p} taken twice",
+                        s("name"),
+                        ctx.name
+                    );
+                    // A node is a value or a branch, never both.
+                    assert!(
+                        !taken.iter().any(|(_, q)| q.starts_with(&format!("{p}."))
+                            || p.starts_with(&format!("{q}."))),
+                        "{} {}: {p} is both a value and a branch",
                         s("name"),
                         ctx.name
                     );
