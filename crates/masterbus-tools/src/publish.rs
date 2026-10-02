@@ -405,15 +405,15 @@ pub fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
         let mut ordered: Vec<_> = d.fields.iter().filter(|f| f.menu == MENU).collect();
         ordered.sort_by_key(|f| f.id);
         for f in ordered {
-            let Some((s, _tier)) = seed::suggest_best(
-                &d.article,
-                &d.firmware,
-                &class,
-                &d.instance,
-                f.id,
-                &f.name,
-                &f.unit,
-            ) else {
+            let ctx = seed::FieldCtx {
+                id: f.id,
+                name: &f.name,
+                unit: &f.unit,
+                group: &f.group,
+            };
+            let Some((s, _tier)) =
+                seed::suggest_best(&d.article, &d.firmware, &class, &d.instance, &ctx)
+            else {
                 continue;
             };
             if let Some(first) = taken.get(s.path.as_str()) {
@@ -443,13 +443,17 @@ pub fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
     m
 }
 
+/// The Signal K node a device's mapped paths already use, if any.
+pub fn mapped_node(dm: Option<&DeviceMapping>) -> Option<String> {
+    dm.and_then(|d| d.fields.values().find_map(|f| signalk::node_of(&f.path)))
+}
+
 /// What the editor pre-fills for a field with no suggestion: the node of a
 /// path already mapped on this device, so the second field of a solar
 /// charger does not need `electrical.solar.solar-chg.` typed again, else
 /// just `electrical.`.
 pub fn path_prefix(dm: Option<&DeviceMapping>) -> String {
-    let node = dm.and_then(|d| d.fields.values().find_map(|f| signalk::node_of(&f.path)));
-    match node {
+    match mapped_node(dm) {
         Some(n) => format!("{n}."),
         None => "electrical.".into(),
     }

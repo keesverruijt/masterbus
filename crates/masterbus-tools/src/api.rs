@@ -611,22 +611,36 @@ fn suggest(shared: &Shared, body: &[u8]) -> Response {
         .unwrap_or_else(|| d.instance.clone());
     let (path, invert, tier) = match dm.and_then(|m| m.fields.get(&field_key(f.id))) {
         Some(e) => (e.path.clone(), e.invert, Some("existing")),
-        None => match seed::suggest_best(
+        None => match seed::suggest_or_build(
             &d.article,
             &d.firmware,
             seed::class_of(&d.name),
             &instance,
-            f.id,
-            &f.name,
-            &f.unit,
+            publish::mapped_node(dm).as_deref(),
+            &seed::FieldCtx {
+                id: f.id,
+                name: &f.name,
+                unit: &f.unit,
+                group: &f.group,
+            },
         ) {
             Some((s, tier)) => (
-                s.path,
+                // Not onto a path another field of this device already has.
+                seed::unique(
+                    s.path,
+                    f.id,
+                    dm.into_iter().flat_map(|m| {
+                        m.fields.iter().filter_map(|(k, e)| {
+                            crate::mapping::parse_field_key(k).map(|id| (id, e.path.as_str()))
+                        })
+                    }),
+                ),
                 s.invert,
                 Some(match tier {
                     seed::Tier::ModelFirmware => "modelFirmware",
                     seed::Tier::Model => "model",
                     seed::Tier::Name => "name",
+                    seed::Tier::Built => "built",
                 }),
             ),
             None => (publish::path_prefix(dm), false, None),
@@ -1238,16 +1252,19 @@ mod tests {
         assert_eq!(r.status, 200);
         assert_eq!(r.body["path"], "electrical.batteries.24v-service.voltage");
         assert_eq!(r.body["tier"], "name");
-        // Nothing known: the prefix, with no tier.
+        // No rule knows it: a path built from its group, name and unit.
         let r = send(
             &shared,
             "POST",
             "/api/mapping/suggest",
             json!({"serial": "MLI-1", "field": "0x030"}),
         );
-        assert_eq!(r.body["path"], "electrical.");
-        assert_eq!(r.body["tier"], Json::Null);
-        // Once something is mapped, the prefix follows it; and an existing
+        assert_eq!(
+            r.body["path"],
+            "electrical.batteries.24v-service.misc.something-odd.voltage"
+        );
+        assert_eq!(r.body["tier"], "built");
+        // Once something is mapped, a built path joins it; and an existing
         // entry comes back as itself.
         let mut m = Mapping::new();
         let mut dm = DeviceMapping::default();
@@ -1266,7 +1283,10 @@ mod tests {
             "/api/mapping/suggest",
             json!({"serial": "MLI-1", "field": "0x030"}),
         );
-        assert_eq!(r.body["path"], "electrical.batteries.house.");
+        assert_eq!(
+            r.body["path"],
+            "electrical.batteries.house.misc.something-odd.voltage"
+        );
         let r = send(
             &shared,
             "POST",

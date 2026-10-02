@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Suggestions learned from a 19-device bus** (`samples/mcu-czone-19-devices.json`):
+  - The bundled catalog knows the MCU charger/inverter/solar combi
+    (article 38013000): inverter, charger and solar state, DC battery,
+    mains input and AC output 1 — 17 fields that are told apart only by
+    unit, so no name rule could.
+  - Name rules for MasterShunts (`MSH`, which report the battery
+    monitors' fields under their own class word), the MAC's `On/Standby`,
+    an interface's (`INT`) `State`, every channel of a digital switching
+    module (`DSD`), and both sides of an isolation transformer (`ISO`,
+    to `electrical.ac.<id>.shore|output.phase.A.*`). Names now match
+    regardless of case (`State of Charge`), and `Remaining` is a time
+    remaining.
+  - Where no rule knows a field, the mapping editors (TUI and the plugin's
+    API, `tier: "built"`) now pre-fill a path built from the field's group,
+    name and unit — `…ac-inputs.generator.voltage` — under the node the
+    device already publishes into, instead of a bare `electrical.`. Seeding
+    a first `mapping.json` still uses only the evidence-based tiers.
+  - A proposal never lands on a path another field of the device already
+    has; installers repeat channel names (`Spare`, twice), so the field id
+    is added instead.
+  - The TUI proposes paths under the instance the device's mapping already
+    uses, as the plugin's editor did.
+
 ## [0.4.3] - 2026-10-01
 
 ### Added

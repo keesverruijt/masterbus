@@ -29,6 +29,29 @@
         "0x010": { "path": "electrical.chargers.{instance}.battery.temperature" },
         "0x018": { "path": "electrical.chargers.{instance}.battery.name" }
       }
+    },
+    "38013000": {
+      "model": "Mastervolt combi: charger, inverter and solar charger in one (MCU)",
+      "source": "samples/mcu-czone-19-devices.json (tester's bus, anonymised), firmware 2.67",
+      "fields": {
+        "0x010": { "path": "electrical.inverters.{instance}.inverterMode" },
+        "0x014": { "path": "electrical.inverters.{instance}.enabled" },
+        "0x006": { "path": "electrical.inverters.{instance}.dc.voltage" },
+        "0x007": { "path": "electrical.inverters.{instance}.dc.current" },
+        "0x015": { "path": "electrical.inverters.{instance}.dc.temperature" },
+        "0x00A": { "path": "electrical.inverters.{instance}.ac.voltage" },
+        "0x00B": { "path": "electrical.inverters.{instance}.ac.current" },
+        "0x062": { "path": "electrical.inverters.{instance}.ac.power" },
+        "0x03A": { "path": "electrical.chargers.{instance}.enabled" },
+        "0x012": { "path": "electrical.chargers.{instance}.chargingMode" },
+        "0x008": { "path": "electrical.chargers.{instance}.acin.voltage" },
+        "0x009": { "path": "electrical.chargers.{instance}.acin.current" },
+        "0x05E": { "path": "electrical.chargers.{instance}.acin.power" },
+        "0x013": { "path": "electrical.chargers.{instance}.acin.currentLimit" },
+        "0x00F": { "path": "electrical.solar.{instance}.enabled" },
+        "0x02A": { "path": "electrical.solar.{instance}.chargingMode" },
+        "0x029": { "path": "electrical.solar.{instance}.panelPower" }
+      }
     }
   }
 }

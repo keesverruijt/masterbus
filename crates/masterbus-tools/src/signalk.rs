@@ -33,7 +33,7 @@ pub fn leaf_unit(path: &str) -> Option<&'static str> {
             "V"
         }
         "current" | "currentLimit" | "panelCurrent" | "loadCurrent" => "A",
-        "power" | "realPower" => "W",
+        "power" | "realPower" | "panelPower" => "W",
         "frequency" | "revolutions" => "Hz",
         // `yieldToday` is the spec's; `yieldTotal` is this project's sibling
         // for a lifetime energy counter the spec does not have.

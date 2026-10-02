@@ -12,9 +12,9 @@ use masterbus::{
     Subscription, Value, VisualizationType, field_id,
 };
 use masterbus_tools::mapping::{
-    CopyTarget, FieldMapping, Mapping, NotifyState, copy_to_targets, field_key,
+    CopyTarget, FieldMapping, Mapping, NotifyState, copy_to_targets, field_key, parse_field_key,
 };
-use masterbus_tools::{seed, signalk};
+use masterbus_tools::{publish, seed, signalk};
 
 /// Live-poll rate for the selected device's monitoring fields.
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
@@ -1272,18 +1272,43 @@ impl App {
                     .as_ref()
                     .map(|i| (i.name.clone(), i.article.clone(), i.firmware.clone()))
                     .unwrap_or_default();
-                let instance = self.cur_instance.clone();
-                match seed::suggest_best(
+                // The instance this device's paths already use, if the user
+                // has chosen one, else the proposed one — as the plugin's
+                // editor does.
+                let device = self
+                    .mapping
+                    .as_ref()
+                    .and_then(|s| s.map.devices.get(&serial));
+                let instance = device
+                    .map(|d| d.instance.clone())
+                    .filter(|i| !i.is_empty())
+                    .unwrap_or_else(|| self.cur_instance.clone());
+                let group = self.group_of(self.row_sel);
+                let node = publish::mapped_node(device);
+                match seed::suggest_or_build(
                     &article,
                     &firmware,
                     seed::class_of(&name),
                     &instance,
-                    field.index,
-                    &field.name,
-                    &field.unit,
+                    node.as_deref(),
+                    &seed::FieldCtx {
+                        id: field.index,
+                        name: &field.name,
+                        unit: &field.unit,
+                        group: &group,
+                    },
                 ) {
                     Some((s, tier)) => (
-                        s.path,
+                        // Not onto a path another field of this device has.
+                        seed::unique(
+                            s.path,
+                            field.index,
+                            device.into_iter().flat_map(|d| {
+                                d.fields.iter().filter_map(|(k, e)| {
+                                    parse_field_key(k).map(|id| (id, e.path.as_str()))
+                                })
+                            }),
+                        ),
                         s.invert,
                         BTreeMap::new(),
                         BTreeMap::new(),
@@ -1313,6 +1338,20 @@ impl App {
             stage: Stage::Path,
             notify_offered: false,
         });
+    }
+
+    /// The group heading the row at `index` sits under, or empty.
+    fn group_of(&self, index: usize) -> String {
+        self.rows
+            .get(..=index)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .find_map(|r| match r {
+                Row::Group(g) => Some(g.clone()),
+                Row::Field(_) => None,
+            })
+            .unwrap_or_default()
     }
 
     /// What to pre-fill when nothing is known about a field: the node of a

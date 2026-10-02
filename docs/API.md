@@ -213,9 +213,14 @@ What the editor pre-fills for a field:
 
 `tier` says where the proposal came from: `existing` (the field is already
 mapped; this is its entry), `modelFirmware` or `model` (the bundled
-per-model database), `name` (the per-class name heuristics), or `null`
-(nothing known; `path` is then a prefix to type after, the node the device
-already publishes into or `electrical.`). `truthDefault` is the conventional
+per-model database), `name` (the per-class name heuristics), `built`
+(no rule knows the field, so the path is put together from its group, name
+and unit under the node the device already publishes into, or under
+`electrical.<category>.<instance>`; worth a human's second look), or `null`
+(not even that could be built; `path` is then a prefix to type after, the
+node the device already publishes into or `electrical.`). A proposal never
+repeats a path another field of the same device is already mapped to: the
+field id is added to the segment before the leaf instead. `truthDefault` is the conventional
 truth table for an enum's labels when every label is unambiguous, else
 `null`; `notifyDefault` the labels that conventionally deserve a
 notification.
