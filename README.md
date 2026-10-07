@@ -228,8 +228,11 @@ Useful targets: `masterbus::frame` (candump-style Tx/Rx dump),
 (schema cache load/save), `masterbus::write` (`do_write` calls),
 `masterbus::settings` (config-file creation).
 
-The TUI logs to `masterbus-tui.log` (or `$MASTERBUS_TUI_LOG`) instead of
-stderr so its alt-screen stays clean. The `MASTERBUS_LOG` env var that used
+The TUI keeps stderr clear for its alt-screen: by default logs go to an
+in-TUI pane (toggle with `~`) at level `info`, and `RUST_LOG` is ignored. Set
+`MASTERBUS_TUI_LOG=<path>` to append them to a file instead; `RUST_LOG` then
+applies (`MASTERBUS_TUI_LOG=trace.log RUST_LOG=masterbus::frame=trace
+masterbus-tui`). The `MASTERBUS_LOG` env var that used
 to point the engine at a `.log` file is gone — use `RUST_LOG=masterbus::frame=trace`
 to get the equivalent dump on stderr (or pipe to a file).
 

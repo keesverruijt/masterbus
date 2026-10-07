@@ -173,9 +173,12 @@ bottom of the [README](README.md) is honest about what is missing.
 Whatever you are chasing, start by watching the wire:
 
 ```sh
-RUST_LOG=masterbus=debug,masterbus::frame=trace \
-    ./target/release/masterbus-tui 2> trace.log
+MASTERBUS_TUI_LOG=trace.log RUST_LOG=masterbus=debug,masterbus::frame=trace \
+    ./target/release/masterbus-tui
 ```
+
+(The TUI owns the terminal, so it writes logs to the file named by
+`MASTERBUS_TUI_LOG` rather than stderr; without it, `RUST_LOG` is ignored.)
 
 Reproduce the problem, quit, and read `trace.log`. The `masterbus::frame`
 target is every frame sent and received, in a candump-compatible format,

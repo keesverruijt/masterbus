@@ -6,9 +6,11 @@ bus (`candump`, `strace`) and confirmed against the original `libmasterbus.so`
 exchanges, and value encodings used to enumerate devices and read monitoring
 data.
 
-> Companion document: see `FINDINGS.md` for how these facts were reverse
-> engineered, the original library's runtime behaviour, and reimplementation
-> notes.
+> References to "FINDINGS" (here and in source comments) point to the
+> maintainer's research notes on how these facts were reverse engineered, the
+> original library's runtime behaviour, and reimplementation notes. That
+> document is not published in this repository; every fact the code relies on
+> is stated in this file.
 
 ---
 
