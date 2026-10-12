@@ -17,9 +17,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Subscriptions read a pass's fields together** (#30). Each due field
   was read and waited for in turn, so a pass cost one round trip per field:
   62 mapped fields updated about every 2 s at a 1 s rate. Up to 16 reads
-  now go out back to back and their answers are collected after; a field
-  two subscriptions both want is read once, and fields that don't answer
-  share one timeout instead of 500 ms each.
+  now go out back to back; a field two subscriptions both want is read
+  once, and fields that don't answer share one timeout instead of 500 ms
+  each. Each value is delivered as soon as its reply arrives, so a field
+  that doesn't answer no longer holds up the others in its pass.
 - **A lost group-count reply no longer leaves a device with an empty menu
   for good** (#31). It was taken as a count of zero and the empty menu was
   cached on disk, so the device showed no Monitoring fields across restarts.

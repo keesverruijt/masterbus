@@ -62,8 +62,7 @@ const VALUE_READ_TIMEOUT_BTM3: Duration = Duration::from_millis(2500);
 /// of once per field per interval, until it answers again. (#30)
 const BACKOFF_AFTER: u32 = 2;
 
-/// How many value reads a subscription pass puts on the bus before collecting
-/// their answers. Read one at a time, a pass costs a round trip per field:
+/// How many value reads a subscription pass keeps in flight at once. Read one at a time, a pass costs a round trip per field:
 /// about 2 s for 62 fields on a tester's bus, against a 1 s rate. Discovery
 /// sends a device up to 64 queries back to back, so 16 is well within what
 /// devices take. (#30)
@@ -490,24 +489,44 @@ impl Sched {
         self.finish_read(addr, field, viz, sent)
     }
 
-    /// Read several fields, [`READ_BATCH`] at a time: the requests go out back
-    /// to back and the answers are collected after, so a batch costs about
-    /// one round trip, and fields that don't answer share one timeout.
+    /// Read several fields with up to [`READ_BATCH`] requests in flight: they
+    /// go out back to back, so a batch costs about one round trip, and fields
+    /// that don't answer share one timeout. Replies are taken in the order
+    /// they come in and each one frees a slot for the next request, so a
+    /// field that never answers holds up neither the others nor the reads
+    /// queued behind it. `got` is handed each read's value (by its position
+    /// in `reads`) as soon as it is known.
     fn poll_values(
         &mut self,
         reads: &[(DeviceId, FieldId, VisualizationType)],
-    ) -> Vec<Option<Value>> {
-        let mut out = Vec::with_capacity(reads.len());
-        for batch in reads.chunks(READ_BATCH) {
-            let sent: Vec<_> = batch
-                .iter()
-                .map(|&(a, f, _)| self.send_read(a, f))
-                .collect();
-            for (&(a, f, viz), sent) in batch.iter().zip(sent) {
-                out.push(self.finish_read(a, f, viz, sent).ok());
+        mut got: impl FnMut(usize, Option<Value>),
+    ) {
+        let mut next = 0;
+        let mut pending: Vec<(usize, (String, Instant))> = Vec::new();
+        loop {
+            while pending.len() < READ_BATCH && next < reads.len() {
+                let (a, f, _) = reads[next];
+                pending.push((next, self.send_read(a, f)));
+                next += 1;
+            }
+            if pending.is_empty() {
+                return;
+            }
+            let deadline = pending.iter().map(|(_, (_, d))| *d).min().unwrap();
+            let keys: Vec<&str> = pending.iter().map(|(_, (k, _))| k.as_str()).collect();
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let done: Vec<usize> = match self.waiter.wait_any(&keys, wait) {
+                Some(p) => vec![p],
+                None => (0..pending.len())
+                    .filter(|&p| pending[p].1.1 <= deadline)
+                    .collect(),
+            };
+            for p in done.into_iter().rev() {
+                let (r, sent) = pending.remove(p);
+                let (a, f, viz) = reads[r];
+                got(r, self.finish_read(a, f, viz, sent).ok());
             }
         }
-        out
     }
 
     /// Whether a subscription may put a value read for `addr` on the bus now.
@@ -820,23 +839,24 @@ impl Sched {
         // Passive-first: a value cached within the interval is used as is.
         // The rest are read in one go, each field once however many
         // subscriptions want it, and a device that is down to probes gets
-        // one read per pass rather than one per field.
-        let mut values: Vec<Option<Value>> = vec![None; work.len()];
+        // one read per pass rather than one per field. Every value goes out
+        // as soon as it is known.
         let mut reads: Vec<(DeviceId, FieldId, VisualizationType)> = Vec::new();
+        let mut wanted_by: Vec<Vec<(usize, FieldId)>> = Vec::new();
         let mut read_of: HashMap<(DeviceId, FieldId), usize> = HashMap::new();
-        let mut wanted: Vec<(usize, usize)> = Vec::new();
         let mut probed: Vec<DeviceId> = Vec::new();
-        for (w, &(i, field)) in work.iter().enumerate() {
+        for (i, field) in work {
             let (device, interval) = (subs[i].spec.device, subs[i].spec.interval);
+            subs[i].next_due.insert(field, now + interval);
             if let Some(cv) = self.state.get_value(device, field)
                 && !cv.outdated
                 && cv.at.elapsed() <= interval
             {
-                values[w] = Some(cv.value);
+                deliver(&mut subs[i], field, cv.value);
                 continue;
             }
             if let Some(&r) = read_of.get(&(device, field)) {
-                wanted.push((w, r));
+                wanted_by[r].push((i, field));
                 continue;
             }
             if probed.contains(&device) || !self.may_poll(device) {
@@ -852,30 +872,29 @@ impl Sched {
             };
             if let Some(viz) = viz {
                 read_of.insert((device, field), reads.len());
-                wanted.push((w, reads.len()));
+                wanted_by.push(vec![(i, field)]);
                 reads.push((device, field, viz));
             }
         }
-        let read = self.poll_values(&reads);
-        for (w, r) in wanted {
-            values[w] = read[r].clone();
-        }
-
-        for ((i, field), value) in work.into_iter().zip(values) {
-            let s = &mut subs[i];
-            s.next_due.insert(field, now + s.spec.interval);
+        self.poll_values(&reads, |r, value| {
             if let Some(v) = value {
-                let changed = s.last_value.get(&field) != Some(&v);
-                if !s.spec.change_only || changed {
-                    s.last_value.insert(field, v.clone());
-                    let _ = s.spec.sender.send(ValueUpdate {
-                        device: s.spec.device,
-                        field,
-                        value: v,
-                    });
+                for &(i, field) in &wanted_by[r] {
+                    deliver(&mut subs[i], field, v.clone());
                 }
             }
-        }
+        });
+    }
+}
+
+/// Hand a subscription a value, unless it only wants changes and this isn't one.
+fn deliver(s: &mut SubState, field: FieldId, v: Value) {
+    if !s.spec.change_only || s.last_value.get(&field) != Some(&v) {
+        s.last_value.insert(field, v.clone());
+        let _ = s.spec.sender.send(ValueUpdate {
+            device: s.spec.device,
+            field,
+            value: v,
+        });
     }
 }
 
@@ -1565,6 +1584,35 @@ mod tests {
         // One at a time this is ten round trips, 400 ms.
         let took = started.elapsed();
         assert!(took < Duration::from_millis(200), "a pass took {took:?}");
+    }
+
+    /// A field that doesn't answer doesn't hold up the ones that do: each
+    /// value goes out when its reply arrives, not when the pass is done.
+    #[test]
+    fn a_silent_field_does_not_delay_the_others() {
+        let mut device = Device::new().with_btm1(0x10, 1.0).with_btm1(0x11, 2.0);
+        device.mute.push(0x10);
+        let (engine, _bus) = connect(device, test_config());
+        let (silent, answers) = (field_id::btm1(0x10), field_id::btm1(0x11));
+        seed_schema(
+            &engine,
+            vec![
+                field(silent, "Voltage", VisualizationType::Float),
+                field(answers, "Current", VisualizationType::Float),
+            ],
+        );
+
+        let started = Instant::now();
+        let (_id, rx) =
+            engine.subscribe(ADDR, vec![silent, answers], Duration::from_secs(10), false);
+        let update = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(update.field, answers);
+        // The silent one times out after 500 ms.
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(250),
+            "the answer took {took:?}"
+        );
     }
 
     /// A device that has gone quiet is still read now and then: one that only

@@ -68,6 +68,25 @@ impl Waiter {
             .and_then(|s| if s.cancelled { None } else { s.data })
     }
 
+    /// Block until one of `keys` has a response (or is cancelled), or until
+    /// `timeout` elapses. Returns the position in `keys` of one that is ready,
+    /// leaving it registered for [`Waiter::wait`] to collect; `None` on timeout.
+    pub fn wait_any(&self, keys: &[&str], timeout: Duration) -> Option<usize> {
+        let ready = |m: &HashMap<String, Slot>| {
+            keys.iter().position(|k| {
+                m.get(*k)
+                    .map(|s| s.data.is_some() || s.cancelled)
+                    .unwrap_or(true)
+            })
+        };
+        let map = self.inner.lock().unwrap();
+        let (map, _) = self
+            .cv
+            .wait_timeout_while(map, timeout, |m| ready(m).is_none())
+            .unwrap();
+        ready(&map)
+    }
+
     /// Cancel all pending waits (on shutdown).
     pub fn cancel_all(&self) {
         let mut map = self.inner.lock().unwrap();
