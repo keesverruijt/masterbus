@@ -10,10 +10,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A mapped device that is off the bus no longer slows every other value
   down** (#30). Each of its fields used to cost a 500 ms read timeout per
   second, so two switched-off chargers brought the whole bus to one update
-  every 5 s. A device that has not been heard within the liveness window,
-  or that misses two reads in a row (a display gone to sleep), is now read
-  once every 30 s (`Config::quiet_probe`) until it answers or announces
-  itself again; a charger switched back on is polled at once.
+  every 5 s. A device that has not been heard within the liveness window
+  is now read once every 30 s (`Config::quiet_probe`) until it answers or
+  announces itself again; a charger switched back on is polled at once. A
+  field that misses two reads in a row (a display gone to sleep) is read
+  once every 30 s too. That is counted per field, so a device that skips
+  one field's reply now and then keeps its other fields at their rate.
 - **Subscriptions read a pass's fields together** (#30). Each due field
   was read and waited for in turn, so a pass cost one round trip per field:
   62 mapped fields updated about every 2 s at a 1 s rate. Up to 16 reads
