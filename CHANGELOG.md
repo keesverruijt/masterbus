@@ -29,6 +29,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Nothing is cached now when the count goes unanswered, the menu is asked
   for again after 30 s, and an empty Monitoring menu already in the cache
   is enumerated again.
+- **The Configuration tab no longer shows Monitoring groups followed by one
+  group over and over.** A lost Monitoring count also made Configuration
+  (and Service) start at group 0, and a device asked for a group past its
+  last one answers with the last group again. Such a menu in the cache is
+  now enumerated again, and a group that repeats an earlier one is dropped.
 - **Values keep flowing while a device is being discovered.** Discovery
   and polling share one thread, so reading a schema from a cold cache (a
   charger switched on later, seconds to minutes) stopped every

@@ -455,10 +455,9 @@ fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<(u32, u32)>
 ///   gets its own cache file.
 ///
 /// `None` if the device didn't answer a group count. Nothing is cached then,
-/// so the next attempt asks again instead of inheriting an empty menu. An
-/// empty Monitoring menu already in the cache is ignored for the same
-/// reason: no device seen so far lacks Monitoring groups, and files like that
-/// were written before a failed count could be told from zero. (#31)
+/// so the next attempt asks again instead of inheriting an empty menu. A
+/// cached menu that an earlier version could have got wrong that way is
+/// ignored too (see [`plausible_menu`]). (#31)
 pub(super) fn discover_menu(
     disc: &mut Disc,
     addr: DeviceId,
@@ -468,7 +467,7 @@ pub(super) fn discover_menu(
     let dir = disc.cfg.cache_path.as_deref();
     let level = disc.level;
     if let Some(g) = load_cached_menu(dir, &id.serial, &id.firmware, level, menu)
-        && !(menu == Menu::Monitoring && g.is_empty())
+        && plausible_menu(menu, &g)
     {
         log::debug!(
             target: "masterbus::discovery",
@@ -496,6 +495,43 @@ pub(super) fn discover_menu(
     Some(g)
 }
 
+/// Whether a menu could have come from a sound enumeration. Files written
+/// before a lost group count could be told from zero can be wrong in two
+/// ways: an empty Monitoring menu (no device seen so far lacks Monitoring
+/// groups), and a Configuration or Service menu enumerated from group id 0,
+/// which is Monitoring's first group, so that it repeats the Monitoring
+/// groups and runs past the device's last one.
+fn plausible_menu(menu: Menu, groups: &[GroupInfo]) -> bool {
+    match menu {
+        Menu::Monitoring => !groups.is_empty(),
+        Menu::Configuration | Menu::Service => {
+            !groups.iter().any(|g| g.id == 0) && !has_repeats(groups)
+        }
+        _ => true,
+    }
+}
+
+/// Whether a group lists the same fields as an earlier one. A field belongs
+/// to one group, so this is a device answering a group id past its last
+/// group with the last group again.
+fn has_repeats(groups: &[GroupInfo]) -> bool {
+    groups
+        .iter()
+        .enumerate()
+        .any(|(i, g)| groups[..i].iter().any(|e| repeats(e, g)))
+}
+
+fn repeats(earlier: &GroupInfo, g: &GroupInfo) -> bool {
+    !g.fields.is_empty()
+        && earlier.name == g.name
+        && earlier.fields.len() == g.fields.len()
+        && earlier
+            .fields
+            .iter()
+            .zip(&g.fields)
+            .all(|(a, b)| a.index == b.index)
+}
+
 fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<GroupInfo>> {
     let (offset, count) = menu_range(disc, addr, menu)?;
     let mut groups = Vec::new();
@@ -503,6 +539,14 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<Gro
         for i in 0..count {
             let gid = (offset + i) as u8;
             if let Some(g) = enumerate_group(disc, addr, gid, menu) {
+                if groups.iter().any(|e| repeats(e, &g)) {
+                    log::debug!(
+                        target: "masterbus::discovery",
+                        "0x{addr:06X} {menu:?}: group {gid} repeats \"{}\"; skipped",
+                        g.name,
+                    );
+                    continue;
+                }
                 groups.push(g);
             }
         }
@@ -1371,6 +1415,67 @@ mod enumeration_tests {
         assert!(bus.sent_class(can_class::SCHEMA_REQ).len() > enumerated);
         assert_eq!(engine.state.schema(ADDR).unwrap().groups[0].name, "DC");
         assert!(std::fs::read(&file).unwrap().len() > 2);
+    }
+
+    /// A device that answers a group id past its last group with the last
+    /// group again doesn't get that group twice.
+    #[test]
+    fn a_group_the_device_repeats_is_kept_once() {
+        let device = combi()
+            .with_group(Menu::Configuration, 1, "Solar", &[0x20])
+            .with_group(Menu::Configuration, 2, "Solar", &[0x20])
+            .with_field(field_id::btm1(0x20), "Power", "W", VIZ_FLOAT, false);
+        let (engine, _bus) = connect(device, test_config());
+        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
+        let schema = engine.state.schema(ADDR).unwrap();
+        let config: Vec<_> = schema
+            .groups
+            .iter()
+            .filter(|g| g.menu == Menu::Configuration)
+            .map(|g| g.id)
+            .collect();
+        assert_eq!(config, vec![1]);
+    }
+
+    /// A Configuration menu in the cache that starts at group 0, as an
+    /// earlier version could write after a lost Monitoring count, is treated
+    /// as a miss. (#31)
+    #[test]
+    fn a_cached_configuration_menu_from_group_0_is_enumerated_again() {
+        let dir = TempDir::new();
+        let config = Config {
+            cache_path: Some(dir.path.clone()),
+            ..test_config()
+        };
+        let device = combi()
+            .with_group(Menu::Configuration, 1, "Solar", &[0x20])
+            .with_field(field_id::btm1(0x20), "Power", "W", VIZ_FLOAT, false);
+        let (engine, bus) = connect(device, config);
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
+        let file = |sel: &str| {
+            std::fs::read_dir(&dir.path)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.to_string_lossy().contains(&format!("-{sel}-v")))
+                .unwrap()
+        };
+        let monitoring = std::fs::read(file("02")).unwrap();
+        std::fs::write(file("03"), &monitoring).unwrap();
+        let enumerated = bus.sent_class(can_class::SCHEMA_REQ).len();
+
+        engine.state.forget_schema(ADDR);
+        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
+
+        assert!(bus.sent_class(can_class::SCHEMA_REQ).len() > enumerated);
+        let schema = engine.state.schema(ADDR).unwrap();
+        let names: Vec<_> = schema
+            .groups
+            .iter()
+            .filter(|g| g.menu == Menu::Configuration)
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Solar"]);
     }
 
     /// Writability flips per access level, so each level keys its own file —
