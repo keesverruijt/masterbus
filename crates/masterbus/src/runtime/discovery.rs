@@ -254,12 +254,13 @@ impl Disc<'_> {
             .map(|r| u16::from_le_bytes([r[4], r[5]]))
     }
 
-    fn group_count(&mut self, addr: DeviceId, selector: u8) -> u32 {
+    /// Group count for a menu selector; `None` if the device didn't answer,
+    /// which is not the same as a count of zero. (#31)
+    fn group_count(&mut self, addr: DeviceId, selector: u8) -> Option<u32> {
         let key = format!("p:{:06X}:08:{:02X}", addr, selector);
         self.req_std(&key, group_count_req_raw(addr, selector))
             .filter(|r| r.len() >= 4)
             .map(|r| u16::from_le_bytes([r[2], r[3]]) as u32)
-            .unwrap_or(0)
     }
 }
 
@@ -366,18 +367,19 @@ fn schema_waiter_prefix(class: u8) -> &'static str {
 /// Base global group id of `menu` and the count of groups in `menu` itself.
 /// For Monitoring/Configuration/Service the gid is global (offset by the prior
 /// menus); for Alarm/History the gid starts at 0 in the menu's own namespace
-/// and the offset returned here is 0.
-fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> (u32, u32) {
-    match menu {
-        Menu::Monitoring => (0, disc.group_count(addr, 0x02)),
+/// and the offset returned here is 0. `None` if a count the range depends on
+/// went unanswered: a guessed offset would enumerate another menu's groups.
+fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<(u32, u32)> {
+    Some(match menu {
+        Menu::Monitoring => (0, disc.group_count(addr, 0x02)?),
         Menu::Configuration => {
-            let mon = disc.group_count(addr, 0x02);
-            (mon, disc.group_count(addr, 0x03))
+            let mon = disc.group_count(addr, 0x02)?;
+            (mon, disc.group_count(addr, 0x03)?)
         }
         Menu::Service => {
-            let mon = disc.group_count(addr, 0x02);
-            let cfg = disc.group_count(addr, 0x03);
-            (mon + cfg, disc.group_count(addr, 0x04))
+            let mon = disc.group_count(addr, 0x02)?;
+            let cfg = disc.group_count(addr, 0x03)?;
+            (mon + cfg, disc.group_count(addr, 0x04)?)
         }
         // Alarm/History gid namespaces are independent and don't always
         // expose their count via `[0x08, sel]`. `selector()` returns the
@@ -385,7 +387,7 @@ fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> (u32, u32) {
         // we fall back to probe-and-stop inside `enumerate_menu`.
         Menu::Alarm | Menu::History => (0, 0),
         Menu::Other(_) => (0, 0),
-    }
+    })
 }
 
 /// Discover just one menu's groups: per-device disk cache, else enumerate live.
@@ -396,25 +398,39 @@ fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> (u32, u32) {
 /// - Per access level — writability flips per level, so a schema
 ///   discovered as End User can't be served as Distributor. Each level
 ///   gets its own cache file.
+///
+/// `None` if the device didn't answer a group count. Nothing is cached then,
+/// so the next attempt asks again instead of inheriting an empty menu. An
+/// empty Monitoring menu already in the cache is ignored for the same
+/// reason: no device seen so far lacks Monitoring groups, and files like that
+/// were written before a failed count could be told from zero. (#31)
 pub(super) fn discover_menu(
     disc: &mut Disc,
     addr: DeviceId,
     id: &DeviceIdentity,
     menu: Menu,
-) -> Vec<GroupInfo> {
+) -> Option<Vec<GroupInfo>> {
     let dir = disc.cfg.cache_path.as_deref();
     let level = disc.level;
-    if let Some(g) = load_cached_menu(dir, &id.serial, &id.firmware, level, menu) {
+    if let Some(g) = load_cached_menu(dir, &id.serial, &id.firmware, level, menu)
+        && !(menu == Menu::Monitoring && g.is_empty())
+    {
         log::debug!(
             target: "masterbus::discovery",
             "0x{addr:06X} {menu:?}: schema loaded from cache ({} groups)",
             g.len(),
         );
-        return g;
+        return Some(g);
     }
     let started = std::time::Instant::now();
     log::debug!(target: "masterbus::discovery", "0x{addr:06X} {menu:?}: enumerating");
-    let g = enumerate_menu(disc, addr, menu);
+    let Some(g) = enumerate_menu(disc, addr, menu) else {
+        log::debug!(
+            target: "masterbus::discovery",
+            "0x{addr:06X} {menu:?}: group count unanswered; not cached",
+        );
+        return None;
+    };
     log::debug!(
         target: "masterbus::discovery",
         "0x{addr:06X} {menu:?}: discovered {} groups in {:?}",
@@ -422,11 +438,11 @@ pub(super) fn discover_menu(
         started.elapsed(),
     );
     store_cached_menu(dir, &id.serial, &id.firmware, level, menu, &g);
-    g
+    Some(g)
 }
 
-fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Vec<GroupInfo> {
-    let (offset, count) = menu_range(disc, addr, menu);
+fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<GroupInfo>> {
+    let (offset, count) = menu_range(disc, addr, menu)?;
     let mut groups = Vec::new();
     if count > 0 {
         for i in 0..count {
@@ -454,7 +470,7 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Vec<GroupInfo>
             }
         }
     }
-    groups
+    Some(groups)
 }
 
 fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupInfo> {
@@ -1203,6 +1219,62 @@ mod enumeration_tests {
         let schema = engine.state.schema(ADDR).unwrap();
         assert_eq!(schema.groups[0].name, "DC");
         assert_eq!(schema.groups[0].fields[1].options, vec!["Off", "On"]);
+    }
+
+    /// A group count the device doesn't answer is not a count of zero: the
+    /// empty result is neither cached on disk nor remembered as the menu, and
+    /// a fresh start enumerates the device properly. (#31)
+    #[test]
+    fn an_unanswered_group_count_is_not_cached() {
+        let dir = TempDir::new();
+        let config = Config {
+            cache_path: Some(dir.path.clone()),
+            ..test_config()
+        };
+        let mut device = combi();
+        device.mute_counts = true;
+        let (engine, bus) = connect(device, config.clone());
+
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        assert!(!engine.state.has_menu(ADDR, Menu::Monitoring));
+        assert_eq!(std::fs::read_dir(&dir.path).unwrap().count(), 0);
+        // Asked again, but not straight away.
+        let asked = bus.sent().len();
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        assert_eq!(bus.sent().len(), asked);
+        drop((engine, bus));
+
+        let (engine, _bus) = connect(combi(), config);
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        assert_eq!(engine.state.schema(ADDR).unwrap().groups[0].name, "DC");
+    }
+
+    /// An empty Monitoring menu in the cache, as an earlier version could
+    /// write after a lost group count, is treated as a miss. (#31)
+    #[test]
+    fn an_empty_cached_monitoring_menu_is_enumerated_again() {
+        let dir = TempDir::new();
+        let config = Config {
+            cache_path: Some(dir.path.clone()),
+            ..test_config()
+        };
+        let (engine, bus) = connect(combi(), config);
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        let file = std::fs::read_dir(&dir.path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&file, b"[]").unwrap();
+        let enumerated = bus.sent_class(can_class::SCHEMA_REQ).len();
+
+        engine.state.forget_schema(ADDR);
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        assert!(bus.sent_class(can_class::SCHEMA_REQ).len() > enumerated);
+        assert_eq!(engine.state.schema(ADDR).unwrap().groups[0].name, "DC");
+        assert!(std::fs::read(&file).unwrap().len() > 2);
     }
 
     /// Writability flips per access level, so each level keys its own file —

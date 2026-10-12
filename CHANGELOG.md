@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A mapped device that is off the bus no longer slows every other value
+  down** (#30). Each of its fields used to cost a 500 ms read timeout per
+  second, so two switched-off chargers brought the whole bus to one update
+  every 5 s. A device that has not been heard within the liveness window is
+  not polled until it announces itself again; one that is present but stops
+  answering (a display gone to sleep) is probed once every 30 s after two
+  missed reads.
+- **A lost group-count reply no longer leaves a device with an empty menu
+  for good** (#31). It was taken as a count of zero and the empty menu was
+  cached on disk, so the device showed no Monitoring fields across restarts.
+  Nothing is cached now when the count goes unanswered, the menu is asked
+  for again after 30 s, and an empty Monitoring menu already in the cache
+  is enumerated again.
+
 ## [0.4.4] - 2026-10-02
 
 ### Added

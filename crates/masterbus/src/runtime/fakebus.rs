@@ -111,6 +111,9 @@ pub struct Device {
     pub quiet: bool,
     /// Group counts by `[0x08, selector]` selector byte.
     pub group_counts: HashMap<u8, u16>,
+    /// Leave group-count requests unanswered, as a device still starting up
+    /// may.
+    pub mute_counts: bool,
     /// Groups, keyed by (schema request class, gid). Alarm and History have
     /// their own gid namespaces, which is why the class is part of the key.
     pub groups: HashMap<(u8, u8), FakeGroup>,
@@ -146,6 +149,7 @@ impl Device {
             pending_btm1: HashMap::new(),
             quiet: false,
             group_counts: HashMap::new(),
+            mute_counts: false,
             groups: HashMap::new(),
             meta: HashMap::new(),
             next_sid: 0x100,
@@ -434,6 +438,7 @@ impl Device {
             }
             // Group count for a menu selector. `[0x08, 0x19]` is the login
             // register and is matched above, so it never reaches here.
+            [0x08, _] if self.mute_counts => Vec::new(),
             [0x08, sel] => {
                 let [lo, hi] = self
                     .group_counts

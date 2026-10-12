@@ -19,7 +19,7 @@ use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
 use crate::model::{AccessLevel, Channel, DeviceId, FieldId, field_id};
-use crate::model::{DeviceIdentity, Menu};
+use crate::model::{DeviceIdentity, DeviceStatus, Menu};
 use crate::protocol::{
     TAB_DEFAULT, VisualizationType, btm3_read_raw, btm3_write_raw, decode_value, encode_commit,
     encode_login_read, encode_login_write, encode_logout, encode_set_boolean, encode_set_float,
@@ -56,6 +56,22 @@ fn write_took_effect(written: &WriteValue, observed: &Value) -> bool {
 const VALUE_READ_TIMEOUT_BTM1: Duration = Duration::from_millis(500);
 const VALUE_READ_TIMEOUT_BTM3: Duration = Duration::from_millis(2500);
 
+/// Subscription polling runs on this one thread, so every read that times out
+/// holds up every other subscription on the bus. A device that misses this
+/// many value reads in a row is probed once per [`BACKOFF_PROBE`] instead of
+/// once per field per interval, until it answers again. (#30)
+const BACKOFF_AFTER: u32 = 2;
+const BACKOFF_PROBE: Duration = Duration::from_secs(30);
+
+/// How soon a menu whose group count went unanswered is asked for again.
+const MENU_RETRY: Duration = Duration::from_secs(30);
+
+/// Consecutive value-read timeouts from one device.
+struct Backoff {
+    misses: u32,
+    retry_at: Instant,
+}
+
 struct SubState {
     spec: SubSpec,
     next_due: HashMap<FieldId, Instant>,
@@ -83,6 +99,8 @@ pub(super) fn spawn(
                 config,
                 last_send: Instant::now(),
                 next_heartbeat,
+                backoff: HashMap::new(),
+                failed_menus: HashMap::new(),
             }
             .run(cmd_rx, &shutdown)
         })
@@ -96,6 +114,9 @@ struct Sched {
     config: Config,
     last_send: Instant,
     next_heartbeat: Option<Instant>,
+    backoff: HashMap<DeviceId, Backoff>,
+    /// When a menu's discovery last failed for want of a group count.
+    failed_menus: HashMap<(DeviceId, Menu), Instant>,
 }
 
 impl Sched {
@@ -246,6 +267,13 @@ impl Sched {
         if self.state.has_menu(addr, menu) {
             return;
         }
+        // A device that didn't answer its group count (still starting up, or
+        // the reply was lost) is asked again, but not on every poll.
+        if let Some(at) = self.failed_menus.get(&(addr, menu))
+            && at.elapsed() < MENU_RETRY
+        {
+            return;
+        }
         let id = self.ensure_identity(addr);
         self.ensure_catalog(addr, &id);
         // Discover this device's own menu (per-device disk cache inside). We do
@@ -253,13 +281,27 @@ impl Sched {
         // article can differ (e.g. the cluster master battery has an extra group).
         let groups = self.with_disc(addr, |disc| discover_menu(disc, addr, &id, menu));
         self.last_send = Instant::now();
-        self.state.put_menu(addr, menu, groups);
+        match groups {
+            Some(groups) => {
+                self.failed_menus.remove(&(addr, menu));
+                self.state.put_menu(addr, menu, groups);
+            }
+            None => {
+                self.failed_menus.insert((addr, menu), Instant::now());
+            }
+        }
     }
 
     /// Discover every menu (a full schema).
     fn do_discover_all(&mut self, addr: DeviceId) {
         for menu in MENUS {
             self.do_discover_menu(addr, menu);
+            // The later menus' group ids start after this one's, so if its
+            // count went unanswered they can't be enumerated either; don't
+            // spend their timeouts finding that out.
+            if self.failed_menus.contains_key(&(addr, menu)) {
+                break;
+            }
         }
     }
 
@@ -367,9 +409,38 @@ impl Sched {
                     *text = self.with_disc(addr, |disc| disc.fetch_str(addr, sid));
                 }
                 self.state.put_value(addr, field, v.clone());
+                self.backoff.remove(&addr);
                 Ok(v)
             }
-            None => Err(Error::Timeout),
+            None => {
+                let now = Instant::now();
+                let b = self.backoff.entry(addr).or_insert(Backoff {
+                    misses: 0,
+                    retry_at: now,
+                });
+                b.misses += 1;
+                if b.misses >= BACKOFF_AFTER {
+                    b.retry_at = now + BACKOFF_PROBE;
+                }
+                Err(Error::Timeout)
+            }
+        }
+    }
+
+    /// Whether a subscription may put a value read for `addr` on the bus now.
+    /// Not while the device is off the bus: it can't answer, and each try
+    /// costs a full read timeout. Not while it's backing off either. A device
+    /// that drops off and comes back starts with a clean slate, so a charger
+    /// that is switched on again is polled at once rather than at its next
+    /// probe.
+    fn may_poll(&mut self, addr: DeviceId) -> bool {
+        if self.state.status(addr, self.config.liveness) != DeviceStatus::On {
+            self.backoff.remove(&addr);
+            return false;
+        }
+        match self.backoff.get(&addr) {
+            Some(b) => b.misses < BACKOFF_AFTER || Instant::now() >= b.retry_at,
+            None => true,
         }
     }
 
@@ -632,6 +703,7 @@ impl Sched {
             // passive-first: use a cache value fresh within the interval, else poll.
             let value = match self.state.get_value(device, field) {
                 Some(cv) if !cv.outdated && cv.at.elapsed() <= interval => Some(cv.value),
+                _ if !self.may_poll(device) => None,
                 _ => match self.viz_of(device, field) {
                     Ok(viz) => self.poll_value(device, field, viz).ok(),
                     Err(_) => None,
@@ -1225,6 +1297,88 @@ mod tests {
         // Drain whatever was already in flight, then expect silence.
         while rx.recv_timeout(Duration::from_millis(50)).is_ok() {}
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    /// Value reads to a field on `wire`, on either channel.
+    fn reads_of(bus: &FakeBus, wire: u8) -> usize {
+        bus.sent_class(can_class::MONITORING_REQ)
+            .iter()
+            .filter(|(_, d)| d.first() == Some(&wire))
+            .count()
+    }
+
+    /// A device that is still on the bus but stops answering value reads
+    /// costs a read timeout for its first few misses, then backs off, so the
+    /// fields of other devices keep arriving at their interval. (#30)
+    #[test]
+    fn a_device_that_stops_answering_backs_off() {
+        let mut device = Device::new().with_btm1(0x17, 12.5);
+        device.mute.extend([0x18, 0x19, 0x1A]);
+        let (engine, bus) = connect(device, test_config());
+        let (good, silent) = (field_id::btm1(0x17), [0x18, 0x19, 0x1A].map(field_id::btm1));
+        seed_schema(
+            &engine,
+            [good]
+                .into_iter()
+                .chain(silent)
+                .map(|f| field(f, "Voltage", VisualizationType::Float))
+                .collect(),
+        );
+
+        let (_id, rx) = engine.subscribe(ADDR, silent.to_vec(), Duration::from_millis(10), false);
+        // Two misses (one second) put the device into backoff.
+        std::thread::sleep(Duration::from_millis(1200));
+        let misses: usize = [0x18, 0x19, 0x1A].iter().map(|&w| reads_of(&bus, w)).sum();
+        assert_eq!(misses, BACKOFF_AFTER as usize);
+        // No more reads to it for the rest of the probe interval.
+        std::thread::sleep(Duration::from_millis(300));
+        let later: usize = [0x18, 0x19, 0x1A].iter().map(|&w| reads_of(&bus, w)).sum();
+        assert_eq!(later, misses);
+        assert!(rx.try_recv().is_err());
+        // A read that works clears the backoff.
+        assert_eq!(
+            engine.read(ADDR, good, Duration::ZERO).unwrap(),
+            Value::Float(12.5)
+        );
+        bus.with_device(|d| d.mute.clear());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().value,
+            Value::Float(0.0)
+        );
+    }
+
+    /// A device that has gone off the bus is not polled at all, and once it
+    /// announces itself again it is polled at once rather than waiting out a
+    /// backoff probe. (#30)
+    #[test]
+    fn a_device_off_the_bus_is_skipped_until_it_returns() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let (engine, bus) = connect(device, test_config());
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        bus.with_device(|d| {
+            d.quiet = true;
+            d.mute.push(0x17);
+        });
+        // Let the misses and the liveness window (200 ms) run out.
+        std::thread::sleep(Duration::from_millis(1500));
+        while rx.try_recv().is_ok() {}
+        let before = reads_of(&bus, 0x17);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(reads_of(&bus, 0x17), before);
+
+        bus.with_device(|d| {
+            d.quiet = false;
+            d.mute.clear();
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap().value,
+            Value::Float(12.5)
+        );
     }
 
     // ── bus master ──────────────────────────────────────────────────────────
