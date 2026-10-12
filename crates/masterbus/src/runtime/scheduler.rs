@@ -367,6 +367,7 @@ impl Sched {
             cfg: &cfg,
             level,
             catalog,
+            strs: Default::default(),
         };
         let r = f(&mut disc);
         self.discovering -= 1;

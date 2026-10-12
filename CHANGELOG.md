@@ -25,6 +25,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   charger switched on later, seconds to minutes) stopped every
   subscription, and the bus-master heartbeat, until it finished. Due polls
   and the heartbeat now go out between discovery requests.
+- **Discovery stops asking for the same string over and over** (#6). Many
+  fields and options name the same string id. One that came back whole is
+  now remembered for the rest of the discovery, and one the device leaves
+  unanswered twice is not asked for again. A ChargeMaster Plus 24/60-3
+  never answers string `0x0008`; asking again for every field that names
+  it spent 23 minutes of an hour-long Configuration enumeration, which
+  never finished.
 
 ## [0.4.4] - 2026-10-02
 

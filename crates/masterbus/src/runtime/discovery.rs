@@ -61,6 +61,27 @@ pub(super) struct Disc<'a> {
     /// in the table (EEPROM / runtime-generated / out of span) still go live.
     /// `None` until resolved, or when the device has no usable bundled table.
     pub catalog: Option<&'static HashMap<u16, String>>,
+    /// Strings fetched during this discovery. (#6)
+    pub strs: StrMemo,
+}
+
+/// How many fetches of a string id may go wholly unanswered before it is
+/// taken as one the device doesn't answer. One is not enough: on a busy bus
+/// all three attempts of a fetch occasionally go unanswered for an id that
+/// answers fine before and after.
+const UNANSWERED_STR_LIMIT: u32 = 2;
+
+/// Strings already fetched during one discovery. Many fields and options name
+/// the same string id, and a device can leave one unanswered for good: a
+/// ChargeMaster Plus never answers `0x0008`, and asking again for each field
+/// that names it cost 450 ms apiece, 23 minutes of one enumeration. A string
+/// that came back whole is served from here, and one that went unanswered
+/// [`UNANSWERED_STR_LIMIT`] times is not asked for again. Both last until the
+/// next discovery. (#6)
+#[derive(Default)]
+pub(super) struct StrMemo {
+    known: HashMap<(DeviceId, u16), String>,
+    unanswered: HashMap<(DeviceId, u16), u32>,
 }
 
 impl Disc<'_> {
@@ -110,27 +131,47 @@ impl Disc<'_> {
     /// per round trip). Bypasses the catalog — used for the resolution
     /// spot-check and for any id the catalog doesn't cover.
     pub(super) fn fetch_str_wire(&mut self, addr: DeviceId, str_id: u16) -> String {
+        let id = (addr, str_id);
+        if let Some(s) = self.strs.known.get(&id) {
+            return s.clone();
+        }
+        if self.strs.unanswered.get(&id) >= Some(&UNANSWERED_STR_LIMIT) {
+            return String::new();
+        }
         let mut s = String::new();
         let mut seq: u8 = 0;
         loop {
             let key = format!("str:{:06X}:{:04X}:{}", addr, str_id, seq);
             let r = match self.req_std(&key, string_chunk_req_raw(addr, str_id, seq)) {
                 Some(r) => r,
-                None => break,
+                // No answer at all counts against the id. A lost later chunk
+                // is the bus, not the id; the partial string is not kept.
+                None if seq == 0 => {
+                    let n = self.strs.unanswered.entry(id).or_insert(0);
+                    *n += 1;
+                    if *n >= UNANSWERED_STR_LIMIT {
+                        log::debug!(
+                            target: "masterbus::discovery",
+                            "{key}: unanswered {n} times; not asked again during this discovery",
+                        );
+                    }
+                    return s;
+                }
+                None => return s,
             };
             let last = r.len() < 8;
             for &c in &r[4..r.len()] {
                 if c == 0 {
-                    return s;
+                    break;
                 }
                 s.push(c as char);
             }
-            if last {
-                break;
+            if last || r[4..].contains(&0) {
+                self.strs.known.insert(id, s.clone());
+                return s;
             }
             seq = seq.wrapping_add(1);
         }
-        s
     }
 
     /// Property string id (`None` if no response; `Some(0)` is a valid id).
@@ -852,6 +893,7 @@ mod catalog_tests {
             cfg,
             level: AccessLevel::EndUser,
             catalog,
+            strs: StrMemo::default(),
         }
     }
 
@@ -876,6 +918,40 @@ mod catalog_tests {
         // Miss: falls through to the wire.
         assert_eq!(disc.fetch_str(0x0A0B0C, 200), "Live");
         assert!(sends.load(Ordering::Relaxed) >= 1);
+    }
+
+    /// A string id the device never answers is given up on after two
+    /// fetches, not asked for again for every field and option that names
+    /// it; one that came back whole is not asked for again at all. (#6)
+    #[test]
+    fn a_fetched_or_unanswered_string_is_not_asked_for_again() {
+        let waiter = Arc::new(Waiter::new());
+        let cfg = Config {
+            discovery_timeout: Duration::from_millis(5),
+            ..Config::default()
+        };
+        let sends = Arc::new(AtomicUsize::new(0));
+        let mut tx = ScriptTx {
+            waiter: waiter.clone(),
+            script: HashMap::from([(200u16, "Live".to_string())]),
+            sends: sends.clone(),
+        };
+        let mut disc = disc_with(&mut tx, &waiter, &cfg, None);
+        let sent = || sends.load(Ordering::Relaxed);
+
+        assert_eq!(disc.fetch_str(0x0A0B0C, 200), "Live");
+        assert_eq!(sent(), 1);
+        assert_eq!(disc.fetch_str(0x0A0B0C, 200), "Live");
+        assert_eq!(sent(), 1);
+
+        let retries = cfg.discovery_retries;
+        for _ in 0..4 {
+            assert_eq!(disc.fetch_str(0x0A0B0C, 8), "");
+        }
+        assert_eq!(sent(), 1 + UNANSWERED_STR_LIMIT as usize * retries);
+        // The same id on another device is its own.
+        assert_eq!(disc.fetch_str(0x0D0E0F, 8), "");
+        assert_eq!(sent(), 1 + (UNANSWERED_STR_LIMIT as usize + 1) * retries);
     }
 
     #[test]
