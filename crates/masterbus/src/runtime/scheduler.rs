@@ -58,18 +58,21 @@ const VALUE_READ_TIMEOUT_BTM3: Duration = Duration::from_millis(2500);
 
 /// Subscription polling runs on this one thread, so every read that times out
 /// holds up every other subscription on the bus. A device that misses this
-/// many value reads in a row is probed once per [`BACKOFF_PROBE`] instead of
-/// once per field per interval, until it answers again. (#30)
+/// many value reads in a row is probed once per `Config::quiet_probe` instead
+/// of once per field per interval, until it answers again. (#30)
 const BACKOFF_AFTER: u32 = 2;
-const BACKOFF_PROBE: Duration = Duration::from_secs(30);
 
 /// How soon a menu whose group count went unanswered is asked for again.
 const MENU_RETRY: Duration = Duration::from_secs(30);
 
-/// Consecutive value-read timeouts from one device.
+/// A device a subscription is going easy on.
 struct Backoff {
+    /// Consecutive value-read timeouts.
     misses: u32,
+    /// When the next probe may go out.
     retry_at: Instant,
+    /// Not heard within the liveness window when last looked at.
+    quiet: bool,
 }
 
 struct SubState {
@@ -442,10 +445,11 @@ impl Sched {
                 let b = self.backoff.entry(addr).or_insert(Backoff {
                     misses: 0,
                     retry_at: now,
+                    quiet: false,
                 });
                 b.misses += 1;
                 if b.misses >= BACKOFF_AFTER {
-                    b.retry_at = now + BACKOFF_PROBE;
+                    b.retry_at = now + self.config.quiet_probe;
                 }
                 Err(Error::Timeout)
             }
@@ -453,18 +457,36 @@ impl Sched {
     }
 
     /// Whether a subscription may put a value read for `addr` on the bus now.
-    /// Not while the device is off the bus: it can't answer, and each try
-    /// costs a full read timeout. Not while it's backing off either. A device
-    /// that drops off and comes back starts with a clean slate, so a charger
-    /// that is switched on again is polled at once rather than at its next
-    /// probe.
+    /// A device not heard within the liveness window, or one that has missed
+    /// [`BACKOFF_AFTER`] reads in a row, is read once per
+    /// `Config::quiet_probe`: each read of it costs a full timeout. It is
+    /// still read, because a device that does not announce itself (with no
+    /// bus master prompting it, say) is only heard when it answers. One that
+    /// is heard from again after going quiet starts with a clean slate, so a
+    /// charger that is switched on again is polled at once rather than at
+    /// its next probe.
     fn may_poll(&mut self, addr: DeviceId) -> bool {
+        let now = Instant::now();
         if self.state.status(addr, self.config.liveness) != DeviceStatus::On {
-            self.backoff.remove(&addr);
-            return false;
+            let probe = self.config.quiet_probe;
+            let b = self.backoff.entry(addr).or_insert(Backoff {
+                misses: 0,
+                retry_at: now + probe,
+                quiet: true,
+            });
+            b.quiet = true;
+            if now < b.retry_at {
+                return false;
+            }
+            b.retry_at = now + probe;
+            return true;
         }
         match self.backoff.get(&addr) {
-            Some(b) => b.misses < BACKOFF_AFTER || Instant::now() >= b.retry_at,
+            Some(b) if b.quiet => {
+                self.backoff.remove(&addr);
+                true
+            }
+            Some(b) => b.misses < BACKOFF_AFTER || now >= b.retry_at,
             None => true,
         }
     }
@@ -1419,6 +1441,40 @@ mod tests {
         });
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap().value,
+            Value::Float(12.5)
+        );
+    }
+
+    /// A device that has gone quiet is still read now and then: one that only
+    /// speaks when spoken to (no announcements) would otherwise never be
+    /// heard from, and so never polled, again. (#30)
+    #[test]
+    fn a_quiet_device_is_still_probed() {
+        let device = Device::new().with_btm1(0x17, 12.5);
+        let config = Config {
+            quiet_probe: Duration::from_millis(200),
+            ..test_config()
+        };
+        let (engine, bus) = connect(device, config);
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // It stops announcing, and two reads go unanswered: the liveness
+        // window (200 ms) runs out with the device backing off.
+        bus.with_device(|d| {
+            d.quiet = true;
+            d.mute.push(0x17);
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        while rx.try_recv().is_ok() {}
+
+        // It answers again but still doesn't announce.
+        bus.with_device(|d| d.mute.clear());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().value,
             Value::Float(12.5)
         );
     }

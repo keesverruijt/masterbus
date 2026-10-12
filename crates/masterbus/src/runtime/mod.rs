@@ -65,6 +65,12 @@ pub struct Config {
     pub heartbeat_master: Option<DeviceId>,
     /// Interval between heartbeats when `heartbeat_master` is set.
     pub heartbeat_interval: Duration,
+    /// How often a subscription still reads a device that has stopped
+    /// answering, or that has not been heard within `liveness`. Each such
+    /// read costs a full timeout on the one scheduler thread, so they are
+    /// kept rare; but never zero, because a device that only speaks when
+    /// spoken to would otherwise never be heard from again.
+    pub quiet_probe: Duration,
 }
 
 impl Default for Config {
@@ -81,6 +87,7 @@ impl Default for Config {
             cache_path: None,
             heartbeat_master: None,
             heartbeat_interval: Duration::from_secs(1),
+            quiet_probe: Duration::from_secs(30),
         }
     }
 }
