@@ -461,6 +461,10 @@ impl Sched {
                 Ok(v)
             }
             None => {
+                log::debug!(
+                    target: "masterbus::poll",
+                    "no reply from 0x{addr:06X} for field 0x{field:04X}",
+                );
                 let now = Instant::now();
                 let b = self.backoff.entry(addr).or_insert(Backoff {
                     misses: 0,
