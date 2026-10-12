@@ -20,6 +20,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Nothing is cached now when the count goes unanswered, the menu is asked
   for again after 30 s, and an empty Monitoring menu already in the cache
   is enumerated again.
+- **Values keep flowing while a device is being discovered.** Discovery
+  and polling share one thread, so reading a schema from a cold cache (a
+  charger switched on later, seconds to minutes) stopped every
+  subscription, and the bus-master heartbeat, until it finished. Due polls
+  and the heartbeat now go out between discovery requests.
 
 ## [0.4.4] - 2026-10-02
 

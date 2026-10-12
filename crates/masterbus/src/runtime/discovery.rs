@@ -34,9 +34,20 @@ type MetaEncode = fn(DeviceId, u8, u16) -> (u32, Vec<u8>);
 /// Wire-frame encoder for an option-string request: `(addr, field, opt) → frame`.
 type MetaOptionEncode = fn(DeviceId, u8, u8) -> (u32, Vec<u8>);
 
+/// Where discovery sends its requests: the scheduler, which also gets a turn
+/// before each one.
+pub(super) trait DiscBus {
+    fn tx(&mut self) -> &mut dyn TransportTx;
+    /// Called before each request (or pipelined batch) goes out, with no
+    /// discovery reply outstanding. Enumerating a device from a cold cache
+    /// takes seconds to minutes; the scheduler uses this to keep
+    /// subscriptions and the heartbeat going meanwhile.
+    fn between(&mut self) {}
+}
+
 /// Bundle of what discovery needs from the scheduler.
 pub(super) struct Disc<'a> {
-    pub tx: &'a mut dyn TransportTx,
+    pub bus: &'a mut dyn DiscBus,
     pub waiter: &'a Waiter,
     pub cfg: &'a Config,
     /// Access level the disk cache files will be keyed by. Writability
@@ -55,9 +66,10 @@ pub(super) struct Disc<'a> {
 impl Disc<'_> {
     fn req(&mut self, key: &str, frame: (u32, Vec<u8>), retries: usize) -> Option<Vec<u8>> {
         for attempt in 0..retries {
+            self.bus.between();
             self.waiter.register(key);
             frame_log("Tx", frame.0, &frame.1);
-            let _ = self.tx.send(frame.0, &frame.1);
+            let _ = self.bus.tx().send(frame.0, &frame.1);
             if let Some(r) = self.waiter.wait(key, self.cfg.discovery_timeout) {
                 if attempt > 0 {
                     log::debug!(target: "masterbus::discovery", "{key}: ok on retry {attempt}");
@@ -161,13 +173,14 @@ impl Disc<'_> {
             Channel::Btm3 => ("btm3_meta", btm3_meta_req_raw),
         };
         let key = |op: u8| format!("{}:{:06X}:{:02X}:{}", prefix, addr, op, wire);
+        self.bus.between();
         for &op in ops.iter().chain(best_effort) {
             self.waiter.register(&key(op));
         }
         for &op in ops.iter().chain(best_effort) {
             let frame = encode(addr, op, wire as u16);
             frame_log("Tx", frame.0, &frame.1);
-            let _ = self.tx.send(frame.0, &frame.1);
+            let _ = self.bus.tx().send(frame.0, &frame.1);
         }
         let deadline = Instant::now() + self.cfg.discovery_timeout;
         let mut out = HashMap::with_capacity(ops.len() + best_effort.len());
@@ -210,13 +223,14 @@ impl Disc<'_> {
         let mut wire: u16 = 0;
         while wire < max {
             let end = (wire + PROBE_CHUNK).min(max);
+            self.bus.between();
             for w in wire..end {
                 self.waiter.register(&key(w));
             }
             for w in wire..end {
                 let frame = encode(addr, op::VIZ, w);
                 frame_log("Tx", frame.0, &frame.1);
-                let _ = self.tx.send(frame.0, &frame.1);
+                let _ = self.bus.tx().send(frame.0, &frame.1);
                 // Respect the bus budget so the kernel TX queue can drain at
                 // wire rate; a tight burst of 64 frames in 2 ms (the rate
                 // without pacing) loses responses on the round trip even on
@@ -791,6 +805,12 @@ mod catalog_tests {
         sends: Arc<AtomicUsize>,
     }
 
+    impl DiscBus for ScriptTx {
+        fn tx(&mut self) -> &mut dyn TransportTx {
+            self
+        }
+    }
+
     impl TransportTx for ScriptTx {
         fn send(&mut self, can_id: u32, data: &[u8]) -> Result<()> {
             self.sends.fetch_add(1, Ordering::Relaxed);
@@ -827,7 +847,7 @@ mod catalog_tests {
         catalog: Option<&'static HashMap<u16, String>>,
     ) -> Disc<'a> {
         Disc {
-            tx,
+            bus: tx,
             waiter,
             cfg,
             level: AccessLevel::EndUser,

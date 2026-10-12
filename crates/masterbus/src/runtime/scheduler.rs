@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::discovery::{
-    Disc, MENUS, discover_menu, enumerate_all_fields, fetch_identity, resolve_catalog,
+    Disc, DiscBus, MENUS, discover_menu, enumerate_all_fields, fetch_identity, resolve_catalog,
 };
 use super::framelog::frame_log;
 use super::reader::value_key;
@@ -101,6 +101,9 @@ pub(super) fn spawn(
                 next_heartbeat,
                 backoff: HashMap::new(),
                 failed_menus: HashMap::new(),
+                subs: Vec::new(),
+                servicing: false,
+                discovering: 0,
             }
             .run(cmd_rx, &shutdown)
         })
@@ -117,13 +120,31 @@ struct Sched {
     backoff: HashMap<DeviceId, Backoff>,
     /// When a menu's discovery last failed for want of a group count.
     failed_menus: HashMap<(DeviceId, Menu), Instant>,
+    subs: Vec<SubState>,
+    /// Inside `process_due`; keeps it from re-entering itself through a
+    /// discovery it starts (a Text value's string fetch).
+    servicing: bool,
+    /// Depth of `with_disc`. Subscription polls made from inside a discovery
+    /// stick to fields whose schema is already known, rather than starting a
+    /// discovery of their own.
+    discovering: u32,
+}
+
+impl DiscBus for Sched {
+    fn tx(&mut self) -> &mut dyn TransportTx {
+        &mut *self.tx
+    }
+
+    fn between(&mut self) {
+        self.maybe_heartbeat();
+        self.process_due();
+    }
 }
 
 impl Sched {
     fn run(mut self, cmd_rx: Receiver<Command>, shutdown: &AtomicBool) {
-        let mut subs: Vec<SubState> = Vec::new();
         while !shutdown.load(Ordering::Relaxed) {
-            let timeout = self.loop_timeout(&subs);
+            let timeout = self.loop_timeout();
             match cmd_rx.recv_timeout(timeout) {
                 Ok(Command::Identify { addr, reply }) => {
                     self.do_identify(addr);
@@ -181,22 +202,22 @@ impl Sched {
                     let r = self.do_access_level_set(addr, level, code);
                     let _ = reply.send(r);
                 }
-                Ok(Command::Subscribe(spec)) => self.add_sub(&mut subs, spec),
-                Ok(Command::Unsubscribe(id)) => subs.retain(|s| s.spec.id != id),
+                Ok(Command::Subscribe(spec)) => self.add_sub(spec),
+                Ok(Command::Unsubscribe(id)) => self.subs.retain(|s| s.spec.id != id),
                 Ok(Command::Shutdown) => break,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             self.maybe_heartbeat();
-            self.process_due(&mut subs);
+            self.process_due();
         }
         self.waiter.cancel_all();
     }
 
     /// How long to block on the command channel: the soonest of the next due
     /// poll, the next heartbeat, and a 200 ms idle tick.
-    fn loop_timeout(&self, subs: &[SubState]) -> Duration {
-        let mut t = self.next_due_in(subs).unwrap_or(Duration::from_millis(200));
+    fn loop_timeout(&self) -> Duration {
+        let mut t = self.next_due_in().unwrap_or(Duration::from_millis(200));
         if let Some(hb) = self.next_heartbeat {
             t = t.min(hb.saturating_duration_since(Instant::now()));
         }
@@ -339,14 +360,17 @@ impl Sched {
         // Inject the device's spot-checked string table (if resolved). `None`
         // until `ensure_catalog` has run, so identity discovery stays live.
         let catalog = self.state.catalog_table(addr);
+        self.discovering += 1;
         let mut disc = Disc {
-            tx: &mut *self.tx,
+            bus: self,
             waiter: &waiter,
             cfg: &cfg,
             level,
             catalog,
         };
-        f(&mut disc)
+        let r = f(&mut disc);
+        self.discovering -= 1;
+        r
     }
 
     fn viz_of(&mut self, addr: DeviceId, field: FieldId) -> Result<VisualizationType> {
@@ -657,7 +681,7 @@ impl Sched {
 
     // ── subscriptions ───────────────────────────────────────────────────────
 
-    fn add_sub(&mut self, subs: &mut Vec<SubState>, spec: SubSpec) {
+    fn add_sub(&mut self, spec: SubSpec) {
         // Ensure the subscribed fields' types are known. We don't know which menus
         // they live in, so discover the full schema (one-time; disk-cached).
         if !spec
@@ -669,22 +693,35 @@ impl Sched {
         }
         let now = Instant::now();
         let next_due = spec.fields.iter().map(|&f| (f, now)).collect();
-        subs.push(SubState {
+        self.subs.push(SubState {
             spec,
             next_due,
             last_value: HashMap::new(),
         });
     }
 
-    fn next_due_in(&self, subs: &[SubState]) -> Option<Duration> {
+    fn next_due_in(&self) -> Option<Duration> {
         let now = Instant::now();
-        subs.iter()
+        self.subs
+            .iter()
             .flat_map(|s| s.next_due.values())
             .map(|&due| due.saturating_duration_since(now))
             .min()
     }
 
-    fn process_due(&mut self, subs: &mut [SubState]) {
+    fn process_due(&mut self) {
+        if self.servicing {
+            return;
+        }
+        self.servicing = true;
+        let mut subs = std::mem::take(&mut self.subs);
+        self.poll_due(&mut subs);
+        // Nothing can subscribe while we poll, so the list is still empty.
+        self.subs = subs;
+        self.servicing = false;
+    }
+
+    fn poll_due(&mut self, subs: &mut [SubState]) {
         let now = Instant::now();
         // Collect work first to avoid borrow issues.
         let mut work: Vec<(usize, FieldId)> = Vec::new();
@@ -704,6 +741,10 @@ impl Sched {
             let value = match self.state.get_value(device, field) {
                 Some(cv) if !cv.outdated && cv.at.elapsed() <= interval => Some(cv.value),
                 _ if !self.may_poll(device) => None,
+                _ if self.discovering > 0 => match self.state.field_info(device, field) {
+                    Some(f) => self.poll_value(device, field, f.viz_type).ok(),
+                    None => None,
+                },
                 _ => match self.viz_of(device, field) {
                     Ok(viz) => self.poll_value(device, field, viz).ok(),
                     Err(_) => None,
@@ -1379,6 +1420,44 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap().value,
             Value::Float(12.5)
         );
+    }
+
+    /// A slow discovery of one device doesn't stop the values of another:
+    /// subscriptions, and the heartbeat, get a turn before each discovery
+    /// request goes out.
+    #[test]
+    fn subscriptions_keep_flowing_while_another_device_is_discovered() {
+        const OTHER: u32 = 0x28A11D;
+        let streaming = Device::new().with_btm1(0x17, 12.5);
+        let mut starting = Device::new().with_identity("40021006", "7654321", "CHG");
+        starting.addr = OTHER;
+        starting.mute_counts = true;
+        let config = Config {
+            discovery_timeout: Duration::from_millis(100),
+            discovery_retries: 3,
+            heartbeat_master: Some(0x53A493),
+            heartbeat_interval: Duration::from_millis(20),
+            ..test_config()
+        };
+        let (bus, transport) = FakeBus::start_many(vec![streaming, starting]);
+        let engine = Engine::connect(transport, config).expect("connect");
+        let f = field_id::btm1(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+        let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        while rx.try_recv().is_ok() {}
+        let beats = bus.sent_class(can_class::BUS_POLL).len();
+
+        // Its identity, then three unanswered 100 ms group-count requests.
+        let started = Instant::now();
+        engine.ensure_menu(OTHER, Menu::Monitoring).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(300));
+
+        // The first attempt follows the identity fetch with nothing due yet;
+        // the two retries each go out after a poll and a heartbeat.
+        let updates = rx.try_iter().count();
+        assert!(updates >= 2, "only {updates} updates during the discovery");
+        assert!(bus.sent_class(can_class::BUS_POLL).len() >= beats + 2);
     }
 
     // ── bus master ──────────────────────────────────────────────────────────
