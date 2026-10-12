@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or that misses two reads in a row (a display gone to sleep), is now read
   once every 30 s (`Config::quiet_probe`) until it answers or announces
   itself again; a charger switched back on is polled at once.
+- **Subscriptions read a pass's fields together** (#30). Each due field
+  was read and waited for in turn, so a pass cost one round trip per field:
+  62 mapped fields updated about every 2 s at a 1 s rate. Up to 16 reads
+  now go out back to back and their answers are collected after; a field
+  two subscriptions both want is read once, and fields that don't answer
+  share one timeout instead of 500 ms each.
 - **A lost group-count reply no longer leaves a device with an empty menu
   for good** (#31). It was taken as a count of zero and the empty menu was
   cached on disk, so the device showed no Monitoring fields across restarts.

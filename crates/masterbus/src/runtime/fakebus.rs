@@ -114,6 +114,10 @@ pub struct Device {
     /// Leave group-count requests unanswered, as a device still starting up
     /// may.
     pub mute_counts: bool,
+    /// How long the device takes to answer. Answers are queued, not slept
+    /// on, so requests sent back to back are answered back to back, as a
+    /// real device's would be.
+    pub reply_delay: Duration,
     /// Groups, keyed by (schema request class, gid). Alarm and History have
     /// their own gid namespaces, which is why the class is part of the key.
     pub groups: HashMap<(u8, u8), FakeGroup>,
@@ -150,6 +154,7 @@ impl Device {
             quiet: false,
             group_counts: HashMap::new(),
             mute_counts: false,
+            reply_delay: Duration::ZERO,
             groups: HashMap::new(),
             meta: HashMap::new(),
             next_sid: 0x100,
@@ -600,7 +605,16 @@ impl FakeBus {
                 .name("fake-device".into())
                 .spawn(move || {
                     let mut next_broadcast = Instant::now();
+                    let mut delayed: Vec<(Instant, Frame)> = Vec::new();
                     while !stop.load(Ordering::Relaxed) {
+                        let now = Instant::now();
+                        let (due, later) = delayed.into_iter().partition(|(at, _)| *at <= now);
+                        delayed = later;
+                        for (_, f) in due {
+                            if up_tx.send(f).is_err() {
+                                return;
+                            }
+                        }
                         if Instant::now() >= next_broadcast {
                             for device in &devices {
                                 let frame = {
@@ -619,11 +633,17 @@ impl FakeBus {
                             Ok((raw_id, data)) => {
                                 sent.lock().unwrap().push((raw_id, data.clone()));
                                 for device in &devices {
-                                    let replies = device.lock().unwrap().respond(raw_id, &data);
-                                    for r in replies {
-                                        if up_tx.send(r).is_err() {
-                                            return;
+                                    let mut d = device.lock().unwrap();
+                                    let replies = d.respond(raw_id, &data);
+                                    if d.reply_delay.is_zero() {
+                                        for r in replies {
+                                            if up_tx.send(r).is_err() {
+                                                return;
+                                            }
                                         }
+                                    } else {
+                                        let at = Instant::now() + d.reply_delay;
+                                        delayed.extend(replies.into_iter().map(|r| (at, r)));
                                     }
                                 }
                             }
