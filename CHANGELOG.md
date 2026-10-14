@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-14
+
 ### Added
 - **The TUI runs while Signal K holds the bus.** The USB link can be opened
   by one program at a time, so `masterbus-tui` used to need the Signal K
