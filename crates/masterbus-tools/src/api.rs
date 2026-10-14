@@ -15,14 +15,16 @@
 //! Bus access goes through [`BusOps`], which the daemon implements with a
 //! [`MasterBus`] and tests implement with a table.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
-use masterbus::{AccessLevel, DeviceId, Error, FieldId, GroupInfo, MasterBus, Menu, Value};
+use masterbus::{
+    AccessLevel, DeviceId, Error, FieldId, FieldInfo, GroupInfo, MasterBus, Menu, Value,
+};
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
 
@@ -43,6 +45,9 @@ pub const API_VERSION: u32 = 1;
 pub trait BusOps: Send + Sync {
     /// Discover one menu of a device and return its groups.
     fn discover_menu(&self, id: DeviceId, menu: Menu) -> masterbus::Result<Vec<GroupInfo>>;
+    /// One field's metadata, asked of the device if no discovered menu lists
+    /// it; `None` when the device doesn't know the field.
+    fn field_info(&self, id: DeviceId, field: FieldId) -> masterbus::Result<Option<FieldInfo>>;
     /// Read a field's current value (cache if fresh, else the bus).
     fn read(&self, id: DeviceId, field: FieldId) -> masterbus::Result<Value>;
     /// Write a field and return the value observed afterwards.
@@ -54,6 +59,9 @@ pub trait BusOps: Send + Sync {
 impl BusOps for MasterBus {
     fn discover_menu(&self, id: DeviceId, menu: Menu) -> masterbus::Result<Vec<GroupInfo>> {
         self.device(id).tab_info(menu)
+    }
+    fn field_info(&self, id: DeviceId, field: FieldId) -> masterbus::Result<Option<FieldInfo>> {
+        self.device(id).field_info(field)
     }
     fn read(&self, id: DeviceId, field: FieldId) -> masterbus::Result<Value> {
         self.device(id).field(field).value()
@@ -105,6 +113,9 @@ pub struct Shared {
     pub streaming: AtomicUsize,
     /// Stream clients currently connected.
     pub clients: AtomicUsize,
+    /// Fields already asked of a device on their own (see `ensure_menus`),
+    /// so one the device doesn't have is not asked again on every reload.
+    pub asked: Mutex<HashSet<(DeviceId, FieldId)>>,
 }
 
 impl Shared {
@@ -150,6 +161,66 @@ impl Shared {
                 Err(e) => eprintln!(
                     "masterbus-signalk: {name} ({serial}): could not discover Configuration: {e}"
                 ),
+            }
+        }
+        self.ensure_fields(mapping);
+    }
+
+    /// A field the mapping names that neither Monitoring nor Configuration
+    /// lists is usually one shown only at a higher access level: the mapping
+    /// was made in `masterbus-tui` after an installer login, while the daemon
+    /// runs at End User level. Such a field still answers its metadata and
+    /// value reads, so it is asked for on its own. Each field is asked once.
+    fn ensure_fields(&self, mapping: &Mapping) {
+        let wanted: Vec<(DeviceId, String, String, Vec<FieldId>)> = {
+            let asked = self.asked.lock().unwrap();
+            self.devices
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|d| {
+                    let ids = publish::unknown_fields(d, mapping)
+                        .into_iter()
+                        .filter(|f| !asked.contains(&(d.id, *f)))
+                        .collect::<Vec<_>>();
+                    (d.id, d.name.clone(), d.serial.clone(), ids)
+                })
+                .filter(|(.., ids)| !ids.is_empty())
+                .collect()
+        };
+        for (id, name, serial, ids) in wanted {
+            let mut found = Vec::new();
+            for field in &ids {
+                self.asked.lock().unwrap().insert((id, *field));
+                match self.bus.field_info(id, *field) {
+                    Ok(Some(f)) => found.push(f),
+                    Ok(None) => {}
+                    Err(e) => eprintln!(
+                        "masterbus-signalk: {name} ({serial}): could not ask for field \
+                         0x{field:03X}: {e}"
+                    ),
+                }
+            }
+            if found.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "masterbus-signalk: {name} ({serial}): {} of the {} mapped field(s) no menu \
+                 lists at this access level answered on their own",
+                found.len(),
+                ids.len()
+            );
+            let mut devices = self.devices.lock().unwrap();
+            if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                d.merge_groups(
+                    publish::MENU,
+                    vec![GroupInfo {
+                        id: -1,
+                        name: String::new(),
+                        menu: publish::MENU,
+                        fields: found,
+                    }],
+                );
             }
         }
     }
@@ -835,6 +906,9 @@ mod tests {
         menus: Mutex<HashMap<(DeviceId, Menu), Vec<GroupInfo>>>,
         writes: Mutex<Vec<(DeviceId, FieldId, Value)>>,
         discoveries: Mutex<usize>,
+        /// Fields that answer when asked for on their own.
+        fields: Mutex<HashMap<(DeviceId, FieldId), FieldInfo>>,
+        field_asks: Mutex<usize>,
     }
 
     impl StubBus {
@@ -847,6 +921,8 @@ mod tests {
                 menus: Mutex::new(HashMap::new()),
                 writes: Mutex::new(Vec::new()),
                 discoveries: Mutex::new(0),
+                fields: Mutex::new(HashMap::new()),
+                field_asks: Mutex::new(0),
             });
             (StubBus(state.clone()), state)
         }
@@ -865,6 +941,10 @@ mod tests {
                 .get(&(id, menu))
                 .cloned()
                 .ok_or(Error::Timeout)
+        }
+        fn field_info(&self, id: DeviceId, field: FieldId) -> masterbus::Result<Option<FieldInfo>> {
+            *self.0.field_asks.lock().unwrap() += 1;
+            Ok(self.0.fields.lock().unwrap().get(&(id, field)).cloned())
         }
         fn read(&self, id: DeviceId, field: FieldId) -> masterbus::Result<Value> {
             self.0
@@ -935,6 +1015,7 @@ mod tests {
             token: None,
             streaming: AtomicUsize::new(0),
             clients: AtomicUsize::new(0),
+            asked: Mutex::new(HashSet::new()),
         };
         (Arc::new(shared), rx)
     }
@@ -1166,6 +1247,57 @@ mod tests {
         // Adopting again does not discover again.
         send(&shared, "PUT", "/api/mapping", json!(m));
         assert_eq!(*state.discoveries.lock().unwrap(), 1);
+    }
+
+    /// A mapped field that neither Monitoring nor Configuration lists (one
+    /// shown only at installer level, mapped in the TUI after a login) is
+    /// asked for on its own and published; one the device doesn't have is
+    /// reported, and neither is asked for twice.
+    #[test]
+    fn a_mapped_field_no_menu_lists_is_asked_for_on_its_own() {
+        let devices = vec![mli()];
+        let id = devices[0].id;
+        let (bus, state) = StubBus::new(0.0);
+        state.fields.lock().unwrap().insert(
+            (id, 0x086),
+            FieldInfo {
+                index: 0x086,
+                name: "Avg. cell high".into(),
+                unit: "V".into(),
+                viz_type: masterbus::VisualizationType::Float,
+                writeable: false,
+                eventable: false,
+                min: 0.0,
+                max: 5.0,
+                step: 0.01,
+                options: vec![],
+            },
+        );
+        let (shared, _) = shared_with(bus, devices, Mapping::new());
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        for (f, path) in [
+            (0x086, "electrical.batteries.service.cellVoltageHigh"),
+            (0x0F0, "electrical.batteries.service.nothing"),
+        ] {
+            dm.fields.insert(
+                field_key(f),
+                FieldMapping {
+                    path: path.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        m.devices.insert("MLI-1".into(), dm);
+        let r = send(&shared, "PUT", "/api/mapping", json!(m));
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["streaming"], 1);
+        let diags = r.body["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0]["field"], "0x0F0");
+        assert_eq!(*state.field_asks.lock().unwrap(), 2);
+        send(&shared, "PUT", "/api/mapping", json!(m));
+        assert_eq!(*state.field_asks.lock().unwrap(), 2);
     }
 
     /// Adopting a mapping over the API persists it, re-resolves it against

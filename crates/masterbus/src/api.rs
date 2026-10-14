@@ -243,6 +243,14 @@ impl Device {
             .collect())
     }
 
+    /// One field's metadata, asked of the device if no discovered menu lists
+    /// it. A field shown only at a higher access level (say, mapped in
+    /// `masterbus-tui` after an installer login) still answers metadata and
+    /// value reads at End User level. `None` when the device doesn't know it.
+    pub fn field_info(&self, index: FieldId) -> Result<Option<FieldInfo>> {
+        self.engine.field_info(self.id, index)
+    }
+
     /// A handle to a field by its channel-aware id.
     pub fn field(&self, index: FieldId) -> Field {
         Field {

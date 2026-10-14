@@ -7,6 +7,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A mapped field shown only at installer level is published.** A mapping
+  made in `masterbus-tui` after an installer login can name fields the
+  End User menus don't list (a battery's cell counters and series
+  voltages, a MasterAC's remote input). `masterbus-signalk` reported them as
+  "the device has no such field" and skipped them, though the device
+  answers their metadata and values without a login. Such a field is now
+  asked for on its own (`Device::field_info`) and published. On one boat
+  that was 26 fields on three devices.
 - **A mapped device that is off the bus no longer slows every other value
   down** (#30). Each of its fields used to cost a 500 ms read timeout per
   second, so two switched-off chargers brought the whole bus to one update

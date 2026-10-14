@@ -730,7 +730,7 @@ const PROBE_CHUNK: u16 = 64;
 /// reference bus). A device answers `0x0D` only for its eventable fields, so
 /// querying it blocking on every field would pay a timeout on the silent
 /// majority (the discovery slowdown this avoids).
-fn enumerate_field(
+pub(super) fn enumerate_field(
     disc: &mut Disc,
     addr: DeviceId,
     fid: FieldId,
@@ -1477,6 +1477,31 @@ mod enumeration_tests {
             .map(|g| g.id)
             .collect();
         assert_eq!(config, vec![1]);
+    }
+
+    /// A field no menu lists (shown only at a higher access level) can be
+    /// asked for on its own, and then read like any other.
+    #[test]
+    fn a_field_no_menu_lists_can_be_asked_for_and_read() {
+        let device = combi()
+            .with_field(field_id::btm1(0x49), "Cell counter", "", VIZ_FLOAT, false)
+            .with_btm1(0x49, 3.0);
+        let (engine, _bus) = connect(device, test_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        let f = field_id::btm1(0x49);
+        assert!(engine.state.field_info(ADDR, f).is_none());
+        let info = engine.field_info(ADDR, f).unwrap().unwrap();
+        assert_eq!(info.name, "Cell counter");
+        assert_eq!(
+            engine.read(ADDR, f, Duration::ZERO).unwrap(),
+            crate::Value::Float(3.0)
+        );
+        assert!(
+            engine
+                .field_info(ADDR, field_id::btm1(0x7E))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A menu whose groups only repeat the one before the menu (a Mass

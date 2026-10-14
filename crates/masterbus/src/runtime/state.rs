@@ -48,6 +48,10 @@ pub struct DeviceEntry {
     /// across the full index space `0..0x08 0x01`). Populated lazily, cached
     /// in memory until a login/logout invalidates it. `None` until probed.
     pub all_fields: Option<Vec<FieldInfo>>,
+    /// Fields asked for one at a time that no discovered menu lists: a field
+    /// shown only at a higher access level, which a mapping made at that
+    /// level names, still answers its metadata and value reads.
+    pub extra_fields: HashMap<FieldId, FieldInfo>,
     /// Latest value per channel-aware field id.
     pub values: HashMap<FieldId, CachedValue>,
     /// Offline string-catalog binding, resolved once (after identity) via a
@@ -72,6 +76,7 @@ impl DeviceEntry {
             schema: None,
             menus: HashSet::new(),
             all_fields: None,
+            extra_fields: HashMap::new(),
             values: HashMap::new(),
             catalog_attempted: false,
             catalog_table: None,
@@ -299,10 +304,24 @@ impl State {
         {
             return Some(f.clone());
         }
-        if let Some(all) = e.all_fields.as_ref() {
-            return all.iter().find(|f| f.index == field).cloned();
+        if let Some(f) = e
+            .all_fields
+            .as_ref()
+            .and_then(|all| all.iter().find(|f| f.index == field))
+        {
+            return Some(f.clone());
         }
-        None
+        e.extra_fields.get(&field).cloned()
+    }
+
+    /// Remember a field asked for on its own (see `DeviceEntry::extra_fields`).
+    pub fn put_extra_field(&self, addr: u32, field: FieldInfo) {
+        let now = Instant::now();
+        let mut map = self.devices.lock().unwrap();
+        let e = map
+            .entry(addr)
+            .or_insert_with(|| DeviceEntry::new(addr, now));
+        e.extra_fields.insert(field.index, field);
     }
 
     /// Clone a device's schema-so-far (groups of all discovered menus).
@@ -324,6 +343,7 @@ impl State {
             e.schema = None;
             e.menus.clear();
             e.all_fields = None;
+            e.extra_fields.clear();
         }
     }
 

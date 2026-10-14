@@ -141,6 +141,11 @@ pub(crate) enum Command {
         addr: DeviceId,
         reply: Sender<Result<()>>,
     },
+    DiscoverField {
+        addr: DeviceId,
+        field: FieldId,
+        reply: Sender<Result<Option<crate::model::FieldInfo>>>,
+    },
     Read {
         addr: DeviceId,
         field: FieldId,
@@ -330,6 +335,20 @@ impl Engine {
             return Ok(());
         }
         self.call(|reply| Command::DiscoverAllFields { addr, reply })?
+    }
+
+    /// One field's metadata, asked of the device if no discovered menu has
+    /// it: a field shown only at a higher access level still answers. `None`
+    /// when the device doesn't know the field.
+    pub fn field_info(
+        &self,
+        addr: DeviceId,
+        field: FieldId,
+    ) -> Result<Option<crate::model::FieldInfo>> {
+        if let Some(f) = self.state.field_info(addr, field) {
+            return Ok(Some(f));
+        }
+        self.call(|reply| Command::DiscoverField { addr, field, reply })?
     }
 
     /// Read a field value (cache if fresh enough, else poll).

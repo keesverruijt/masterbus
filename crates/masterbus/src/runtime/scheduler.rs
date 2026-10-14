@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::discovery::{
-    Disc, DiscBus, MENUS, discover_menu, enumerate_all_fields, fetch_identity, resolve_catalog,
+    Disc, DiscBus, MENUS, discover_menu, enumerate_all_fields, enumerate_field, fetch_identity,
+    resolve_catalog,
 };
 use super::framelog::frame_log;
 use super::reader::value_key;
@@ -177,6 +178,9 @@ impl Sched {
                 Ok(Command::DiscoverAllFields { addr, reply }) => {
                     self.do_discover_all_fields(addr);
                     let _ = reply.send(Ok(()));
+                }
+                Ok(Command::DiscoverField { addr, field, reply }) => {
+                    let _ = reply.send(Ok(self.do_discover_field(addr, field)));
                 }
                 Ok(Command::Read {
                     addr,
@@ -352,6 +356,26 @@ impl Sched {
         let fields = self.with_disc(addr, |disc| enumerate_all_fields(disc, addr));
         self.last_send = Instant::now();
         self.state.put_all_fields(addr, fields);
+    }
+
+    /// Ask a device for one field's metadata, for a field no discovered menu
+    /// lists, and keep it.
+    fn do_discover_field(
+        &mut self,
+        addr: DeviceId,
+        field: FieldId,
+    ) -> Option<crate::model::FieldInfo> {
+        if let Some(f) = self.state.field_info(addr, field) {
+            return Some(f);
+        }
+        let id = self.ensure_identity(addr);
+        self.ensure_catalog(addr, &id);
+        let f = self.with_disc(addr, |disc| enumerate_field(disc, addr, field, false));
+        self.last_send = Instant::now();
+        if let Some(f) = &f {
+            self.state.put_extra_field(addr, f.clone());
+        }
+        f
     }
 
     /// Run a closure with a [`Disc`] bound to this scheduler's transport.

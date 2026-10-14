@@ -346,6 +346,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
         token: opts.token.clone(),
         streaming: AtomicUsize::new(0),
         clients: AtomicUsize::new(0),
+        asked: Mutex::new(std::collections::HashSet::new()),
     });
 
     {
