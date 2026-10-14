@@ -58,6 +58,16 @@ access-level (login) modal — higher levels unlock more fields. `q`
 quits; with unsaved mapping changes it first asks whether to write or
 discard them. The bottom line lists the keys that work at that moment.
 
+When `masterbus-signalk` runs on the same machine (on its own, or inside
+the Signal K plugin), the TUI uses the bus through it and says so at
+start: `using the bus shared by masterbus-signalk`. Signal K keeps
+running while you browse, write fields or edit the mapping; the USB link
+can only be opened by one program, so before this the plugin had to be
+stopped first. `masterbus-dump` and `masterbus-set-field` do the same.
+This works for the same user account the daemon runs as (or root): the
+daemon leaves the connection details in `relay.json` in the schema cache
+folder, readable by that user only.
+
 No bus at hand? `--fake-bus` (a build with the `fake-bus` cargo feature)
 browses the same canned three-device bus as `masterbus-signalk
 --fake-bus`, and keeps the mapping in a scratch file in the temp

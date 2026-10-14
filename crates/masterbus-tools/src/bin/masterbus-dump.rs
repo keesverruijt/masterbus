@@ -427,8 +427,13 @@ fn main() {
         }
     };
 
-    let bus = match MasterBus::auto(Config::default()) {
-        Ok(b) => b,
+    let bus = match MasterBus::auto_joined(Config::default()) {
+        Ok((b, relay)) => {
+            if let Some(a) = relay {
+                eprintln!("masterbus-dump: using the bus shared by masterbus-signalk ({a})");
+            }
+            b
+        }
         Err(e) => {
             eprintln!("masterbus-dump: connect failed: {e}");
             std::process::exit(2);

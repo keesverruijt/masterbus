@@ -5,6 +5,9 @@
 //!
 //! Transport (USB or SocketCAN) and master role are read from the per-host
 //! config file (see `masterbus::FileConfig`); the file is created on first run.
+//! When `masterbus-signalk` (on its own or inside the Signal K plugin) runs on
+//! this machine, the TUI uses the bus through it instead, so both can run at
+//! once: the USB link can be opened by one program only.
 //!
 //! Left pane: devices (with liveness). Right pane: the selected device's groups
 //! and fields with live monitoring values. Writable fields can be edited:
@@ -117,7 +120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     } else {
-        MasterBus::auto(Config::default())?
+        let (bus, relay) = MasterBus::auto_joined(Config::default())?;
+        if let Some(a) = relay {
+            println!("using the bus shared by masterbus-signalk ({a})");
+        }
+        bus
     };
     println!("connected; scanning the bus…");
     run_tui(bus, mapping, logging_in_tui)?;

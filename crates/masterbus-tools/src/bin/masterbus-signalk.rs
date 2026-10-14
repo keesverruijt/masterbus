@@ -21,6 +21,12 @@
 //! both listeners are bound the daemon prints one `READY {...}` line on
 //! stdout naming them, which is what a supervisor waits for.
 //!
+//! The daemon shares its bus connection with the masterbus tools on the same
+//! machine (`masterbus-tui`, `masterbus-dump`, `masterbus-set-field`): it
+//! relays frames on a loopback port it announces in the schema cache folder
+//! (see `masterbus::transport::relay`). That is what lets the TUI run while
+//! Signal K holds the USB link.
+//!
 //! # What gets published
 //!
 //! Exactly what `mapping.json` says, and nothing else. The file sits beside
@@ -244,7 +250,12 @@ fn main() {
             masterbus_tools::fake::animate(&fake);
             _fake = Some(fake);
             eprintln!("masterbus-signalk: serving the canned fake bus (no hardware)");
-            match MasterBus::with_transport(transport, Config::default()) {
+            let shared = masterbus::transport::relay::share(transport, "127.0.0.1:0", None)
+                .and_then(|(t, relay)| {
+                    eprintln!("masterbus-signalk: sharing the bus with local tools on {relay}");
+                    MasterBus::with_transport(t, Config::default())
+                });
+            match shared {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("masterbus-signalk: fake bus failed: {e}");
@@ -264,8 +275,14 @@ fn main() {
         {
             _fake = None;
         }
-        match MasterBus::auto(Config::default()) {
-            Ok(b) => b,
+        // The bus is shared with the masterbus tools on this machine, so the
+        // TUI can be used while Signal K runs (the USB link takes only one
+        // process).
+        match MasterBus::auto_shared(Config::default(), "127.0.0.1:0") {
+            Ok((b, relay)) => {
+                eprintln!("masterbus-signalk: sharing the bus with local tools on {relay}");
+                b
+            }
             Err(e) => {
                 eprintln!("masterbus-signalk: connect failed: {e}");
                 std::process::exit(2);

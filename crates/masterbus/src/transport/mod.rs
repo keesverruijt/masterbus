@@ -32,4 +32,5 @@ pub trait TransportTx: Send {
 #[cfg(target_os = "linux")]
 pub mod socketcan;
 
+pub mod relay;
 pub mod usb;

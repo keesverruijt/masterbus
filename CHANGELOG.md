@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The TUI runs while Signal K holds the bus.** The USB link can be opened
+  by one program at a time, so `masterbus-tui` used to need the Signal K
+  plugin stopped first. `masterbus-signalk` now shares its connection with
+  the masterbus tools on the same machine: it relays bus frames on a
+  loopback port, announced with a random token in `relay.json` in the
+  schema cache folder (readable by the same user only).
+  `masterbus-tui`, `masterbus-dump` and `masterbus-set-field` use it when it
+  is there and open the bus themselves when it is not
+  (`MasterBus::auto_shared`, `MasterBus::auto_joined`). Through the relay
+  everything works as before, logins and writes included; a mapping saved in
+  the TUI reaches Signal K when the plugin shares the mapping.
+
 ### Fixed
 - **A mapped field shown only at installer level is published.** A mapping
   made in `masterbus-tui` after an installer login can name fields the

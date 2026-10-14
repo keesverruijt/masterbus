@@ -321,7 +321,7 @@ fn user_config_path() -> Option<PathBuf> {
 /// - **Linux**: `$XDG_CACHE_HOME/masterbus` (default `$HOME/.cache/masterbus`)
 /// - **macOS**: `$HOME/Library/Caches/masterbus`
 /// - **Windows**: `%LOCALAPPDATA%\masterbus\cache`
-fn user_cache_dir() -> Option<PathBuf> {
+pub(crate) fn user_cache_dir() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         let base = std::env::var_os("XDG_CACHE_HOME")

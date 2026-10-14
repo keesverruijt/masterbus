@@ -77,8 +77,13 @@ fn main() -> ExitCode {
         connect_timeout: Duration::from_secs(5),
         ..Default::default()
     };
-    let bus = match MasterBus::auto(config) {
-        Ok(b) => b,
+    let bus = match MasterBus::auto_joined(config) {
+        Ok((b, relay)) => {
+            if let Some(a) = relay {
+                eprintln!("using the bus shared by masterbus-signalk ({a})");
+            }
+            b
+        }
         Err(e) => {
             eprintln!("error: connect failed: {e}");
             return ExitCode::from(3);

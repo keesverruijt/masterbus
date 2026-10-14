@@ -53,7 +53,57 @@ impl MasterBus {
     /// `config` lets callers override any [`Config`] field; for
     /// [`Config::heartbeat_master`], a `Some` value wins, `None` falls back to
     /// the file's setting.
-    pub fn auto(mut config: Config) -> Result<Self> {
+    pub fn auto(config: Config) -> Result<Self> {
+        let (file, config) = Self::file_config(config)?;
+        Self::with_transport(open_file_transport(&file)?, config)
+    }
+
+    /// Like [`auto`](Self::auto), and share the connection with other local
+    /// processes through a relay on `listen` (loopback; port 0 picks one),
+    /// announced in the schema cache folder (see [`crate::transport::relay`]).
+    /// Returns the address the relay is on.
+    pub fn auto_shared(config: Config, listen: &str) -> Result<(Self, std::net::SocketAddr)> {
+        let (file, config) = Self::file_config(config)?;
+        let (transport, addr) = crate::transport::relay::share(
+            open_file_transport(&file)?,
+            listen,
+            config.cache_path.as_deref(),
+        )?;
+        Ok((Self::with_transport(transport, config)?, addr))
+    }
+
+    /// Join the bus connection a daemon on this machine shares (see
+    /// [`auto_shared`](Self::auto_shared)), or, when there is none, connect
+    /// like [`auto`](Self::auto). Through the daemon this process never
+    /// announces itself as bus master; the daemon does that. Returns the
+    /// relay's address when one was joined.
+    pub fn auto_joined(config: Config) -> Result<(Self, Option<std::net::SocketAddr>)> {
+        // Without a config file (a machine where the daemon is the only way
+        // to the bus, or no hardware to auto-detect) the relay is still
+        // looked for in the per-user cache.
+        let (file, mut config) = match Self::file_config(config.clone()) {
+            Ok((f, c)) => (Ok(f), c),
+            Err(e) => (Err(e), config),
+        };
+        let dirs: Vec<std::path::PathBuf> = config
+            .cache_path
+            .iter()
+            .cloned()
+            .chain(crate::settings::user_cache_dir())
+            .collect();
+        if let Some(t) = crate::transport::relay::find(&dirs) {
+            let addr = t.addr();
+            config.heartbeat_master = None;
+            return Ok((Self::with_transport(Box::new(t), config)?, Some(addr)));
+        }
+        Ok((
+            Self::with_transport(open_file_transport(&file?)?, config)?,
+            None,
+        ))
+    }
+
+    /// The config file, and `config` completed from it.
+    fn file_config(mut config: Config) -> Result<(FileConfig, Config)> {
         let file = FileConfig::load_or_create()?;
         if config.heartbeat_master.is_none() {
             config.heartbeat_master = file.heartbeat_master;
@@ -66,24 +116,7 @@ impl MasterBus {
                 config.cache_path = crate::settings::resolve_cache_dir(requested);
             }
         }
-        let name = if file.device_name.is_empty() {
-            None
-        } else {
-            Some(file.device_name.as_str())
-        };
-        match file.device_type {
-            DeviceType::Usb => Self::usb(name, config),
-            #[cfg(target_os = "linux")]
-            DeviceType::Can => {
-                let iface = name.unwrap_or("can0");
-                Self::socketcan(iface, config)
-            }
-            #[cfg(not(target_os = "linux"))]
-            DeviceType::Can => Err(Error::Connection(format!(
-                "{}: device_type = can but SocketCAN is Linux-only",
-                file.path.display()
-            ))),
-        }
+        Ok((file, config))
     }
 
     /// Currently-alive devices.
@@ -567,6 +600,27 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.engine.unsubscribe(self.id);
+    }
+}
+
+/// Open the transport `file` selects.
+fn open_file_transport(file: &FileConfig) -> Result<Box<dyn Transport>> {
+    let name = if file.device_name.is_empty() {
+        None
+    } else {
+        Some(file.device_name.as_str())
+    };
+    match file.device_type {
+        DeviceType::Usb => Ok(Box::new(crate::transport::usb::UsbTransport::open(name)?)),
+        #[cfg(target_os = "linux")]
+        DeviceType::Can => Ok(Box::new(
+            crate::transport::socketcan::SocketCanTransport::open(name.unwrap_or("can0"))?,
+        )),
+        #[cfg(not(target_os = "linux"))]
+        DeviceType::Can => Err(Error::Connection(format!(
+            "{}: device_type = can but SocketCAN is Linux-only",
+            file.path.display()
+        ))),
     }
 }
 
