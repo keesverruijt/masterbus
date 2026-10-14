@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-10-14
+
 ### Fixed
 - **A device found after start-up is discovered in seconds again, and an
   on-demand read answers at once.** Since 0.4.4 a polling pass read every
