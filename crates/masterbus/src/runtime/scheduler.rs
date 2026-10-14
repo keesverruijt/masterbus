@@ -851,15 +851,20 @@ impl Sched {
 
     fn poll_due(&mut self, subs: &mut [SubState]) {
         let now = Instant::now();
-        // Collect work first to avoid borrow issues.
-        let mut work: Vec<(usize, FieldId)> = Vec::new();
+        // Collect work first to avoid borrow issues, longest overdue first:
+        // a pass reads one batch at most and leaves the rest due, so a command
+        // or a discovery request waits for one batch, not for every field of
+        // every subscription (on a big bus that is a second per request, and
+        // a device found late took many minutes to discover).
+        let mut work: Vec<(Instant, usize, FieldId)> = Vec::new();
         for (i, s) in subs.iter().enumerate() {
             for (&f, &due) in &s.next_due {
                 if due <= now {
-                    work.push((i, f));
+                    work.push((due, i, f));
                 }
             }
         }
+        work.sort_by_key(|&(due, i, f)| (due, i, f));
 
         // Passive-first: a value cached within the interval is used as is.
         // The rest are read in one go, each field once however many
@@ -870,7 +875,10 @@ impl Sched {
         let mut wanted_by: Vec<Vec<(usize, FieldId)>> = Vec::new();
         let mut read_of: HashMap<(DeviceId, FieldId), usize> = HashMap::new();
         let mut probed: Vec<DeviceId> = Vec::new();
-        for (i, field) in work {
+        for (_, i, field) in work {
+            if reads.len() >= READ_BATCH {
+                break;
+            }
             let (device, interval) = (subs[i].spec.device, subs[i].spec.interval);
             subs[i].next_due.insert(field, now + interval);
             if let Some(cv) = self.state.get_value(device, field)
@@ -1739,6 +1747,54 @@ mod tests {
         let updates = rx.try_iter().count();
         assert!(updates >= 2, "only {updates} updates during the discovery");
         assert!(bus.sent_class(can_class::BUS_POLL).len() >= beats + 2);
+    }
+
+    /// A discovery request goes out after one batch of subscription reads at
+    /// most, however many fields are due: a full pass on a big bus takes a
+    /// second, and a device found late was discovered one request a second.
+    #[test]
+    fn a_discovery_waits_for_one_batch_of_reads_at_most() {
+        const OTHER: u32 = 0x28A11D;
+        let wires: Vec<u8> = (0x10..0x40).collect();
+        let mut streaming = Device::new();
+        for &w in &wires {
+            streaming = streaming.with_btm1(w, w as f32);
+        }
+        let mut starting = Device::new().with_identity("40021006", "7654321", "CHG");
+        starting.addr = OTHER;
+        let (bus, transport) = FakeBus::start_many(vec![streaming, starting]);
+        let engine = Engine::connect(transport, test_config()).expect("connect");
+        let fields: Vec<FieldId> = wires.iter().map(|&w| field_id::btm1(w)).collect();
+        seed_schema(
+            &engine,
+            fields
+                .iter()
+                .map(|&f| field(f, "Voltage", VisualizationType::Float))
+                .collect(),
+        );
+        let (_id, rx) = engine.subscribe(ADDR, fields.clone(), Duration::from_millis(1), false);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let _ = engine.ensure_menu(OTHER, Menu::Monitoring);
+
+        let to_other = |id: u32| id & 0x00FF_FFFF == OTHER;
+        let mut reads = 0;
+        let mut most = 0;
+        let mut requests = 0;
+        for (id, _) in bus.sent() {
+            if to_other(id) {
+                requests += 1;
+                most = most.max(reads);
+                reads = 0;
+            } else if (id >> 24) as u8 == can_class::MONITORING_REQ {
+                reads += 1;
+            }
+        }
+        assert!(requests > 3, "only {requests} discovery requests");
+        assert!(
+            most <= READ_BATCH,
+            "{most} reads went out between two discovery requests"
+        );
     }
 
     // ── bus master ──────────────────────────────────────────────────────────

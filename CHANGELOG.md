@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A device found after start-up is discovered in seconds again, and an
+  on-demand read answers at once.** Since 0.4.4 a polling pass read every
+  due field before the scheduler took its next command, and during a
+  discovery it ran such a pass before each request. On a big bus that is a
+  second per pass, so a device first heard after the start-up walk took
+  many minutes to join, and an API read or a TUI request waited behind it
+  (over 20 s on a 19-device boat, with 14 devices never joining). A pass
+  now reads one batch of 16 at most, longest overdue first, and leaves the
+  rest for the next one.
+
 ## [0.4.5] - 2026-10-14
 
 ### Added
