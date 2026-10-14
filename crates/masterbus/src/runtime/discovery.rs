@@ -536,19 +536,32 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<Gro
     let (offset, count) = menu_range(disc, addr, menu)?;
     let mut groups = Vec::new();
     if count > 0 {
+        // Some devices report more groups than they have and answer an id
+        // past their last group with that group again (a Mass Combi Ultra
+        // counts 42 Configuration groups and has 6). Such a group is the
+        // same as the one before it, which no real group is: a field
+        // belongs to one group. The group before the menu's first is looked
+        // at too, so a menu that is all repeats comes out empty.
+        let mut prev = match offset {
+            0 => None,
+            o => group_shape(disc, addr, (o - 1) as u8, menu),
+        };
         for i in 0..count {
             let gid = (offset + i) as u8;
-            if let Some(g) = enumerate_group(disc, addr, gid, menu) {
-                if groups.iter().any(|e| repeats(e, &g)) {
-                    log::debug!(
-                        target: "masterbus::discovery",
-                        "0x{addr:06X} {menu:?}: group {gid} repeats \"{}\"; skipped",
-                        g.name,
-                    );
-                    continue;
-                }
-                groups.push(g);
+            let Some(shape) = group_shape(disc, addr, gid, menu) else {
+                continue;
+            };
+            if prev.as_ref().is_some_and(|p| shape.repeats(p)) {
+                log::debug!(
+                    target: "masterbus::discovery",
+                    "0x{addr:06X} {menu:?}: group {gid} repeats the one before it; \
+                     the menu ends at {} of {count} groups",
+                    groups.len(),
+                );
+                break;
             }
+            groups.push(finish_group(disc, addr, gid, menu, shape.clone()));
+            prev = Some(shape);
         }
     } else if matches!(menu, Menu::Alarm | Menu::History) {
         // Probe-and-stop on the menu's own schema channel — stop after two
@@ -572,7 +585,27 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<Gro
     Some(groups)
 }
 
+/// What a group is before its fields' metadata is read: its name and its
+/// field ids.
+#[derive(Clone, PartialEq)]
+struct GroupShape {
+    name: String,
+    field_ids: Vec<FieldId>,
+}
+
+impl GroupShape {
+    /// Whether this is `other` again: the same name and the same fields.
+    fn repeats(&self, other: &GroupShape) -> bool {
+        !self.field_ids.is_empty() && self == other
+    }
+}
+
 fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupInfo> {
+    let shape = group_shape(disc, addr, g, menu)?;
+    Some(finish_group(disc, addr, g, menu, shape))
+}
+
+fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupShape> {
     let class = menu.schema_request_class();
     let key_prefix = schema_waiter_prefix(class);
     let name_sid = {
@@ -607,25 +640,34 @@ fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option
             field_ids.push(field_id::btm1(r[4]));
         }
     }
-
     let name = name_sid
         .map(|sid| disc.fetch_str(addr, sid))
         .unwrap_or_default();
+    Some(GroupShape { name, field_ids })
+}
+
+fn finish_group(
+    disc: &mut Disc,
+    addr: DeviceId,
+    g: u8,
+    menu: Menu,
+    shape: GroupShape,
+) -> GroupInfo {
     // Only Monitoring fields can be eventable outputs, so only they carry the
     // best-effort 0x0D query.
     let want_eventable = menu == Menu::Monitoring;
     let mut fields = Vec::new();
-    for fid in field_ids {
+    for fid in shape.field_ids {
         if let Some(f) = enumerate_field(disc, addr, fid, want_eventable) {
             fields.push(f);
         }
     }
-    Some(GroupInfo {
+    GroupInfo {
         id: g as i32,
-        name,
+        name: shape.name,
         menu,
         fields,
-    })
+    }
 }
 
 /// Probe every reachable field across **both** metadata channels (Btm1 +
@@ -1435,6 +1477,22 @@ mod enumeration_tests {
             .map(|g| g.id)
             .collect();
         assert_eq!(config, vec![1]);
+    }
+
+    /// A menu whose groups only repeat the one before the menu (a Mass
+    /// Combi Ultra counts Service groups it doesn't have, and answers them
+    /// with its last Configuration group) comes out empty.
+    #[test]
+    fn a_menu_of_repeats_is_empty() {
+        let device = combi()
+            .with_group(Menu::Configuration, 1, "Solar", &[0x20])
+            .with_group(Menu::Service, 2, "Solar", &[0x20])
+            .with_group(Menu::Service, 3, "Solar", &[0x20])
+            .with_field(field_id::btm1(0x20), "Power", "W", VIZ_FLOAT, false);
+        let (engine, _bus) = connect(device, test_config());
+        engine.ensure_menu(ADDR, Menu::Service).unwrap();
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert!(!schema.groups.iter().any(|g| g.menu == Menu::Service));
     }
 
     /// A Configuration menu in the cache that starts at group 0, as an
