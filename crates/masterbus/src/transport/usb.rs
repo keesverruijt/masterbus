@@ -26,6 +26,7 @@
 //! (host→device we only ever emit one per report).
 
 use std::collections::VecDeque;
+use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,12 +51,11 @@ pub struct UsbTransport {
 impl UsbTransport {
     /// Open the first MasterBus USB Link, or the one with the given serial number.
     pub fn open(serial: Option<&str>) -> Result<Self> {
-        let api = HidApi::new().map_err(|e| Error::Connection(format!("hidapi: {e}")))?;
-        let info = api
-            .device_list()
-            .filter(|d| d.vendor_id() == VID)
-            .find(|d| match serial {
-                Some(want) => d.serial_number() == Some(want),
+        let api = hid_api()?;
+        let link = links(&api)
+            .into_iter()
+            .find(|l| match serial {
+                Some(want) => l.serial == want,
                 None => true,
             })
             .ok_or_else(|| {
@@ -64,13 +64,96 @@ impl UsbTransport {
                     None => "no MasterBus USB Link found".into(),
                 })
             })?;
-        let dev = info
-            .open_device(&api)
+        let dev = api
+            .open_path(&link.path)
             .map_err(|e| Error::Connection(format!("open USB link: {e}")))?;
         Ok(UsbTransport {
             dev: Arc::new(Mutex::new(dev)),
         })
     }
+}
+
+/// The serial number of the first MasterBus USB Link on this host (empty if
+/// it has none), or `None` when there is no link.
+pub(crate) fn detect() -> Option<String> {
+    let api = hid_api().ok()?;
+    links(&api).into_iter().next().map(|l| l.serial)
+}
+
+/// A MasterBus USB Link: the path to open it by, and its serial number.
+struct Link {
+    path: CString,
+    serial: String,
+}
+
+/// The HID library, without a device enumeration on Linux. There the
+/// enumeration reads every sysfs attribute of every parent of every HID
+/// device, and on a Raspberry Pi 3 the USB host controller's `dwc_otg`
+/// driver exposes debug attributes that dump registers and run a register
+/// write test when read (signalk-masterbus#4). [`links`] finds the link
+/// from sysfs itself instead.
+fn hid_api() -> Result<HidApi> {
+    #[cfg(target_os = "linux")]
+    {
+        // Must come before hidapi's first initialisation in this process. If
+        // the program using this library started hidapi with discovery on
+        // already, hidapi panics; that only costs us the enumeration again.
+        static DISABLE: std::sync::Once = std::sync::Once::new();
+        DISABLE.call_once(|| {
+            if std::panic::catch_unwind(HidApi::disable_device_discovery).is_err() {
+                log::debug!("hidapi already enumerates devices in this process");
+            }
+        });
+    }
+    HidApi::new().map_err(|e| Error::Connection(format!("hidapi: {e}")))
+}
+
+/// Every MasterBus USB Link on this host.
+#[cfg(target_os = "linux")]
+fn links(_api: &HidApi) -> Vec<Link> {
+    let Ok(dir) = std::fs::read_dir("/sys/class/hidraw") else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Link)> = dir
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let uevent = std::fs::read_to_string(e.path().join("device/uevent")).ok()?;
+            let serial = link_serial(&uevent)?;
+            let path = CString::new(format!("/dev/{name}")).ok()?;
+            Some((name, Link { path, serial }))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.into_iter().map(|(_, l)| l).collect()
+}
+
+/// Every MasterBus USB Link on this host.
+#[cfg(not(target_os = "linux"))]
+fn links(api: &HidApi) -> Vec<Link> {
+    api.device_list()
+        .filter(|d| d.vendor_id() == VID)
+        .map(|d| Link {
+            path: d.path().to_owned(),
+            serial: d.serial_number().unwrap_or("").to_string(),
+        })
+        .collect()
+}
+
+/// From a HID device's `uevent`, the serial number (`HID_UNIQ`, possibly
+/// empty) when it is a MasterBus USB Link: `HID_ID` is `bus:vendor:product`
+/// in hex, e.g. `0003:00001A64:00000000`.
+fn link_serial(uevent: &str) -> Option<String> {
+    let value = |key: &str| {
+        uevent
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+    };
+    let vendor = value("HID_ID")?.split(':').nth(1)?;
+    if u32::from_str_radix(vendor, 16).ok()? != u32::from(VID) {
+        return None;
+    }
+    Some(value("HID_UNIQ").unwrap_or("").to_string())
 }
 
 impl Transport for UsbTransport {
@@ -176,6 +259,21 @@ impl TransportTx for Tx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The link is recognised by vendor in its HID device's `uevent`, as
+    /// sysfs has it on a Raspberry Pi; other HID devices are not.
+    #[test]
+    fn a_link_is_found_by_its_uevent() {
+        let link = "DRIVER=hid-generic\nHID_ID=0003:00001A64:00000000\n\
+                    HID_NAME=Mastervolt MasterBus USB Link\nHID_PHYS=usb-3f980000.usb-1.3/input0\n\
+                    HID_UNIQ=X123A4567\nMODALIAS=hid:b0003g0001v00001A64p00000000\n";
+        assert_eq!(link_serial(link).as_deref(), Some("X123A4567"));
+        let no_serial = "HID_ID=0003:00001A64:00000000\nHID_UNIQ=\n";
+        assert_eq!(link_serial(no_serial).as_deref(), Some(""));
+        let other = "HID_ID=0003:00001CDA:000003E8\nHID_UNIQ=abc\n";
+        assert_eq!(link_serial(other), None);
+        assert_eq!(link_serial("DRIVER=hid-generic\n"), None);
+    }
 
     #[test]
     fn decode_real_addresses() {
