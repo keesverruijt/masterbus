@@ -26,11 +26,8 @@
 //! (host→device we only ever emit one per report).
 
 use std::collections::VecDeque;
-use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-use hidapi::{HidApi, HidDevice};
 
 use super::{Transport, TransportRx, TransportTx};
 use crate::error::{Error, Result};
@@ -45,28 +42,19 @@ const READ_CAP: Duration = Duration::from_millis(50);
 
 /// Mastervolt USB-link transport (HID).
 pub struct UsbTransport {
-    dev: Arc<Mutex<HidDevice>>,
+    dev: Arc<Mutex<Dev>>,
 }
 
 impl UsbTransport {
     /// Open the first MasterBus USB Link, or the one with the given serial number.
     pub fn open(serial: Option<&str>) -> Result<Self> {
-        let api = hid_api()?;
-        let link = links(&api)
-            .into_iter()
-            .find(|l| match serial {
-                Some(want) => l.serial == want,
-                None => true,
+        let not_found = || {
+            Error::Connection(match serial {
+                Some(s) => format!("no MasterBus USB Link with serial {s}"),
+                None => "no MasterBus USB Link found".into(),
             })
-            .ok_or_else(|| {
-                Error::Connection(match serial {
-                    Some(s) => format!("no MasterBus USB Link with serial {s}"),
-                    None => "no MasterBus USB Link found".into(),
-                })
-            })?;
-        let dev = api
-            .open_path(&link.path)
-            .map_err(|e| Error::Connection(format!("open USB link: {e}")))?;
+        };
+        let dev = Dev::open(serial, not_found)?;
         Ok(UsbTransport {
             dev: Arc::new(Mutex::new(dev)),
         })
@@ -76,68 +64,143 @@ impl UsbTransport {
 /// The serial number of the first MasterBus USB Link on this host (empty if
 /// it has none), or `None` when there is no link.
 pub(crate) fn detect() -> Option<String> {
-    let api = hid_api().ok()?;
-    links(&api).into_iter().next().map(|l| l.serial)
+    Dev::serials().into_iter().next()
 }
 
-/// A MasterBus USB Link: the path to open it by, and its serial number.
-struct Link {
-    path: CString,
-    serial: String,
-}
-
-/// The HID library, without a device enumeration on Linux. There the
-/// enumeration reads every sysfs attribute of every parent of every HID
-/// device, and on a Raspberry Pi 3 the USB host controller's `dwc_otg`
-/// driver exposes debug attributes that dump registers and run a register
-/// write test when read (signalk-masterbus#4). [`links`] finds the link
-/// from sysfs itself instead.
-fn hid_api() -> Result<HidApi> {
-    #[cfg(target_os = "linux")]
-    {
-        // Must come before hidapi's first initialisation in this process. If
-        // the program using this library started hidapi with discovery on
-        // already, hidapi panics; that only costs us the enumeration again.
-        static DISABLE: std::sync::Once = std::sync::Once::new();
-        DISABLE.call_once(|| {
-            if std::panic::catch_unwind(HidApi::disable_device_discovery).is_err() {
-                log::debug!("hidapi already enumerates devices in this process");
-            }
-        });
-    }
-    HidApi::new().map_err(|e| Error::Connection(format!("hidapi: {e}")))
-}
-
-/// Every MasterBus USB Link on this host.
 #[cfg(target_os = "linux")]
-fn links(_api: &HidApi) -> Vec<Link> {
-    let Ok(dir) = std::fs::read_dir("/sys/class/hidraw") else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, Link)> = dir
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            let uevent = std::fs::read_to_string(e.path().join("device/uevent")).ok()?;
-            let serial = link_serial(&uevent)?;
-            let path = CString::new(format!("/dev/{name}")).ok()?;
-            Some((name, Link { path, serial }))
-        })
-        .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out.into_iter().map(|(_, l)| l).collect()
+use hidraw::Dev;
+
+/// On Linux the link is used through its `/dev/hidrawN` node: a report is
+/// one `read` or `write`. hidapi's Linux backend would first enumerate every
+/// HID device, reading every sysfs attribute of each one's parents; on a
+/// Raspberry Pi 3 the USB host controller's `dwc_otg` driver has debug
+/// attributes that dump registers and run a register write test when read
+/// (signalk-masterbus#4). The link is found from its HID `uevent` instead.
+#[cfg(target_os = "linux")]
+mod hidraw {
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
+
+    use crate::error::{Error, Result};
+
+    pub(super) struct Dev(File);
+
+    impl Dev {
+        pub(super) fn open(serial: Option<&str>, not_found: impl Fn() -> Error) -> Result<Dev> {
+            let (path, _) = links()
+                .into_iter()
+                .find(|(_, s)| serial.is_none_or(|want| s == want))
+                .ok_or_else(not_found)?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map(Dev)
+                .map_err(|e| Error::Connection(format!("open USB link {}: {e}", path.display())))
+        }
+
+        pub(super) fn serials() -> Vec<String> {
+            links().into_iter().map(|(_, s)| s).collect()
+        }
+
+        /// Read one report, waiting up to `ms`; 0 bytes on timeout.
+        pub(super) fn read_timeout(&self, buf: &mut [u8], ms: i32) -> io::Result<usize> {
+            let mut pfd = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, for the duration of the call.
+            match unsafe { libc::poll(&mut pfd, 1, ms) } {
+                0 => return Ok(0),
+                n if n < 0 => {
+                    let e = io::Error::last_os_error();
+                    return if e.kind() == io::ErrorKind::Interrupted {
+                        Ok(0)
+                    } else {
+                        Err(e)
+                    };
+                }
+                _ => {}
+            }
+            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Err(io::Error::other("the USB link went away"));
+            }
+            (&self.0).read(buf)
+        }
+
+        pub(super) fn write(&self, buf: &[u8]) -> io::Result<usize> {
+            (&self.0).write(buf)
+        }
+    }
+
+    /// Every MasterBus USB Link on this host: its device node and serial
+    /// number, in node order.
+    fn links() -> Vec<(PathBuf, String)> {
+        let Ok(dir) = std::fs::read_dir("/sys/class/hidraw") else {
+            return Vec::new();
+        };
+        let mut out: Vec<(PathBuf, String)> = dir
+            .flatten()
+            .filter_map(|e| {
+                let uevent = std::fs::read_to_string(e.path().join("device/uevent")).ok()?;
+                let serial = super::link_serial(&uevent)?;
+                Some((PathBuf::from("/dev").join(e.file_name()), serial))
+            })
+            .collect();
+        out.sort();
+        out
+    }
 }
 
-/// Every MasterBus USB Link on this host.
 #[cfg(not(target_os = "linux"))]
-fn links(api: &HidApi) -> Vec<Link> {
-    api.device_list()
-        .filter(|d| d.vendor_id() == VID)
-        .map(|d| Link {
-            path: d.path().to_owned(),
-            serial: d.serial_number().unwrap_or("").to_string(),
-        })
-        .collect()
+use hid::Dev;
+
+/// Elsewhere, hidapi's native backends (IOKit, Windows HID).
+#[cfg(not(target_os = "linux"))]
+mod hid {
+    use std::io;
+
+    use hidapi::{HidApi, HidDevice};
+
+    use super::VID;
+    use crate::error::{Error, Result};
+
+    pub(super) struct Dev(HidDevice);
+
+    impl Dev {
+        pub(super) fn open(serial: Option<&str>, not_found: impl Fn() -> Error) -> Result<Dev> {
+            let api = HidApi::new().map_err(|e| Error::Connection(format!("hidapi: {e}")))?;
+            let info = api
+                .device_list()
+                .filter(|d| d.vendor_id() == VID)
+                .find(|d| serial.is_none_or(|want| d.serial_number() == Some(want)))
+                .ok_or_else(not_found)?;
+            info.open_device(&api)
+                .map(Dev)
+                .map_err(|e| Error::Connection(format!("open USB link: {e}")))
+        }
+
+        pub(super) fn serials() -> Vec<String> {
+            let Ok(api) = HidApi::new() else {
+                return Vec::new();
+            };
+            api.device_list()
+                .filter(|d| d.vendor_id() == VID)
+                .map(|d| d.serial_number().unwrap_or("").to_string())
+                .collect()
+        }
+
+        pub(super) fn read_timeout(&self, buf: &mut [u8], ms: i32) -> io::Result<usize> {
+            self.0.read_timeout(buf, ms).map_err(io::Error::other)
+        }
+
+        pub(super) fn write(&self, buf: &[u8]) -> io::Result<usize> {
+            self.0.write(buf).map_err(io::Error::other)
+        }
+    }
 }
 
 /// From a HID device's `uevent`, the serial number (`HID_UNIQ`, possibly
@@ -218,7 +281,7 @@ fn build_report(can_id: u32, data: &[u8]) -> [u8; REPORT_LEN + 1] {
 }
 
 struct Rx {
-    dev: Arc<Mutex<HidDevice>>,
+    dev: Arc<Mutex<Dev>>,
     queue: VecDeque<(u32, Vec<u8>)>,
 }
 
@@ -243,7 +306,7 @@ impl TransportRx for Rx {
 }
 
 struct Tx {
-    dev: Arc<Mutex<HidDevice>>,
+    dev: Arc<Mutex<Dev>>,
 }
 
 impl TransportTx for Tx {

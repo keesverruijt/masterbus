@@ -13,7 +13,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   includes debug files of the USB host driver (`dwc_otg`) that dump its
   registers and run a register write test when read, three times per
   daemon start. On Linux the link is now found from its HID `uevent` and
-  opened by path. (signalk-masterbus#4)
+  used through its `/dev/hidrawN` node directly, without hidapi.
+  (signalk-masterbus#4)
 
 ## [0.4.6] - 2026-10-14
 
