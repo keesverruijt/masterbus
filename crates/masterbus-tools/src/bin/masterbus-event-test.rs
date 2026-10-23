@@ -176,6 +176,20 @@ impl Bus {
     }
 }
 
+/// The CAN address of the device with BusID `id`; the inverse of
+/// `bus_id_for_addr`.
+fn addr_for_bus_id(id: u32) -> u32 {
+    ((id >> 24) << 18) | (id & 0x3FFFF)
+}
+
+/// Print the frames sent to one of our ids since the last call.
+fn report_watched(bus: &mut Bus, prefix: &str) {
+    let watched = std::mem::take(&mut bus.watched);
+    for line in &watched {
+        bus.note(&format!("{prefix}sent to a writer id we used: {line}"));
+    }
+}
+
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
@@ -226,7 +240,11 @@ fn main() -> ExitCode {
     // only takes commits from that kind of writer.
     let own_id = bus_id_for_addr(own_addr);
     let own_id_14 = (0x14 << 24) | (own_id & 0x00FF_FFFF);
-    let own_addrs: BTreeSet<u32> = [own_addr, (0x14 << 18) | (own_addr & 0x3FFFF)].into();
+    // Frames to any writer id a commit names, ours or MasterAdjust's.
+    let watch: BTreeSet<u32> = [own_id, own_id_14, COMMIT_TOKEN_BUS_ID]
+        .into_iter()
+        .map(addr_for_bus_id)
+        .collect();
 
     let (rx, tx) = transport.split();
     let mut bus = Bus {
@@ -237,7 +255,7 @@ fn main() -> ExitCode {
         heartbeat: config.heartbeat_master,
         last_heartbeat: Instant::now() - Duration::from_secs(1),
         heard: BTreeSet::new(),
-        watch: own_addrs.clone(),
+        watch,
         watched: Vec::new(),
     };
 
@@ -321,11 +339,12 @@ fn main() -> ExitCode {
         },
     ];
 
+    report_watched(&mut bus, "   before the tests: ");
     let mut state = start;
     for (i, v) in variants.iter().enumerate() {
         let name = (b'A' + i as u8) as char;
         if let Some(id) = v.commit_as {
-            let a = (id >> 24) << 18 | (id & 0x3FFFF);
+            let a = addr_for_bus_id(id);
             if bus.heard.contains(&a) && id != COMMIT_TOKEN_BUS_ID {
                 bus.note(&format!(
                     "{name}. {}: skipped, a device on the bus has address {a:06X}",
@@ -334,9 +353,9 @@ fn main() -> ExitCode {
                 continue;
             }
         }
-        bus.watched.clear();
         let Some(now) = bus.switch(addr, field, !state, v) else {
             bus.note(&format!("{name}. {}: no answer when read back", v.label));
+            report_watched(&mut bus, "     ");
             continue;
         };
         if now == state {
@@ -362,10 +381,7 @@ fn main() -> ExitCode {
                 }
             ));
         }
-        let watched = std::mem::take(&mut bus.watched);
-        for line in &watched {
-            bus.note(&format!("     sent to our address: {line}"));
-        }
+        report_watched(&mut bus, "     ");
     }
 
     if state != start {
@@ -376,6 +392,9 @@ fn main() -> ExitCode {
         let old = &variants[3];
         state = bus.switch(addr, field, start, old).unwrap_or(state);
     }
+    bus.note("listening for 5 more seconds...");
+    bus.listen(Duration::from_secs(5));
+    report_watched(&mut bus, "   after the tests: ");
     bus.note(&format!("output is {} at the end", on_off(state)));
     if state != start {
         bus.note(&format!(
