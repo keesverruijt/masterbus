@@ -36,6 +36,10 @@ path = "src/bin/masterbus-set-field.rs"
 name = "masterbus-dump"
 path = "src/bin/masterbus-dump.rs"
 
+[[bin]]
+name = "masterbus-event-test"
+path = "src/bin/masterbus-event-test.rs"
+
 [features]
 # `masterbus-signalk --fake-bus`: a canned three-device bus with no hardware,
 # for smoke tests and the Signal K plugin's CI.
