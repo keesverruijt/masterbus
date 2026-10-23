@@ -37,6 +37,11 @@
 //! # the bus).
 //! heartbeat_master = 000001
 //!
+//! # This program's own BusID (hex), which it names as the writer of a
+//! # switch (PROTOCOL.md §7.3). Made up once per host, in a device class no
+//! # Mastervolt product uses.
+//! bus_id = 1C02A4F7
+//!
 //! # Transport: "usb" for the Mastervolt USB link, "can" for SocketCAN.
 //! device_type = can
 //!
@@ -52,7 +57,8 @@
 //! the user is expected to edit the file and pick one.
 //!
 //! Creation logs the chosen path and detected values to stderr so a first run
-//! isn't silent.
+//! isn't silent. A file without `bus_id` gets one appended the first time it
+//! is loaded.
 
 use std::fs;
 use std::io::Write;
@@ -79,6 +85,9 @@ pub enum DeviceType {
 pub struct FileConfig {
     /// 24-bit hex master id to announce as, or `None` to stay passive.
     pub heartbeat_master: Option<DeviceId>,
+    /// Our own BusID (see [`crate::bus_id`]); `None` only when the file has
+    /// none and adding one failed.
+    pub bus_id: Option<u32>,
     /// Transport selector.
     pub device_type: DeviceType,
     /// CAN interface name, or USB serial number. Empty string = unspecified.
@@ -129,11 +138,16 @@ impl FileConfig {
         if path.is_file() {
             let raw = fs::read_to_string(&path)
                 .map_err(|e| Error::Connection(format!("read {}: {e}", path.display())))?;
-            return parse(&raw, path);
+            let mut cfg = parse(&raw, path)?;
+            if cfg.bus_id.is_none() {
+                cfg.bus_id = add_bus_id(&cfg.path);
+            }
+            return Ok(cfg);
         }
         // Doesn't exist yet — auto-detect and write.
         let mut detected = autodetect()?;
         detected.cache_dir = default_cache_dir(&path);
+        detected.bus_id = Some(crate::bus_id::generate());
         let body = render(&detected);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -154,6 +168,41 @@ impl FileConfig {
         Ok(FileConfig { path, ..detected })
     }
 }
+
+/// Give a file written before `bus_id` existed one of its own, so the id
+/// stays the same from run to run. `None` when the file can't be appended to;
+/// the engine then makes up one per run.
+fn add_bus_id(path: &Path) -> Option<u32> {
+    let id = crate::bus_id::generate();
+    let line = format!("\n{BUS_ID_COMMENT}bus_id = {id:08X}\n");
+    let appended = fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    match appended {
+        Ok(()) => {
+            log::info!(
+                target: "masterbus::settings",
+                "{}: added bus_id = {id:08X}",
+                path.display()
+            );
+            Some(id)
+        }
+        Err(e) => {
+            log::warn!(
+                target: "masterbus::settings",
+                "{}: can't add bus_id ({e}); using a new one each run",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+const BUS_ID_COMMENT: &str = "\
+# This program's own BusID (hex), which it names as the writer of a\n\
+# switch. Made up once per host, in a device class no Mastervolt product\n\
+# uses; change it only if a device on the bus has the same id.\n";
 
 /// Pick a sensible default schema-cache directory based on where the config
 /// file is being created. Mirrors the systemd unit's `StateDirectory` when the
@@ -367,6 +416,7 @@ fn is_writable_dir(dir: &Path) -> bool {
 /// Unknown keys are ignored (forward compatibility).
 fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
     let mut heartbeat_master: Option<DeviceId> = None;
+    let mut bus_id: Option<u32> = None;
     let mut device_type: Option<DeviceType> = None;
     let mut device_name = String::new();
     let mut cache_dir: Option<PathBuf> = None;
@@ -400,6 +450,20 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
                 })?;
                 heartbeat_master = Some(v);
             }
+            "bus_id" => {
+                let v = u32::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .ok()
+                    .filter(|&v| crate::bus_id::is_valid(v))
+                    .ok_or_else(|| {
+                        Error::Connection(format!(
+                            "{}:{}: bus_id must be a hex BusID such as 1C02A4F7 (got {:?})",
+                            path.display(),
+                            lineno,
+                            value
+                        ))
+                    })?;
+                bus_id = Some(v);
+            }
             "device_type" => {
                 device_type = Some(match value.to_ascii_lowercase().as_str() {
                     "can" | "socketcan" => DeviceType::Can,
@@ -428,6 +492,7 @@ fn parse(raw: &str, path: PathBuf) -> Result<FileConfig> {
         .ok_or_else(|| Error::Connection(format!("{}: device_type is required", path.display())))?;
     Ok(FileConfig {
         heartbeat_master,
+        bus_id,
         device_type,
         device_name,
         cache_dir,
@@ -443,6 +508,10 @@ fn render(cfg: &FileConfig) -> String {
     let hb = match cfg.heartbeat_master {
         Some(v) => format!("heartbeat_master = {:06X}\n", v),
         None => "# heartbeat_master = 000001\n".to_string(),
+    };
+    let bus_id = match cfg.bus_id {
+        Some(v) => format!("{BUS_ID_COMMENT}bus_id = {v:08X}\n\n"),
+        None => String::new(),
     };
     let cache = match &cfg.cache_dir {
         Some(p) => format!("cache_dir = {}\n", p.display()),
@@ -467,6 +536,7 @@ fn render(cfg: &FileConfig) -> String {
          # (class-0x05 heartbeats). Comment out to stay passive (a hardware\n\
          # master must drive the bus, e.g. an EasyView panel).\n\
          {hb}\n\
+         {bus_id}\
          # Transport: \"usb\" for the Mastervolt USB link, \"can\" for SocketCAN.\n\
          device_type = {dt}\n\
          \n\
@@ -502,6 +572,7 @@ fn autodetect() -> Result<FileConfig> {
     if let Some(serial) = detect_usb_link() {
         return Ok(FileConfig {
             heartbeat_master: None,
+            bus_id: None,
             device_type: DeviceType::Usb,
             device_name: serial,
             cache_dir: None,
@@ -523,6 +594,7 @@ fn autodetect() -> Result<FileConfig> {
             )),
             [one] => Ok(FileConfig {
                 heartbeat_master: None,
+                bus_id: None,
                 device_type: DeviceType::Can,
                 device_name: one.clone(),
                 cache_dir: None,
@@ -690,6 +762,19 @@ mod tests {
     }
 
     #[test]
+    fn bus_id_parses_and_junk_is_rejected() {
+        let ok = parse(
+            "device_type = can\nbus_id = 1C02A4F7\n",
+            PathBuf::from("t.ini"),
+        );
+        assert_eq!(ok.unwrap().bus_id, Some(0x1C02A4F7));
+        for bad in ["nothex", "14FC0000", "20000001"] {
+            let raw = format!("device_type = can\nbus_id = {bad}\n");
+            assert!(parse(&raw, PathBuf::from("t.ini")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn missing_device_type_rejected() {
         let raw = "device_name = can0\n";
         assert!(parse(raw, PathBuf::from("t.ini")).is_err());
@@ -699,6 +784,7 @@ mod tests {
     fn render_round_trips() {
         let cfg = FileConfig {
             heartbeat_master: Some(0x000001),
+            bus_id: Some(0x1C02A4F7),
             device_type: DeviceType::Can,
             device_name: "can0".into(),
             cache_dir: Some(PathBuf::from("/var/lib/masterbus")),
@@ -776,6 +862,7 @@ mod tests {
     fn an_empty_config_renders_its_optional_keys_as_comments() {
         let cfg = FileConfig {
             heartbeat_master: None,
+            bus_id: None,
             device_type: DeviceType::Usb,
             device_name: String::new(),
             cache_dir: None,

@@ -71,6 +71,10 @@ pub struct Config {
     /// kept rare; but never zero, because a device that only speaks when
     /// spoken to would otherwise never be heard from again.
     pub quiet_probe: Duration,
+    /// Our own BusID, which a commit write names as its writer (PROTOCOL.md
+    /// §7.3). `None` takes `bus_id` from `config.ini` where the bus is opened
+    /// through it, else a fresh one from [`crate::bus_id::generate`].
+    pub bus_id: Option<u32>,
 }
 
 impl Default for Config {
@@ -88,6 +92,7 @@ impl Default for Config {
             heartbeat_master: None,
             heartbeat_interval: Duration::from_secs(1),
             quiet_probe: Duration::from_secs(30),
+            bus_id: None,
         }
     }
 }
@@ -218,7 +223,8 @@ pub(crate) struct Engine {
 impl Engine {
     /// Connect over a transport; returns once the bus is usable and ≥1 device is
     /// heard (or `connect_timeout` elapses).
-    pub fn connect(transport: Box<dyn Transport>, config: Config) -> Result<Arc<Engine>> {
+    pub fn connect(transport: Box<dyn Transport>, mut config: Config) -> Result<Arc<Engine>> {
+        config.bus_id.get_or_insert_with(crate::bus_id::generate);
         let started = Instant::now();
         let (rx, tx) = transport.split();
         let state = Arc::new(State::new());
@@ -257,9 +263,10 @@ impl Engine {
             std::thread::sleep(Duration::from_millis(20));
         }
         log::info!(
-            "connected (first device after {:?}, heartbeat_master={:?})",
+            "connected (first device after {:?}, heartbeat_master={:?}, bus_id={:08X})",
             started.elapsed(),
             config.heartbeat_master,
+            config.bus_id.unwrap_or_default(),
         );
 
         Ok(Arc::new(Engine {

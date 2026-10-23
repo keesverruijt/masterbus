@@ -127,6 +127,10 @@ silent.
 # passive (a hardware master must drive the bus, e.g. an EasyView panel).
 heartbeat_master = 000001
 
+# Our own BusID, which a switch command names as its writer. Made up on
+# first run, in a device class no Mastervolt product uses.
+bus_id = 1C02A4F7
+
 # Transport: "usb" for the Mastervolt USB link, "can" for SocketCAN.
 device_type = can
 

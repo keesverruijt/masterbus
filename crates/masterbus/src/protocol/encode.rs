@@ -221,41 +221,31 @@ pub fn encode_set_list(device_addr: u32, field_index: u8, index: i32) -> (u32, V
     encode_set_float(device_addr, field_index, index as f32)
 }
 
-/// "Commit" token some relay-style controls (e.g. the CombiMaster inverter and
-/// charger) require: after writing the value, write this fixed token to the
-/// adjacent hidden command register (value field + 1) for the change to take
-/// effect. Captured constant from MasterAdjust across inverter/charger, on/off.
-pub const COMMIT_TOKEN: [u8; 4] = [0x14, 0x9f, 0x3c, 0x02];
-
-/// The BusID [`COMMIT_TOKEN`] names (see [`commit_value`]): the MasterAdjust
-/// setup it was captured from, not this crate.
-pub const COMMIT_TOKEN_BUS_ID: u32 = 0x14023C9F;
-
-/// Build the commit-token write for the command register `cmd_field`.
-pub fn encode_commit(device_addr: u32, cmd_field: u8) -> (u32, Vec<u8>) {
-    let mut data = vec![cmd_field, TAB_DEFAULT];
-    data.extend_from_slice(&COMMIT_TOKEN);
-    (id(can_class::MONITORING_REQ, device_addr), data)
-}
-
-/// The commit-register value naming the writer `bus_id` (#29): the BusID's
-/// top byte, then its low three bytes least significant first. The EasyView
-/// commits its event writes with its own BusID this way, and
-/// [`COMMIT_TOKEN`] decodes to BusID `0x14023C9F` by the same rule.
+/// The commit-register value naming the writer `bus_id`: the BusID's top
+/// byte, then its low three bytes least significant first (PROTOCOL.md §7.3).
+/// A device acts on a relay-style write only once this follows it; the EasyView
+/// commits with its own BusID, MasterAdjust with `14 9F 3C 02` (BusID
+/// `0x14023C9F`).
 pub fn commit_value(bus_id: u32) -> [u8; 4] {
     let b = bus_id.to_le_bytes();
     [b[3], b[0], b[1], b[2]]
 }
 
-/// The BusID of the device at CAN address `addr` (#29): the address's top six
-/// bits are the BusID's top byte, its low 18 bits the BusID's low bits.
+/// The BusID of the device at CAN address `addr`: the address's class bits
+/// (18..22) become the BusID's top byte, its low 18 bits stay (PROTOCOL.md §3a).
 pub fn bus_id_for_addr(addr: u32) -> u32 {
-    ((addr & 0x00FF_FFFF) >> 18) << 24 | (addr & 0x3FFFF)
+    (((addr & 0x00FF_FFFF) >> 18) << 24) | (addr & 0x3FFFF)
 }
 
-/// Like [`encode_commit`], but naming the writer `bus_id` instead of the
-/// token captured from MasterAdjust.
-pub fn encode_commit_as(device_addr: u32, cmd_field: u8, bus_id: u32) -> (u32, Vec<u8>) {
+/// The CAN address of the device with BusID `bus_id`; the inverse of
+/// [`bus_id_for_addr`].
+pub fn addr_for_bus_id(bus_id: u32) -> u32 {
+    ((bus_id >> 24) << 18) | (bus_id & 0x3FFFF)
+}
+
+/// The commit write to the command register `cmd_field`, naming the writer
+/// `bus_id`.
+pub fn encode_commit(device_addr: u32, cmd_field: u8, bus_id: u32) -> (u32, Vec<u8>) {
     let mut data = vec![cmd_field, TAB_DEFAULT];
     data.extend_from_slice(&commit_value(bus_id));
     (id(can_class::MONITORING_REQ, device_addr), data)
@@ -336,28 +326,28 @@ mod tests {
     }
 
     #[test]
-    fn commit_token_is_fixed() {
-        // CombiMaster inverter commit: field 0x14, tab 0, then the constant token.
+    fn commit_value_names_the_writer() {
+        // From the #29 capture: the EasyView (BusID 0x140294F9, CAN 0x5294F9)
+        // commits with 14 F9 94 02; the APR (0x0C0193BA, CAN 0x3193BA) with
+        // 0C BA 93 01. MasterAdjust's constant 14 9F 3C 02 is BusID 0x14023C9F.
+        assert_eq!(commit_value(0x140294F9), [0x14, 0xF9, 0x94, 0x02]);
+        assert_eq!(commit_value(0x0C0193BA), [0x0C, 0xBA, 0x93, 0x01]);
+        assert_eq!(commit_value(0x14023C9F), [0x14, 0x9F, 0x3C, 0x02]);
         assert_eq!(
-            encode_commit(0x188EA2, 0x14).1,
-            vec![0x14, 0x00, 0x14, 0x9f, 0x3c, 0x02]
+            encode_commit(0x3193BA, 0x28, 0x140294F9).1,
+            vec![0x28, 0x00, 0x14, 0xF9, 0x94, 0x02]
         );
     }
 
     #[test]
-    fn commit_value_names_the_writer() {
-        // From the #29 capture: the EasyView (BusID 0x140294F9, CAN 0x5294F9)
-        // commits with 14 F9 94 02; the APR (0x0C0193BA, CAN 0x3193BA) with
-        // 0C BA 93 01.
-        assert_eq!(commit_value(0x140294F9), [0x14, 0xF9, 0x94, 0x02]);
-        assert_eq!(commit_value(0x0C0193BA), [0x0C, 0xBA, 0x93, 0x01]);
-        assert_eq!(commit_value(COMMIT_TOKEN_BUS_ID), COMMIT_TOKEN);
+    fn bus_id_and_address_are_the_same_number() {
         assert_eq!(bus_id_for_addr(0x5294F9), 0x140294F9);
         assert_eq!(bus_id_for_addr(0x3193BA), 0x0C0193BA);
-        assert_eq!(
-            encode_commit_as(0x3193BA, 0x28, 0x140294F9).1,
-            vec![0x28, 0x00, 0x14, 0xF9, 0x94, 0x02]
-        );
+        assert_eq!(addr_for_bus_id(0x140294F9), 0x5294F9);
+        assert_eq!(addr_for_bus_id(0x1C03FFFF), 0x73FFFF);
+        for addr in [0x000001, 0x188EA2, 0x6CC699, 0x7FFFFF] {
+            assert_eq!(addr_for_bus_id(bus_id_for_addr(addr)), addr);
+        }
     }
 
     #[test]

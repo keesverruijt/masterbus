@@ -29,6 +29,13 @@ can_id = (can_class << 24) | (device_addr & 0x00FF_FFFF)
 
 Frames must be transmitted/received as **extended** frames, not standard.
 
+`device_addr` is the device's **BusID** in compact form: bits 22:18 are its
+product class and bits 17:0 a number derived from its serial; bit 23 always
+clear (§3a). The firmware itself splits the id as a 6-bit frame type
+(bits 28:23) and a 23-bit address, so `can_class` here is the frame type
+shifted right by one; the Btm1 metadata channel's `addr | 0x800000` (§6) is
+the odd frame type.
+
 ### 1.2 Linux SocketCAN `can_frame` (16 bytes)
 
 ```
@@ -110,6 +117,55 @@ The 24-bit `device_addr` comes from the CAN ID, not the payload.
 > earlier theory that bytes `[4:6]` encoded firmware version did not hold
 > up across devices.
 
+## 3a. Device address and BusID
+
+A device's address is fixed at the factory. MasterAdjust shows it as a 32-bit
+**BusID**; the two are the same number:
+
+```
+BusID   = class << 24 | low18          (bits 18..23 always 0)
+address = class << 18 | low18
+```
+
+**`class`** is a 5-bit product class, a constant in each firmware image.
+Seen so far:
+
+| class | devices |
+|-------|---------|
+| `0x06` | CombiMaster, Mass Combi Ultra, MCU |
+| `0x0A` | ChargeMaster Plus, Mass Charger MB |
+| `0x0C` | Alpha Pro III, SCM60 |
+| `0x0E` | interfaces (MasterBus to NMEA, CANopen, LIN, …), repeater |
+| `0x10` | Digital Input Switch, DC distribution (DSD, DCD) |
+| `0x13` | MLI Ultra 1250 and MK3, lead battery monitor |
+| `0x14` | displays (EasyView 5, SmartRemote); MasterAdjust itself |
+| `0x18` | Mac Plus |
+| `0x19` | ISO / GI transformer |
+| `0x1B` | MLI Ultra cells, MasterShunt MKIII |
+| `0x1D` | AC Power Analyser |
+
+**`low18`** is computed from the device's 9-character serial `L Y WW L NNNN`
+(e.g. `K712Q2000`) and its 8-digit article number:
+
+```
+y     = Y as a digit, with O = 10, N = 11, D = 12; then y & 3
+A     = sum of the article number's 3-digit groups, from the right
+        (77030500 -> 500 + 30 + 77)
+low18 = (NNNN + (WW + 32*y) * 2048 + 64*A) & 0x3FFFF
+```
+
+The device recomputes it whenever its serial changes and stores it; the
+letters are not used. This reproduces all 14 devices of the reference bus.
+
+**A program on the bus has no serial**, so it makes up a BusID. MasterAdjust
+uses class `0x14` with `low18` computed from the USB link's serial and
+article `77030100`; the vendor's Linux library uses `0x500001` (BusID
+`0x14000001`). Both send bus-master heartbeats (class `0x05`) from that
+address. This crate uses class `0x1C`, which no firmware or bus seen so far
+uses, with random `low18` kept in `config.ini` as `bus_id` (§7.3). Avoid
+`0x1F` (the MLI MK3 treats it as a wildcard), `0x00` (unset to the
+ChargeMaster Plus) and `0x00`–`0x09` (codes in firmware-update frames).
+
 ---
 
 ## 4. Property queries (class 0x07 request → 0x06 response)
@@ -169,6 +225,7 @@ class `0x06` with `u16LE(lo, hi)`. Selectors that matter:
 | `0x03` | Number of **Configuration** groups. **Unreliable** on some devices — see caveat below. |
 | `0x04` | Number of **Service** groups.                                            |
 | `0x3F` | **Total tab count** (`mon + alarm + history + config`), *not* a per-tab count. |
+| `0x40 + K` | Field index of the device's `K`-th **eventable output** (§9a); no answer past the last. |
 
 > **`[0x08, 0x03]` is unreliable** on Magic-class devices (and likely
 > others). The Mac/Magic family — e.g. the **INT Nav Chg** at `0x3A3B4B`
@@ -488,27 +545,37 @@ A **1-byte boolean write is ignored** by at least the CombiMaster — booleans m
 be the full 4-byte float. The device confirms by pushing the new value (class
 `0x08`); the immediate echo is unreliable, so confirm by re-reading.
 
-### 7.3 Relay-control "commit" token
+### 7.3 Relay-control commit: naming the writer
 
-Some controls do **not** act on the value write alone. Toggling the CombiMaster's
-**inverter** or **charger** emits the value write **plus** a second write to an
-**adjacent hidden command register** at `field_index + 1`, carrying a fixed token:
+Some controls do **not** act on the value write alone. After it, the writer
+writes its own **BusID** (§3a) to an **adjacent hidden command register** at
+`field_index + 1`:
 
 ```
-inverter on:   [0x13, 0x00, 00 00 80 3f]   then  [0x14, 0x00, 14 9f 3c 02]
-charger  off:  [0x15, 0x00, 00 00 00 00]   then  [0x16, 0x00, 14 9f 3c 02]
+[field_index + 1, 0x00, BusID >> 24, BusID & 0xFF, (BusID >> 8) & 0xFF, (BusID >> 16) & 0xFF]
 ```
 
-The token `14 9f 3c 02` is **constant** — identical for inverter and charger, for
-on and off, and across sessions (not a counter, timestamp, or checksum). The
-command register (`0x14`, `0x16`) is **write-only**: absent from the schema, it
-returns no value when read. Without the commit write the value write is accepted
-but the relay does not change.
+Captured examples:
 
-A safe rule for emitting it: send the token after a boolean write **only when
+```
+MasterAdjust, inverter on:   [0x13, 0x00, 00 00 80 3f]   then  [0x14, 0x00, 14 9f 3c 02]
+EasyView event, stop charge: [0x27, 0x00, 00 00 80 3f]   then  [0x28, 0x00, 14 f9 94 02]
+```
+
+`14 9f 3c 02` is MasterAdjust's BusID `0x14023C9F`; `14 f9 94 02` is the
+EasyView's own, `0x140294F9`. The command register is **write-only** in the
+schema, but a device pushes its new value (the writer's BusID) as a class
+`0x08` value. Without the commit write the value write is accepted but the
+output does not change.
+
+The device does **not** check the writer: a DSD acts on a commit naming a
+BusID no device on the bus has, in any class (#29). It sends nothing to that
+address.
+
+A safe rule for emitting it: send the commit after a boolean write **only when
 `field_index + 1` is not a real schema field**, so devices that don't use this
 pattern are never disturbed. Float and list writes (e.g. an AC-input limit or a
-drop-down) need no commit write.
+drop-down) need no commit write. Never name a BusID a device on the bus has.
 
 ---
 
@@ -648,11 +715,12 @@ sibling `Event N target`.
 > fields don't reply. So querying it blocking on every field pays a full timeout
 > on the silent majority. Query it *best-effort* (the reply, when it comes,
 > arrives with the rest of the field's metadata batch) and only on Monitoring
-> fields. MasterAdjust sidesteps this entirely by reading the *count* of
-> eventables from the device-level selector `[0x08, 0x0D]` and a device-level
-> eventable-list collection (`MB_Device_General_Count`); the wire query for the
-> list items themselves isn't reversed yet — the per-field best-effort probe is
-> what this crate uses.
+> fields — or ask the device for the list: `[0x08, 0x40 + K]` (§4.3) answers
+> the field index of eventable output `K`, and stops answering past the last.
+> A DSD answers `03 05 07 09 0B 0D 0F 11 13 15 2E 31` (12 outputs), and the
+> APR answers `0x43` with `0x27`, its 4th output. `[0x08, 0x0D]`, which
+> MasterAdjust reads in its `MB_Device_General_Count` sweep, is **not** the
+> count: that DSD answers `0x2C`.
 
 ---
 

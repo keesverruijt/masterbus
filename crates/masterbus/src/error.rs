@@ -41,6 +41,15 @@ pub enum Error {
     #[error("field is read-only")]
     ReadOnly,
 
+    /// A device on the bus announces the address of our own BusID, so a
+    /// write that names us as its writer would name that device. Set another
+    /// `bus_id` in `config.ini`.
+    #[error("bus id {bus_id:08X} is in use by a device on the bus")]
+    BusIdInUse {
+        /// Our own BusID.
+        bus_id: u32,
+    },
+
     /// A string-write payload violated the device-side constraint: editable
     /// strings on MasterBus are limited to 16 bytes of printable ASCII (no
     /// embedded NUL — the NUL is the on-wire terminator).

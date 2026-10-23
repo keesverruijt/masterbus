@@ -116,6 +116,9 @@ impl MasterBus {
         if config.heartbeat_master.is_none() {
             config.heartbeat_master = file.heartbeat_master;
         }
+        if config.bus_id.is_none() {
+            config.bus_id = file.bus_id;
+        }
         // Cache dir: explicit Config override wins; else the file's value, with
         // a fallback to $HOME/.cache/masterbus when the file's path isn't
         // writable by this user. `None` in the file means caching is off.
@@ -125,6 +128,11 @@ impl MasterBus {
             }
         }
         Ok((file, config))
+    }
+
+    /// Our own BusID: the writer every commit write names (PROTOCOL.md §7.3).
+    pub fn bus_id(&self) -> u32 {
+        self.engine.config.bus_id.unwrap_or_default()
     }
 
     /// Currently-alive devices.
