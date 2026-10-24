@@ -21,15 +21,13 @@ reviews:
     drafts: false
     ignore_title_keywords:
       - "[skip review]"
-      - "WIP"
+      - "[WIP]"
 
   path_filters:
     - "!Cargo.lock"
     - "!target/**"
     # Captured bus snapshots, data rather than code.
     - "!samples/*.json"
-    # Written by cbindgen from crates/masterbus-ffi/src.
-    - "!crates/masterbus-ffi/include/masterbus.h"
 
   path_instructions:
     - path: "**/*"
