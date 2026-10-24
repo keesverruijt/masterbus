@@ -22,9 +22,9 @@ use crate::error::{Error, Result};
 use crate::model::{AccessLevel, Channel, DeviceId, FieldId, field_id};
 use crate::model::{DeviceIdentity, DeviceStatus, Menu};
 use crate::protocol::{
-    TAB_DEFAULT, VisualizationType, btm3_read_raw, btm3_write_raw, decode_value, encode_commit,
-    encode_login_read, encode_login_write, encode_logout, encode_set_boolean, encode_set_float,
-    encode_set_list, heartbeat_raw, monitoring_req_raw, string_chunk_write_raw,
+    TAB_DEFAULT, VisualizationType, addr_for_bus_id, btm3_read_raw, btm3_write_raw, decode_value,
+    encode_commit, encode_login_read, encode_login_write, encode_logout, encode_set_boolean,
+    encode_set_float, encode_set_list, heartbeat_raw, monitoring_req_raw, string_chunk_write_raw,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
@@ -659,6 +659,11 @@ impl Sched {
         Ok(reported)
     }
 
+    /// Our own BusID; `Engine::connect` always sets one.
+    fn bus_id(&self) -> u32 {
+        self.config.bus_id.unwrap_or_else(crate::bus_id::generate)
+    }
+
     fn do_write(&mut self, addr: DeviceId, field: FieldId, value: WriteValue) -> Result<Value> {
         log::info!(
             target: "masterbus::write",
@@ -685,6 +690,14 @@ impl Sched {
                 // hidden. If a *named* user-facing field is in the way,
                 // refuse the write rather than silently failing to actuate.
                 if matches!(value, WriteValue::Bool(_)) {
+                    // The commit names us as the writer; never name a device
+                    // that is on the bus.
+                    let own = addr_for_bus_id(self.bus_id());
+                    if self.state.status(own, self.config.liveness) != DeviceStatus::Offline {
+                        return Err(Error::BusIdInUse {
+                            bus_id: self.bus_id(),
+                        });
+                    }
                     let cmd = field + 1;
                     let cmd_field = self.state.schema(addr).and_then(|s| s.field(cmd).cloned());
                     if let Some(f) = &cmd_field {
@@ -714,9 +727,14 @@ impl Sched {
                     let cmd = field + 1;
                     log::info!(
                         target: "masterbus::write",
-                        "  emitting commit token at fid 0x{cmd:04X}",
+                        "  emitting commit at fid 0x{cmd:04X} as {:08X}",
+                        self.bus_id(),
                     );
-                    self.send(encode_commit(addr, field_id::wire_index(cmd)));
+                    self.send(encode_commit(
+                        addr,
+                        field_id::wire_index(cmd),
+                        self.bus_id(),
+                    ));
                 }
             }
             Channel::Btm3 => {
@@ -951,6 +969,7 @@ mod tests {
             connect_timeout: Duration::from_secs(5),
             liveness: Duration::from_millis(200),
             cache_path: None,
+            bus_id: Some(0x1C012345),
             ..Config::default()
         }
     }
@@ -1130,9 +1149,9 @@ mod tests {
     }
 
     /// Relay-style booleans only actuate when the value write is followed by
-    /// the commit token at the adjacent hidden register.
+    /// a commit naming us at the adjacent hidden register.
     #[test]
-    fn a_boolean_write_is_followed_by_the_commit_token() {
+    fn a_boolean_write_is_followed_by_the_commit() {
         let (engine, bus) = connect(Device::new(), test_config());
         let f = field_id::btm1(0x13);
         seed_schema(
@@ -1160,8 +1179,8 @@ mod tests {
             writes,
             vec![
                 vec![0x13, 0x00, 0x00, 0x00, 0x80, 0x3F],
-                // The commit token itself, captured from MasterAdjust.
-                vec![0x14, 0x00, 0x14, 0x9F, 0x3C, 0x02],
+                // The commit, naming our BusID 1C012345.
+                vec![0x14, 0x00, 0x1C, 0x45, 0x23, 0x01],
             ]
         );
     }
@@ -1258,6 +1277,54 @@ mod tests {
         ));
         // Nothing went out: the refusal happens before the value write.
         assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
+    }
+
+    /// A commit must never name a device on the bus: with our BusID's
+    /// address in use, the write is refused before anything is sent.
+    #[test]
+    fn a_boolean_write_is_refused_when_our_bus_id_is_in_use() {
+        let config = test_config();
+        let (ours, liveness) = (
+            crate::bus_id::addr_for_bus_id(config.bus_id.unwrap()),
+            config.liveness,
+        );
+        let mut impostor = Device::new();
+        impostor.addr = ours;
+        let (bus, transport) = FakeBus::start_many(vec![Device::new(), impostor]);
+        let engine = Engine::connect(transport, config).expect("connect");
+        // `connect` returns at the first device heard, which may be the other.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while engine.state.status(ours, liveness) == DeviceStatus::Offline {
+            assert!(Instant::now() < deadline, "the impostor was never heard");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let f = field_id::btm1(0x13);
+        seed_schema(
+            &engine,
+            vec![
+                field(f, "Inverter", VisualizationType::CheckBox),
+                field(f + 1, "", VisualizationType::Float),
+            ],
+        );
+
+        let err = engine.write(ADDR, f, WriteValue::Bool(true)).unwrap_err();
+        assert!(matches!(err, Error::BusIdInUse { .. }), "{err:?}");
+        assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
+    }
+
+    /// A BusID in a class firmware treats specially is refused up front,
+    /// before anything could name it as a writer.
+    #[test]
+    fn a_reserved_bus_id_is_refused_at_connect() {
+        for bus_id in [0x0600_0001, 0x1F01_2345] {
+            let (_bus, transport) = FakeBus::start(Device::new());
+            let config = Config {
+                bus_id: Some(bus_id),
+                ..test_config()
+            };
+            let err = Engine::connect(transport, config).err().expect("refused");
+            assert!(matches!(err, Error::InvalidBusId { .. }), "{err:?}");
+        }
     }
 
     /// Every Btm3 write is a 4-byte f32 — a list pick goes as its index — and

@@ -10,6 +10,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **One-line install.** `install.sh` (Linux and macOS) and `install.ps1`
   (Windows) download the latest release for the computer they run on and
   install the four tools; the README and ENDUSER.md show the line to paste.
+- `MasterBus::bus_id`, and `MasterBus::joined_transport` for a tool that
+  sends its own frames over the connection `auto_joined` would use.
+
+### Changed
+- **Switches are committed in our own name.** A relay-style switch (the
+  CombiMaster's inverter and charger, a DC distributor's outputs) acts only
+  when a second write names the writer's BusID. We sent the BusID of the
+  MasterAdjust setup the write was first captured from. Now each host makes
+  up its own, in a device class no Mastervolt product uses, and keeps it in
+  `config.ini` as `bus_id`; an existing file gets one added on the next run.
+  A write is refused if a device on the bus has the same id, and a `bus_id`
+  in a class firmware treats specially (0x00–0x09, 0x1F) is refused at
+  connect. The
+  `protocol::encode_commit` function takes the writer's BusID. (#29)
 
 ### Fixed
 - **Opening the USB link no longer disturbs a Raspberry Pi 3's USB

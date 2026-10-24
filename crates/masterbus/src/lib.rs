@@ -128,6 +128,7 @@
 #![allow(dead_code)]
 
 pub mod api;
+pub mod bus_id;
 pub mod error;
 pub mod model;
 pub mod protocol;

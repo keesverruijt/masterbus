@@ -78,6 +78,17 @@ impl MasterBus {
     /// announces itself as bus master; the daemon does that. Returns the
     /// relay's address when one was joined.
     pub fn auto_joined(config: Config) -> Result<(Self, Option<std::net::SocketAddr>)> {
+        let (transport, relay, config) = Self::joined_transport(config)?;
+        Ok((Self::with_transport(transport, config)?, relay))
+    }
+
+    /// The bare connection [`auto_joined`](Self::auto_joined) runs on, for a
+    /// tool that sends its own frames: the daemon's shared one when there is
+    /// one, else the one the config file names. Also returns the relay's
+    /// address when one was joined, and `config` completed from the file.
+    pub fn joined_transport(
+        config: Config,
+    ) -> Result<(Box<dyn Transport>, Option<std::net::SocketAddr>, Config)> {
         // Without a config file (a machine where the daemon is the only way
         // to the bus, or no hardware to auto-detect) the relay is still
         // looked for in the per-user cache.
@@ -85,6 +96,9 @@ impl MasterBus {
             Ok((f, c)) => (Ok(f), c),
             Err(e) => (Err(e), config),
         };
+        // A tool that commits its own writes needs a BusID even when the
+        // file couldn't give one.
+        config.bus_id.get_or_insert_with(crate::bus_id::generate);
         let dirs: Vec<std::path::PathBuf> = config
             .cache_path
             .iter()
@@ -94,12 +108,9 @@ impl MasterBus {
         if let Some(t) = crate::transport::relay::find(&dirs) {
             let addr = t.addr();
             config.heartbeat_master = None;
-            return Ok((Self::with_transport(Box::new(t), config)?, Some(addr)));
+            return Ok((Box::new(t), Some(addr), config));
         }
-        Ok((
-            Self::with_transport(open_file_transport(&file?)?, config)?,
-            None,
-        ))
+        Ok((open_file_transport(&file?)?, None, config))
     }
 
     /// The config file, and `config` completed from it.
@@ -107,6 +118,9 @@ impl MasterBus {
         let file = FileConfig::load_or_create()?;
         if config.heartbeat_master.is_none() {
             config.heartbeat_master = file.heartbeat_master;
+        }
+        if config.bus_id.is_none() {
+            config.bus_id = file.bus_id;
         }
         // Cache dir: explicit Config override wins; else the file's value, with
         // a fallback to $HOME/.cache/masterbus when the file's path isn't
@@ -117,6 +131,11 @@ impl MasterBus {
             }
         }
         Ok((file, config))
+    }
+
+    /// Our own BusID: the writer every commit write names (PROTOCOL.md §7.3).
+    pub fn bus_id(&self) -> u32 {
+        self.engine.config.bus_id.unwrap_or_default()
     }
 
     /// Currently-alive devices.
