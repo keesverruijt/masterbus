@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **One-line install.** `install.sh` (Linux and macOS) and `install.ps1`
+  (Windows) download the latest release for the computer they run on and
+  install the four tools; the README and ENDUSER.md show the line to paste.
+
 ### Fixed
 - **Opening the USB link no longer disturbs a Raspberry Pi 3's USB
   controller.** To find the link, the HID library listed every HID device

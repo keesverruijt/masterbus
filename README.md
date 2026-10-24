@@ -20,6 +20,33 @@ mapping your devices with `masterbus-tui --mapping`. To improve what the
 project ships for everyone, [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the
 toolchain and using an AI assistant to do the typing.
 
+## Install
+
+The four command-line tools (`masterbus-tui`, `masterbus-signalk`,
+`masterbus-set-field`, `masterbus-dump`) install with one line. It
+downloads the latest release for your computer; nothing needs building.
+
+**Linux** (including Raspberry Pi) **and macOS**, in a terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/keesverruijt/masterbus/main/install.sh | sh
+```
+
+The tools go to `/usr/local/bin`, so it may ask for your password.
+
+**Windows**, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/keesverruijt/masterbus/main/install.ps1 | iex
+```
+
+The tools go to `%LOCALAPPDATA%\Programs\masterbus`, which is added to your
+PATH; open a new window before using them.
+
+Then run `masterbus-tui`. Run the same line again to update. The release
+tarballs (which also carry the C library and the systemd unit) are on the
+[releases page](https://github.com/keesverruijt/masterbus/releases).
+
 ## Background
 
 For years I've been struggling with the following. After some struggles with

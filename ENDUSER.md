@@ -18,14 +18,21 @@ A computer that can reach the bus. Two options, both covered in
   (~€25), a PiCAN HAT on a Raspberry Pi, or any SocketCAN-capable port.
   Bring up `can0` at 250 kbit/s and you're set.
 
-Then download the latest binary release from
-<https://github.com/keesverruijt/masterbus/releases> — there is a tarball
-per platform (Linux x86_64 / armv7 / aarch64, macOS Intel / Apple Silicon,
-Windows). Every tarball carries `masterbus-tui`, `masterbus-set-field`
-and `masterbus-dump`, plus `masterbus-signalk` and its systemd unit on
-Linux. Or build from source: `cargo build --release` produces the same
-binaries under `target/release/`; [CONTRIBUTING.md](CONTRIBUTING.md)
-walks through installing the toolchain.
+Then install the tools. On Linux (including a Raspberry Pi) or macOS,
+paste this into a terminal:
+
+    curl -fsSL https://raw.githubusercontent.com/keesverruijt/masterbus/main/install.sh | sh
+
+On Windows, paste this into PowerShell, then open a new window:
+
+    irm https://raw.githubusercontent.com/keesverruijt/masterbus/main/install.ps1 | iex
+
+That installs `masterbus-tui`, `masterbus-signalk`, `masterbus-set-field`
+and `masterbus-dump`. Run the same line again to update. If you would
+rather download by hand, there is a tarball per platform on
+<https://github.com/keesverruijt/masterbus/releases>. Or build from
+source: [CONTRIBUTING.md](CONTRIBUTING.md) walks through installing the
+toolchain.
 
 ## First steps: explore the bus
 
