@@ -1,0 +1,49 @@
+name: install
+
+# Runs the one-line installers against the latest release, on each OS they
+# claim to support, whenever they change.
+on:
+  push:
+    branches: [main]
+    paths: [install.sh, install.ps1, .github/workflows/install.yml]
+  pull_request:
+    paths: [install.sh, install.ps1, .github/workflows/install.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-sh:
+    name: install.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install to /usr/local/bin, as a user would
+        run: sh install.sh < /dev/null
+      - name: Run the tools
+        run: |
+          for t in masterbus-tui masterbus-signalk masterbus-set-field masterbus-dump; do
+            "$t" --version
+          done
+
+  install-ps1:
+    name: install.ps1 (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, as a user would
+        shell: powershell
+        run: Get-Content -Raw install.ps1 | Invoke-Expression
+      - name: Run the tools from the user PATH
+        shell: powershell
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+          foreach ($t in 'masterbus-tui', 'masterbus-signalk', 'masterbus-set-field', 'masterbus-dump') {
+            & $t --version
+            if ($LASTEXITCODE -ne 0) { throw "$t failed" }
+          }
