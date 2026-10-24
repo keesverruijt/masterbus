@@ -587,7 +587,7 @@ against incoming frames:
 | Exchange                | Key                                            |
 |-------------------------|------------------------------------------------|
 | Monitoring value (0x08) | `(device_addr, tab_index, field_index)`        |
-| Property (0x06)         | `p:{addr}:{data[0]}:{data[1]}`                 |
+| Property (0x06)         | `p:{addr}:{data[0]}:{data[1]}`; the 2-byte refusal of `[0x08, 0x40 + K]` from `addr \| 0x800000` matches the real address |
 | String chunk (0x06,0x30)| `str:{addr}:{str_id}:{seq}` (seq from data[3]) |
 | Schema (0x09)           | `schema:{addr}:{op}:{group}` (+`:{idx}` for 0x03 field-id, idx in data[3]) |
 | Btm1 metadata (0x08, hi bit) | `btm1_meta:{real_addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |

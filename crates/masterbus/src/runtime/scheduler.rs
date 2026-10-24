@@ -1255,10 +1255,8 @@ mod tests {
             .into_iter()
             .filter(|(_, d)| d.len() == 2 && d[0] == 0x08 && d[1] >= 0x40)
             .count();
-        assert!(
-            (5..=5 + test_config().discovery_retries).contains(&asked),
-            "four outputs and the refused fifth, asked once: {asked}"
-        );
+        // The refusal after the last ends the list without a retry.
+        assert_eq!(asked, 5, "four outputs and the refused fifth, asked once");
     }
 
     /// An APR's `Stop charge` is an output no menu shows and no write may

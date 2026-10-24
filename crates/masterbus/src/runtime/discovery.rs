@@ -716,9 +716,9 @@ pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<Field
 
 /// The field ids of a device's eventable outputs, output `K` at position `K`,
 /// as the device lists them: `[0x08, 0x40 + K]` answers the field index of
-/// output `K` (PROTOCOL.md §4.3, §9a). The list ends at the first selector
-/// the device does not answer, so a device that does not answer `K = 0`
-/// has none to drive.
+/// output `K` (PROTOCOL.md §4.3, §9a). The list ends at the device's
+/// refusal after the last, or at the first selector it does not answer, so
+/// a device that does not answer `K = 0` has none to drive.
 pub(super) fn eventable_outputs(disc: &mut Disc, addr: DeviceId) -> Vec<FieldId> {
     let mut out = Vec::new();
     for k in 0..=(0xFF - 0x40) {
