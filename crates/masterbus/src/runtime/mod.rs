@@ -163,6 +163,16 @@ pub(crate) enum Command {
         value: WriteValue,
         reply: Sender<Result<Value>>,
     },
+    EventableOutputs {
+        addr: DeviceId,
+        reply: Sender<Result<Vec<FieldId>>>,
+    },
+    SetOutput {
+        addr: DeviceId,
+        field: FieldId,
+        on: bool,
+        reply: Sender<Result<Value>>,
+    },
     WriteString {
         addr: DeviceId,
         str_id: u16,
@@ -377,6 +387,23 @@ impl Engine {
             addr,
             field,
             value,
+            reply,
+        })?
+    }
+
+    /// The field ids of the device's eventable outputs, output `K` at
+    /// position `K`, as the device lists them (PROTOCOL.md §9a).
+    pub fn eventable_outputs(&self, addr: DeviceId) -> Result<Vec<FieldId>> {
+        self.call(|reply| Command::EventableOutputs { addr, reply })?
+    }
+
+    /// Switch one of the device's eventable outputs on or off; returns the
+    /// value observed afterwards.
+    pub fn set_output(&self, addr: DeviceId, field: FieldId, on: bool) -> Result<Value> {
+        self.call(|reply| Command::SetOutput {
+            addr,
+            field,
+            on,
             reply,
         })?
     }

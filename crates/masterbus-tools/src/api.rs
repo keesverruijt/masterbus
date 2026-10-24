@@ -54,6 +54,11 @@ pub trait BusOps: Send + Sync {
     fn write(&self, id: DeviceId, field: FieldId, value: Value) -> masterbus::Result<Value>;
     /// Log a device in at a level; returns the level it reports afterwards.
     fn login(&self, id: DeviceId, level: AccessLevel, code: f32) -> masterbus::Result<AccessLevel>;
+    /// The field ids of a device's eventable outputs, as the device lists them.
+    fn eventable_outputs(&self, id: DeviceId) -> masterbus::Result<Vec<FieldId>>;
+    /// Switch an eventable output the way an event does; returns the value
+    /// observed afterwards.
+    fn set_output(&self, id: DeviceId, field: FieldId, on: bool) -> masterbus::Result<Value>;
 }
 
 impl BusOps for MasterBus {
@@ -71,6 +76,12 @@ impl BusOps for MasterBus {
     }
     fn login(&self, id: DeviceId, level: AccessLevel, code: f32) -> masterbus::Result<AccessLevel> {
         self.device(id).login(level, code)
+    }
+    fn eventable_outputs(&self, id: DeviceId) -> masterbus::Result<Vec<FieldId>> {
+        self.device(id).eventable_output_fields()
+    }
+    fn set_output(&self, id: DeviceId, field: FieldId, on: bool) -> masterbus::Result<Value> {
+        self.device(id).field(field).set_output(on)
     }
 }
 
@@ -116,6 +127,9 @@ pub struct Shared {
     /// Fields already asked of a device on their own (see `ensure_menus`),
     /// so one the device doesn't have is not asked again on every reload.
     pub asked: Mutex<HashSet<(DeviceId, FieldId)>>,
+    /// Each device's eventable outputs, once the editor has opened it (see
+    /// `ensure_outputs`).
+    pub outputs: Mutex<HashMap<DeviceId, Vec<FieldId>>>,
 }
 
 impl Shared {
@@ -223,6 +237,53 @@ impl Shared {
                 );
             }
         }
+    }
+
+    /// Ask a device once for its eventable outputs, and add the ones no
+    /// menu lists to its fields, so the editor can map them. An APR's
+    /// `Stop charge` is such an output (#29). Bus access happens outside
+    /// the lock.
+    fn ensure_outputs(&self, id: DeviceId) {
+        if self.outputs.lock().unwrap().contains_key(&id) {
+            return;
+        }
+        let outputs = match self.bus.eventable_outputs(id) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("masterbus-signalk: 0x{id:06X}: could not list its outputs: {e}");
+                return;
+            }
+        };
+        let unlisted: Vec<FieldId> = {
+            let devices = self.devices.lock().unwrap();
+            let Some(d) = devices.iter().find(|d| d.id == id) else {
+                return;
+            };
+            outputs
+                .iter()
+                .copied()
+                .filter(|f| d.field(*f).is_none())
+                .collect()
+        };
+        let found: Vec<FieldInfo> = unlisted
+            .into_iter()
+            .filter_map(|f| self.bus.field_info(id, f).ok().flatten())
+            .collect();
+        if !found.is_empty() {
+            let mut devices = self.devices.lock().unwrap();
+            if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                d.merge_groups(
+                    publish::MENU,
+                    vec![GroupInfo {
+                        id: -1,
+                        name: "Outputs".into(),
+                        menu: publish::MENU,
+                        fields: found,
+                    }],
+                );
+            }
+        }
+        self.outputs.lock().unwrap().insert(id, outputs);
     }
 
     /// Put a new mapping in force: persist, replace, re-resolve, tell the
@@ -357,19 +418,31 @@ fn devices(shared: &Shared) -> Response {
     let devices = shared.devices.lock().unwrap();
     let mapping = shared.mapping.lock().unwrap();
     let values = shared.values.lock().unwrap();
+    let outputs = shared.outputs.lock().unwrap();
     let mut sorted: Vec<&DeviceRec> = devices.iter().collect();
     sorted.sort_by_key(|d| d.id);
     Response::ok(Json::Array(
         sorted
             .into_iter()
-            .map(|d| device_json(d, &mapping, &values))
+            .map(|d| device_json(d, &mapping, &values, outputs.get(&d.id)))
             .collect(),
     ))
 }
 
 /// One device; with `?menu=`, that menu is discovered first if it has not
-/// been, which is how the editor gets at Configuration fields.
+/// been, which is how the editor gets at Configuration fields. The device's
+/// eventable outputs are asked for the first time it is opened.
 fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
+    let id = shared
+        .devices
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|d| d.serial == serial)
+        .map(|d| d.id);
+    if let Some(id) = id {
+        shared.ensure_outputs(id);
+    }
     if let Some(m) = menu {
         let Some(menu) = menu_by_name(m) else {
             return Response::error(400, format!("unknown menu {m:?}"));
@@ -399,8 +472,9 @@ fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
     let devices = shared.devices.lock().unwrap();
     let mapping = shared.mapping.lock().unwrap();
     let values = shared.values.lock().unwrap();
+    let outputs = shared.outputs.lock().unwrap();
     match devices.iter().find(|d| d.serial == serial) {
-        Some(d) => Response::ok(device_json(d, &mapping, &values)),
+        Some(d) => Response::ok(device_json(d, &mapping, &values, outputs.get(&d.id))),
         None => Response::error(404, format!("no device with serial {serial}")),
     }
 }
@@ -409,6 +483,7 @@ fn device_json(
     d: &DeviceRec,
     mapping: &Mapping,
     values: &HashMap<(DeviceId, FieldId), Value>,
+    outputs: Option<&Vec<FieldId>>,
 ) -> Json {
     let dm = mapping.devices.get(&d.serial);
     let fields: Vec<Json> = d
@@ -426,6 +501,8 @@ fn device_json(
                 "group": f.group,
                 "path": entry.map(|e| e.path.clone()),
                 "put": entry.is_some_and(|e| e.put),
+                "output": outputs.is_some_and(|o| o.contains(&f.id)),
+                "allowOff": entry.is_some_and(|e| e.allow_off),
                 "value": values.get(&(d.id, f.id)).map(raw_json),
             })
         })
@@ -585,6 +662,35 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
         Ok(v) => v,
         Err(e) => return Response::error(400, e),
     };
+    // An eventable output the device won't let us write is switched the
+    // way an event switches it: on always, off only when the mapping allows
+    // it (#29).
+    if !f.writable
+        && shared
+            .bus
+            .eventable_outputs(d.id)
+            .is_ok_and(|o| o.contains(&f.id))
+    {
+        let Some(on) = switched_on(&value) else {
+            return Response::error(400, format!("{} takes on or off", f.name));
+        };
+        if !on && !entry.as_ref().is_some_and(|e| e.allow_off) {
+            return Response {
+                status: 403,
+                body: json!({
+                    "error": format!(
+                        "{} can only be switched on from Signal K; allow switching it off in the mapping",
+                        f.name
+                    ),
+                    "needs": "allowOff",
+                }),
+            };
+        }
+        return match shared.bus.set_output(d.id, f.id, on) {
+            Ok(applied) => written(shared, &d, &f, applied, conv, invert, &truth),
+            Err(e) => Response::error(502, format!("switching {}: {e}", f.name)),
+        };
+    }
     let mut result = shared.bus.write(d.id, f.id, value.clone());
     if matches!(result, Err(Error::ReadOnly))
         && let Some(login) = &body.login
@@ -607,18 +713,7 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
         }
     }
     match result {
-        Ok(applied) => {
-            let applied = applied.with_options(&f.options);
-            shared
-                .values
-                .lock()
-                .unwrap()
-                .insert((d.id, f.id), applied.clone());
-            Response::ok(json!({
-                "applied": raw_json(&applied),
-                "published": signalk::encode(&applied, conv, invert, &truth),
-            }))
-        }
+        Ok(applied) => written(shared, &d, &f, applied, conv, invert, &truth),
         Err(Error::ReadOnly) => Response {
             status: 403,
             body: json!({
@@ -631,6 +726,40 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
         }
         Err(e) => Response::error(502, format!("writing {}: {e}", f.name)),
     }
+}
+
+/// Whether a decoded PUT value means on: a boolean, or a number or list
+/// index other than zero.
+fn switched_on(v: &Value) -> Option<bool> {
+    match v {
+        Value::Boolean(b) => Some(*b),
+        Value::Float(x) => Some(*x != 0.0),
+        Value::List { index, .. } => Some(*index != 0),
+        _ => None,
+    }
+}
+
+/// The answer to a write that went through: the value the device shows
+/// now, raw and as the path publishes it.
+fn written(
+    shared: &Shared,
+    d: &DeviceRec,
+    f: &crate::publish::FieldRec,
+    applied: Value,
+    conv: Conversion,
+    invert: bool,
+    truth: &BTreeMap<String, bool>,
+) -> Response {
+    let applied = applied.with_options(&f.options);
+    shared
+        .values
+        .lock()
+        .unwrap()
+        .insert((d.id, f.id), applied.clone());
+    Response::ok(json!({
+        "applied": raw_json(&applied),
+        "published": signalk::encode(&applied, conv, invert, truth),
+    }))
 }
 
 fn put_mapping(shared: &Shared, body: &[u8]) -> Response {
@@ -738,10 +867,11 @@ fn validate(shared: &Shared, body: &[u8]) -> Response {
         Ok(b) => b,
         Err(e) => return Response::error(400, format!("body: {e}")),
     };
-    let (_d, f) = match locate(shared, &b.serial, &b.field) {
+    let (d, f) = match locate(shared, &b.serial, &b.field) {
         Ok(x) => x,
         Err(r) => return r,
     };
+    let f_device = d.id;
     let path = b.entry.path.trim();
     if path.is_empty() {
         return Response::ok(
@@ -758,7 +888,20 @@ fn validate(shared: &Shared, body: &[u8]) -> Response {
                     signalk::mode_leaf(path)
                 ));
             }
-            if b.entry.put && !f.writable {
+            let output = !f.writable
+                && shared
+                    .outputs
+                    .lock()
+                    .unwrap()
+                    .get(&f_device)
+                    .is_some_and(|o| o.contains(&f.id));
+            if b.entry.put && output && !b.entry.allow_off {
+                warnings.push(format!(
+                    "{} is an output the device's own events also drive; a PUT can only switch it on",
+                    f.name
+                ));
+            }
+            if b.entry.put && !f.writable && !output {
                 warnings.push("the field is read-only at the current access level; a PUT needs an installer login".into());
             }
             Response::ok(json!({
@@ -909,6 +1052,10 @@ mod tests {
         /// Fields that answer when asked for on their own.
         fields: Mutex<HashMap<(DeviceId, FieldId), FieldInfo>>,
         field_asks: Mutex<usize>,
+        /// Each device's eventable outputs.
+        outputs: Mutex<HashMap<DeviceId, Vec<FieldId>>>,
+        /// Outputs switched, in order.
+        switched: Mutex<Vec<(DeviceId, FieldId, bool)>>,
     }
 
     impl StubBus {
@@ -923,6 +1070,8 @@ mod tests {
                 discoveries: Mutex::new(0),
                 fields: Mutex::new(HashMap::new()),
                 field_asks: Mutex::new(0),
+                outputs: Mutex::new(HashMap::new()),
+                switched: Mutex::new(Vec::new()),
             });
             (StubBus(state.clone()), state)
         }
@@ -990,6 +1139,22 @@ mod tests {
             }
             Ok(*self.0.level.lock().unwrap())
         }
+        fn eventable_outputs(&self, id: DeviceId) -> masterbus::Result<Vec<FieldId>> {
+            Ok(self
+                .0
+                .outputs
+                .lock()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .unwrap_or_default())
+        }
+        fn set_output(&self, id: DeviceId, field: FieldId, on: bool) -> masterbus::Result<Value> {
+            self.0.switched.lock().unwrap().push((id, field, on));
+            let v = Value::Float(if on { 1.0 } else { 0.0 });
+            self.0.values.lock().unwrap().insert((id, field), v.clone());
+            Ok(v)
+        }
     }
 
     fn shared_with(
@@ -1016,6 +1181,7 @@ mod tests {
             streaming: AtomicUsize::new(0),
             clients: AtomicUsize::new(0),
             asked: Mutex::new(HashSet::new()),
+            outputs: Mutex::new(HashMap::new()),
         };
         (Arc::new(shared), rx)
     }
@@ -1605,6 +1771,121 @@ mod tests {
             )
             .status,
             400
+        );
+    }
+
+    /// An APR-like device: `Stop charge` (`0x027`) is its fourth eventable
+    /// output, which no menu lists and no write may reach (#29).
+    fn apr() -> (Arc<Shared>, Arc<StubState>, DeviceId) {
+        let d = dev("APR-1", "APR ALT 110A", &[(0x005, "Charger state", "")]);
+        let id = d.id;
+        let (bus, state) = StubBus::new(0.0);
+        state
+            .outputs
+            .lock()
+            .unwrap()
+            .insert(id, [0x021, 0x023, 0x025, 0x027].to_vec());
+        state.fields.lock().unwrap().insert(
+            (id, 0x027),
+            masterbus::FieldInfo {
+                index: 0x027,
+                name: "Stop charge".into(),
+                unit: String::new(),
+                viz_type: masterbus::VisualizationType::Float,
+                writeable: false,
+                eventable: true,
+                min: 0.0,
+                max: 1.0,
+                step: 1.0,
+                options: vec![],
+            },
+        );
+        state
+            .values
+            .lock()
+            .unwrap()
+            .insert((id, 0x027), Value::Float(0.0));
+        let (shared, _) = shared_with(bus, vec![d], Mapping::new());
+        (shared, state, id)
+    }
+
+    /// Opening a device asks it once for its eventable outputs, and the ones
+    /// no menu lists become fields the editor can map.
+    #[test]
+    fn opening_a_device_adds_the_outputs_no_menu_lists() {
+        let (shared, state, _) = apr();
+        let r = get(&shared, "/api/devices/APR-1");
+        assert_eq!(r.status, 200, "{}", r.body);
+        let fields = r.body["fields"].as_array().unwrap();
+        let stop = fields
+            .iter()
+            .find(|f| f["id"] == "0x027")
+            .expect("Stop charge");
+        assert_eq!(stop["name"], "Stop charge");
+        assert_eq!(stop["output"], true);
+        assert_eq!(stop["writable"], false);
+        let state_field = fields.iter().find(|f| f["id"] == "0x005").unwrap();
+        assert_eq!(state_field["output"], false);
+        // The three outputs the stub can't describe are left out, and the
+        // list is not asked for again.
+        assert_eq!(fields.len(), 2);
+        assert_eq!(*state.field_asks.lock().unwrap(), 4);
+        get(&shared, "/api/devices/APR-1");
+        assert_eq!(*state.field_asks.lock().unwrap(), 4);
+    }
+
+    /// A PUT switches such an output on; off only when the mapping entry
+    /// allows it, since the batteries' own events drive it too.
+    #[test]
+    fn an_output_is_switched_off_only_when_the_mapping_allows_it() {
+        let (shared, state, id) = apr();
+        get(&shared, "/api/devices/APR-1");
+        let entry = |allow_off| FieldMapping {
+            path: "electrical.chargers.alternator.stopCharge".into(),
+            put: true,
+            allow_off,
+            ..Default::default()
+        };
+        let mut dm = DeviceMapping::default();
+        dm.fields.insert(field_key(0x027), entry(false));
+        shared
+            .mapping
+            .lock()
+            .unwrap()
+            .devices
+            .insert("APR-1".into(), dm);
+        let put = |v: Json| {
+            send(
+                &shared,
+                "PUT",
+                "/api/devices/APR-1/fields/0x027",
+                json!({ "value": v }),
+            )
+        };
+
+        let r = put(json!(1));
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["applied"], 1.0);
+        let r = put(json!(0));
+        assert_eq!(r.status, 403, "{}", r.body);
+        assert_eq!(r.body["needs"], "allowOff");
+        assert_eq!(*state.switched.lock().unwrap(), vec![(id, 0x027, true)]);
+        // Never through the ordinary write, which the device would refuse.
+        assert!(state.writes.lock().unwrap().is_empty());
+
+        shared
+            .mapping
+            .lock()
+            .unwrap()
+            .devices
+            .get_mut("APR-1")
+            .unwrap()
+            .fields
+            .insert(field_key(0x027), entry(true));
+        assert_eq!(put(json!(0)).status, 200);
+        assert_eq!(
+            *state.switched.lock().unwrap(),
+            vec![(id, 0x027, true), (id, 0x027, false)]
         );
     }
 
