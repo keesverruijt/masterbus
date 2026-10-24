@@ -36,6 +36,10 @@ use crate::seed;
 use crate::signalk;
 use crate::units::Conversion;
 
+/// How long a device's answer that it has no eventable outputs is kept
+/// before it is asked again.
+const NO_OUTPUTS_KEPT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// The version of the API's shapes. The plugin refuses to talk to a daemon
 /// whose `apiVersion` it does not know.
 pub const API_VERSION: u32 = 1;
@@ -127,9 +131,9 @@ pub struct Shared {
     /// Fields already asked of a device on their own (see `ensure_menus`),
     /// so one the device doesn't have is not asked again on every reload.
     pub asked: Mutex<HashSet<(DeviceId, FieldId)>>,
-    /// Each device's eventable outputs, once the editor has opened it (see
-    /// `ensure_outputs`).
-    pub outputs: Mutex<HashMap<DeviceId, Vec<FieldId>>>,
+    /// Each device's eventable outputs once asked (see `ensure_outputs`),
+    /// and when.
+    pub outputs: Mutex<HashMap<DeviceId, (Vec<FieldId>, Instant)>>,
 }
 
 impl Shared {
@@ -239,12 +243,16 @@ impl Shared {
         }
     }
 
-    /// Ask a device once for its eventable outputs, and add the ones no
-    /// menu lists to its fields, so the editor can map them. An APR's
-    /// `Stop charge` is such an output (#29). Bus access happens outside
-    /// the lock.
+    /// Ask a device for its eventable outputs, and add the ones no menu
+    /// lists to its fields, so the editor can map them. An APR's
+    /// `Stop charge` is such an output (#29). A list is kept; no outputs at
+    /// all is kept for [`NO_OUTPUTS_KEPT`], since a device that was asleep
+    /// may list them later, while a device that has none would otherwise
+    /// cost a timeout on every ask. Bus access happens outside the lock.
     fn ensure_outputs(&self, id: DeviceId) {
-        if self.outputs.lock().unwrap().contains_key(&id) {
+        if let Some((o, at)) = self.outputs.lock().unwrap().get(&id)
+            && (!o.is_empty() || at.elapsed() < NO_OUTPUTS_KEPT)
+        {
             return;
         }
         let outputs = match self.bus.eventable_outputs(id) {
@@ -283,7 +291,21 @@ impl Shared {
                 );
             }
         }
-        self.outputs.lock().unwrap().insert(id, outputs);
+        self.outputs
+            .lock()
+            .unwrap()
+            .insert(id, (outputs, Instant::now()));
+    }
+
+    /// Whether `field` is one of the device's eventable outputs, asking the
+    /// device if it has not been asked yet.
+    fn is_output(&self, id: DeviceId, field: FieldId) -> bool {
+        self.ensure_outputs(id);
+        self.outputs
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|(o, _)| o.contains(&field))
     }
 
     /// Put a new mapping in force: persist, replace, re-resolve, tell the
@@ -424,7 +446,7 @@ fn devices(shared: &Shared) -> Response {
     Response::ok(Json::Array(
         sorted
             .into_iter()
-            .map(|d| device_json(d, &mapping, &values, outputs.get(&d.id)))
+            .map(|d| device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o)))
             .collect(),
     ))
 }
@@ -474,7 +496,12 @@ fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
     let values = shared.values.lock().unwrap();
     let outputs = shared.outputs.lock().unwrap();
     match devices.iter().find(|d| d.serial == serial) {
-        Some(d) => Response::ok(device_json(d, &mapping, &values, outputs.get(&d.id))),
+        Some(d) => Response::ok(device_json(
+            d,
+            &mapping,
+            &values,
+            outputs.get(&d.id).map(|(o, _)| o),
+        )),
         None => Response::error(404, format!("no device with serial {serial}")),
     }
 }
@@ -665,12 +692,7 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
     // An eventable output the device won't let us write is switched the
     // way an event switches it: on always, off only when the mapping allows
     // it (#29).
-    if !f.writable
-        && shared
-            .bus
-            .eventable_outputs(d.id)
-            .is_ok_and(|o| o.contains(&f.id))
-    {
+    if !f.writable && shared.is_output(d.id, f.id) {
         let Some(on) = switched_on(&value) else {
             return Response::error(400, format!("{} takes on or off", f.name));
         };
@@ -888,13 +910,7 @@ fn validate(shared: &Shared, body: &[u8]) -> Response {
                     signalk::mode_leaf(path)
                 ));
             }
-            let output = !f.writable
-                && shared
-                    .outputs
-                    .lock()
-                    .unwrap()
-                    .get(&f_device)
-                    .is_some_and(|o| o.contains(&f.id));
+            let output = !f.writable && shared.is_output(f_device, f.id);
             if b.entry.put && output && !b.entry.allow_off {
                 warnings.push(format!(
                     "{} is an output the device's own events also drive; a PUT can only switch it on",
@@ -1056,6 +1072,7 @@ mod tests {
         outputs: Mutex<HashMap<DeviceId, Vec<FieldId>>>,
         /// Outputs switched, in order.
         switched: Mutex<Vec<(DeviceId, FieldId, bool)>>,
+        output_asks: Mutex<usize>,
     }
 
     impl StubBus {
@@ -1072,6 +1089,7 @@ mod tests {
                 field_asks: Mutex::new(0),
                 outputs: Mutex::new(HashMap::new()),
                 switched: Mutex::new(Vec::new()),
+                output_asks: Mutex::new(0),
             });
             (StubBus(state.clone()), state)
         }
@@ -1140,6 +1158,7 @@ mod tests {
             Ok(*self.0.level.lock().unwrap())
         }
         fn eventable_outputs(&self, id: DeviceId) -> masterbus::Result<Vec<FieldId>> {
+            *self.0.output_asks.lock().unwrap() += 1;
             Ok(self
                 .0
                 .outputs
@@ -1887,6 +1906,36 @@ mod tests {
             *state.switched.lock().unwrap(),
             vec![(id, 0x027, true), (id, 0x027, false)]
         );
+    }
+
+    /// A device with no outputs is not asked again on every PUT to a
+    /// read-only field; its answer is kept for a while.
+    #[test]
+    fn no_outputs_is_remembered_for_a_while() {
+        let mut d = mli();
+        d.fields[0].writable = false;
+        let id = d.id;
+        let (bus, state) = StubBus::new(0.0);
+        state
+            .values
+            .lock()
+            .unwrap()
+            .insert((id, 0x000), Value::Float(50.0));
+        let (shared, _) = shared_with(bus, vec![d], Mapping::new());
+        for _ in 0..3 {
+            let r = send(
+                &shared,
+                "PUT",
+                "/api/devices/MLI-1/fields/0x000",
+                json!({"value": 60}),
+            );
+            assert_eq!(r.body["needs"], "login", "{}", r.body);
+        }
+        assert_eq!(*state.output_asks.lock().unwrap(), 1);
+        // Once the answer is old, the device is asked again.
+        shared.outputs.lock().unwrap().get_mut(&id).unwrap().1 -= NO_OUTPUTS_KEPT;
+        get(&shared, "/api/devices/MLI-1");
+        assert_eq!(*state.output_asks.lock().unwrap(), 2);
     }
 
     /// A Signal K PUT of `true` on an inverted boolean writes `false` to the

@@ -693,12 +693,16 @@ impl Sched {
     /// boolean write and the commit naming us, whether or not the field is
     /// writable (#29). An output need not be on any menu (an APR's
     /// `Stop charge` is not), so its metadata is asked for on its own first,
-    /// for the read-back.
+    /// for the read-back. Without it nothing is sent: the switch would go
+    /// out and still report an error, and a caller that retried would
+    /// switch twice.
     fn do_set_output(&mut self, addr: DeviceId, field: FieldId, on: bool) -> Result<Value> {
         if !self.do_eventable_outputs(addr).contains(&field) {
             return Err(Error::NotAnOutput(field as i32));
         }
-        self.do_discover_field(addr, field);
+        if self.do_discover_field(addr, field).is_none() {
+            return Err(Error::FieldNotAvailable(field as i32));
+        }
         self.do_write(addr, field, WriteValue::Bool(on))
     }
 
@@ -1282,6 +1286,20 @@ mod tests {
             ]
         );
         assert_eq!(bus.device.lock().unwrap().btm1[&0x27], 1.0f32.to_le_bytes());
+    }
+
+    /// An output whose metadata does not come is not switched: the switch
+    /// would go out before the read-back failed, and a retry would switch it
+    /// again.
+    #[test]
+    fn an_output_without_metadata_is_not_switched() {
+        let device = Device::new().with_outputs(&[0x27]);
+        let (engine, bus) = connect(device, test_config());
+        let err = engine
+            .set_output(ADDR, field_id::btm1(0x27), true)
+            .unwrap_err();
+        assert!(matches!(err, Error::FieldNotAvailable(0x27)), "{err:?}");
+        assert!(writes(&bus).is_empty());
     }
 
     /// A field the device does not list as an output is not switched this
