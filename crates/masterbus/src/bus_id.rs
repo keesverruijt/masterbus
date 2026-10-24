@@ -12,10 +12,12 @@ pub use crate::protocol::{addr_for_bus_id, bus_id_for_addr};
 /// The product class of our own BusID.
 pub const CLASS: u8 = 0x1C;
 
-/// Whether `bus_id` is a BusID at all: bits 18..23 are unused, and the class
-/// is 5 bits.
+/// Whether `bus_id` can be ours: a BusID at all (bits 18..23 are unused, and
+/// the class is 5 bits), outside the classes firmware treats specially
+/// (PROTOCOL.md §3a): 0x00–0x09 are firmware-update sub-codes, and the MLI
+/// MK3 reads 0x1F as a wildcard.
 pub fn is_valid(bus_id: u32) -> bool {
-    bus_id & 0xE0FC_0000 == 0
+    bus_id & 0xE0FC_0000 == 0 && !matches!(bus_id >> 24, 0x00..=0x09 | 0x1F)
 }
 
 /// A fresh BusID in [`CLASS`] with random, non-zero low bits.
@@ -53,5 +55,14 @@ mod tests {
         assert!(is_valid(0x1B03FFFF));
         assert!(!is_valid(0x14FC0000));
         assert!(!is_valid(0x20000001));
+    }
+
+    #[test]
+    fn the_reserved_classes_are_not_valid() {
+        assert!(!is_valid(0x00000001));
+        assert!(!is_valid(0x09000001));
+        assert!(!is_valid(0x1F000001));
+        assert!(is_valid(0x0A000001));
+        assert!(is_valid(0x1E000001));
     }
 }

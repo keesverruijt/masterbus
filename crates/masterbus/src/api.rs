@@ -96,6 +96,9 @@ impl MasterBus {
             Ok((f, c)) => (Ok(f), c),
             Err(e) => (Err(e), config),
         };
+        // A tool that commits its own writes needs a BusID even when the
+        // file couldn't give one.
+        config.bus_id.get_or_insert_with(crate::bus_id::generate);
         let dirs: Vec<std::path::PathBuf> = config
             .cache_path
             .iter()

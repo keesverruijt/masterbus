@@ -29,7 +29,7 @@ to stderr on creation.
 
 ```ini
 heartbeat_master = 000001               # 24-bit hex; comment out to stay passive
-bus_id           = 1C02A4F7             # our own BusID; made up on first run
+# bus_id         = 1C02A4F7             # our own BusID; written on first run, don't copy
 device_type      = can                  # "usb" or "can"
 device_name      = can0                 # CAN iface, or USB-link serial (blank = first)
 cache_dir        = /var/lib/masterbus   # schema cache; comment out to disable

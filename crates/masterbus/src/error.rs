@@ -50,6 +50,14 @@ pub enum Error {
         bus_id: u32,
     },
 
+    /// `Config::bus_id` is not one this program can use as its own: a
+    /// malformed BusID, or one in a class firmware treats specially.
+    #[error("bus id {bus_id:08X} can't be ours (see masterbus::bus_id::is_valid)")]
+    InvalidBusId {
+        /// The BusID given.
+        bus_id: u32,
+    },
+
     /// A string-write payload violated the device-side constraint: editable
     /// strings on MasterBus are limited to 16 bytes of printable ASCII (no
     /// embedded NUL — the NUL is the on-wire terminator).

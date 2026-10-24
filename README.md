@@ -128,8 +128,9 @@ silent.
 heartbeat_master = 000001
 
 # Our own BusID, which a switch command names as its writer. Made up on
-# first run, in a device class no Mastervolt product uses.
-bus_id = 1C02A4F7
+# first run, in a device class no Mastervolt product uses, and written here;
+# leave it out of a file you write yourself, so each host gets its own.
+# bus_id = 1C02A4F7
 
 # Transport: "usb" for the Mastervolt USB link, "can" for SocketCAN.
 device_type = can

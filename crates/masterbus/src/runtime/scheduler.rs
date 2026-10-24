@@ -1283,11 +1283,11 @@ mod tests {
     /// address in use, the write is refused before anything is sent.
     #[test]
     fn a_boolean_write_is_refused_when_our_bus_id_is_in_use() {
-        let config = Config {
-            bus_id: Some(crate::bus_id::bus_id_for_addr(ADDR)),
-            ..test_config()
-        };
-        let (engine, bus) = connect(Device::new(), config);
+        let config = test_config();
+        let mut impostor = Device::new();
+        impostor.addr = crate::bus_id::addr_for_bus_id(config.bus_id.unwrap());
+        let (bus, transport) = FakeBus::start_many(vec![Device::new(), impostor]);
+        let engine = Engine::connect(transport, config).expect("connect");
         let f = field_id::btm1(0x13);
         seed_schema(
             &engine,
@@ -1300,6 +1300,21 @@ mod tests {
         let err = engine.write(ADDR, f, WriteValue::Bool(true)).unwrap_err();
         assert!(matches!(err, Error::BusIdInUse { .. }), "{err:?}");
         assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
+    }
+
+    /// A BusID in a class firmware treats specially is refused up front,
+    /// before anything could name it as a writer.
+    #[test]
+    fn a_reserved_bus_id_is_refused_at_connect() {
+        for bus_id in [0x0600_0001, 0x1F01_2345] {
+            let (_bus, transport) = FakeBus::start(Device::new());
+            let config = Config {
+                bus_id: Some(bus_id),
+                ..test_config()
+            };
+            let err = Engine::connect(transport, config).err().expect("refused");
+            assert!(matches!(err, Error::InvalidBusId { .. }), "{err:?}");
+        }
     }
 
     /// Every Btm3 write is a 4-byte f32 — a list pick goes as its index — and

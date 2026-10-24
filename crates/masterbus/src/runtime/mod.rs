@@ -224,7 +224,10 @@ impl Engine {
     /// Connect over a transport; returns once the bus is usable and ≥1 device is
     /// heard (or `connect_timeout` elapses).
     pub fn connect(transport: Box<dyn Transport>, mut config: Config) -> Result<Arc<Engine>> {
-        config.bus_id.get_or_insert_with(crate::bus_id::generate);
+        let bus_id = *config.bus_id.get_or_insert_with(crate::bus_id::generate);
+        if !crate::bus_id::is_valid(bus_id) {
+            return Err(Error::InvalidBusId { bus_id });
+        }
         let started = Instant::now();
         let (rx, tx) = transport.split();
         let state = Arc::new(State::new());
