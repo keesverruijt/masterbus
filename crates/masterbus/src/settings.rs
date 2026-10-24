@@ -549,9 +549,7 @@ fn autodetect() -> Result<FileConfig> {
 /// Look for a Mastervolt USB Link (vendor 0x1A64). Returns its serial number
 /// (empty string if the device has no serial), or `None` if absent.
 fn detect_usb_link() -> Option<String> {
-    let api = hidapi::HidApi::new().ok()?;
-    let info = api.device_list().find(|d| d.vendor_id() == 0x1A64)?;
-    Some(info.serial_number().unwrap_or("").to_string())
+    crate::transport::usb::detect()
 }
 
 /// List `can*` / `vcan*` interfaces by reading `/sys/class/net`. Anything with

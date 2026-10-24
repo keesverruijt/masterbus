@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Opening the USB link no longer disturbs a Raspberry Pi 3's USB
+  controller.** To find the link, the HID library listed every HID device
+  and read every sysfs attribute of each one's parents. On a Pi 3 that
+  includes debug files of the USB host driver (`dwc_otg`) that dump its
+  registers and run a register write test when read, three times per
+  daemon start. On Linux the link is now found from its HID `uevent` and
+  used through its `/dev/hidrawN` node directly, without hidapi.
+  (signalk-masterbus#4)
+
 ## [0.4.6] - 2026-10-14
 
 ### Fixed
