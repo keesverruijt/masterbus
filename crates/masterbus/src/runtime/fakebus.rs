@@ -118,6 +118,13 @@ pub struct Device {
     pub quiet: bool,
     /// Group counts by `[0x08, selector]` selector byte.
     pub group_counts: HashMap<u8, u16>,
+    /// Btm1 wire indices of the eventable outputs, output `K` at position
+    /// `K`, as `[0x08, 0x40 + K]` lists them. Like the DSD in #29, an
+    /// output acts on a value write only once the commit at index + 1
+    /// follows it.
+    pub outputs: Vec<u8>,
+    /// Output writes waiting for their commit: wire index → value.
+    uncommitted: HashMap<u8, [u8; 4]>,
     /// Leave group-count requests unanswered, as a device still starting up
     /// may.
     pub mute_counts: bool,
@@ -160,6 +167,8 @@ impl Device {
             pending_btm1: HashMap::new(),
             quiet: false,
             group_counts: HashMap::new(),
+            outputs: Vec::new(),
+            uncommitted: HashMap::new(),
             mute_counts: false,
             reply_delay: Duration::ZERO,
             groups: HashMap::new(),
@@ -278,6 +287,12 @@ impl Device {
 
     fn add_meta(mut self, fid: FieldId, f: FakeField) -> Device {
         self.meta.insert(fid, f);
+        self
+    }
+
+    /// List these Btm1 wire indices as the device's eventable outputs.
+    pub fn with_outputs(mut self, outputs: &[u8]) -> Device {
+        self.outputs = outputs.to_vec();
         self
     }
 
@@ -476,6 +491,16 @@ impl Device {
                 }
                 info(vec![0x08, 0x19, self.level.level_byte(), 0x00])
             }
+            // Eventable output `K`, by `[0x08, 0x40 + K]`. Past the last,
+            // the DSD in #29 refuses: the selector echoed alone, from the
+            // shadow address.
+            [0x08, sel] if *sel >= 0x40 => match self.outputs.get(usize::from(sel - 0x40)) {
+                Some(&f) => info(vec![0x08, *sel, f, 0x00]),
+                None => vec![(
+                    id(can_class::PROPERTY_INFO, addr | BTM1_META_ADDR_FLAG),
+                    vec![0x08, *sel],
+                )],
+            },
             // Group count for a menu selector. `[0x08, 0x19]` is the login
             // register and is matched above, so it never reaches here.
             [0x08, _] if self.mute_counts => Vec::new(),
@@ -560,6 +585,16 @@ impl Device {
                 let mut d = vec![*f, *tab];
                 d.extend_from_slice(&v);
                 vec![(id(can_class::MONITORING_DATA, self.addr), d)]
+            }
+            [f, _tab, v0, v1, v2, v3] if self.outputs.contains(f) => {
+                self.uncommitted.insert(*f, [*v0, *v1, *v2, *v3]);
+                Vec::new()
+            }
+            [c, _tab, _, _, _, _] if self.outputs.contains(&c.wrapping_sub(1)) => {
+                if let Some(v) = self.uncommitted.remove(&c.wrapping_sub(1)) {
+                    self.btm1.insert(c.wrapping_sub(1), v);
+                }
+                Vec::new()
             }
             [f, _tab, v0, v1, v2, v3] => {
                 if self.settle_reads > 0 {

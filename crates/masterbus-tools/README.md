@@ -207,6 +207,15 @@ fields. The field still publishes as usual, so Signal K shows the state
 it set. A field that is read-only at the device's current access level
 needs an installer login, which the plugin can supply.
 
+**Outputs that events drive.** A device's *eventable outputs* are what
+another device's event switches, such as an alternator regulator's
+`Stop charge`, which the EasyView's Alternator button and the batteries'
+own protection both drive. When the editor opens a device, the daemon asks
+it for them and lists the ones no menu shows. With `"put": true` a PUT
+switches such an output **on** the way an event does. It switches it
+**off** only if the entry also carries `"allow_off": true`, because
+switching off would also undo a stop that a battery asked for.
+
 ### Run as a systemd service
 
 A hardened unit is included at

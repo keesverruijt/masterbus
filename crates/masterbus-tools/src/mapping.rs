@@ -136,6 +136,13 @@ pub struct FieldMapping {
     /// publishes its value as usual, so Signal K shows the state it set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub put: bool,
+    /// For an eventable output that only events may drive, such as an APR's
+    /// `Stop charge` (#29): also let a PUT switch it off. Without it a PUT
+    /// can only switch it on, because the output is shared with the device's
+    /// own events: the batteries assert `Stop charge` for protection, and
+    /// Signal K must not clear that.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_off: bool,
 }
 
 /// A Signal K notification state worth raising. `normal` is not listed: it

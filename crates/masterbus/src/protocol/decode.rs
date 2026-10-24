@@ -224,6 +224,19 @@ pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -
             if data.len() < 2 {
                 return None;
             }
+            // Past its last eventable output a device refuses `[0x08, 0x40 +
+            // K]` with the selector alone, from the shadow address (§4.3).
+            // Matched to the request so the output list ends at once; other
+            // replies from the shadow address are not answers anyone waits on.
+            if device_addr & BTM1_META_ADDR_FLAG != 0 {
+                return (data.len() == 2 && data[0] == 0x08 && data[1] >= 0x40).then(|| {
+                    format!(
+                        "p:{:06X}:08:{:02X}",
+                        device_addr & !BTM1_META_ADDR_FLAG,
+                        data[1]
+                    )
+                });
+            }
             if data[0] == 0x30 && data.len() >= 4 {
                 let str_id = u16::from_le_bytes([data[1], data[2]]);
                 Some(format!(
@@ -327,6 +340,23 @@ fn schema_key(prefix: &str, device_addr: u32, data: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gerard's DSD refuses the selector after its last eventable output
+    /// (`06C0944B [2] 08 4C`); that refusal answers the request. Other
+    /// shadow-address property replies are not matched to anything.
+    #[test]
+    fn the_refusal_after_the_last_output_answers_its_request() {
+        let p = can_class::PROPERTY_INFO;
+        assert_eq!(
+            waiter_key_for_frame(p, 0xC0944B, &[0x08, 0x4C]).as_deref(),
+            Some("p:40944B:08:4C")
+        );
+        assert_eq!(waiter_key_for_frame(p, 0xC0944B, &[0x08, 0x20]), None);
+        assert_eq!(
+            waiter_key_for_frame(p, 0x40944B, &[0x08, 0x4B, 0x31, 0x00]).as_deref(),
+            Some("p:40944B:08:4B")
+        );
+    }
 
     #[test]
     fn date_decodes_packed_integer() {

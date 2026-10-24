@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::discovery::{
-    Disc, DiscBus, MENUS, discover_menu, enumerate_all_fields, enumerate_field, fetch_identity,
-    resolve_catalog,
+    Disc, DiscBus, MENUS, discover_menu, enumerate_all_fields, enumerate_field, eventable_outputs,
+    fetch_identity, resolve_catalog,
 };
 use super::framelog::frame_log;
 use super::reader::value_key;
@@ -117,6 +117,7 @@ pub(super) fn spawn(
                 quiet: HashMap::new(),
                 misses: HashMap::new(),
                 failed_menus: HashMap::new(),
+                outputs: HashMap::new(),
                 subs: Vec::new(),
                 servicing: false,
                 discovering: 0,
@@ -137,6 +138,8 @@ struct Sched {
     misses: HashMap<(DeviceId, FieldId), Misses>,
     /// When a menu's discovery last failed for want of a group count.
     failed_menus: HashMap<(DeviceId, Menu), Instant>,
+    /// Each device's eventable outputs, once it has listed them.
+    outputs: HashMap<DeviceId, Vec<FieldId>>,
     subs: Vec<SubState>,
     /// Inside `process_due`; keeps it from re-entering itself through a
     /// discovery it starts (a Text value's string fetch).
@@ -198,6 +201,18 @@ impl Sched {
                     reply,
                 }) => {
                     let r = self.do_write(addr, field, value);
+                    let _ = reply.send(r);
+                }
+                Ok(Command::EventableOutputs { addr, reply }) => {
+                    let _ = reply.send(Ok(self.do_eventable_outputs(addr)));
+                }
+                Ok(Command::SetOutput {
+                    addr,
+                    field,
+                    on,
+                    reply,
+                }) => {
+                    let r = self.do_set_output(addr, field, on);
                     let _ = reply.send(r);
                 }
                 Ok(Command::WriteString {
@@ -657,6 +672,38 @@ impl Sched {
         self.state.put_access_level(addr, reported);
         self.state.forget_schema(addr);
         Ok(reported)
+    }
+
+    /// The device's eventable outputs (PROTOCOL.md §9a). Asked once; an
+    /// empty answer is not kept, since a device that was asleep may list
+    /// them later.
+    fn do_eventable_outputs(&mut self, addr: DeviceId) -> Vec<FieldId> {
+        if let Some(o) = self.outputs.get(&addr) {
+            return o.clone();
+        }
+        let o = self.with_disc(addr, |disc| eventable_outputs(disc, addr));
+        self.last_send = Instant::now();
+        if !o.is_empty() {
+            self.outputs.insert(addr, o.clone());
+        }
+        o
+    }
+
+    /// Switch an eventable output the way another device's event does: a
+    /// boolean write and the commit naming us, whether or not the field is
+    /// writable (#29). An output need not be on any menu (an APR's
+    /// `Stop charge` is not), so its metadata is asked for on its own first,
+    /// for the read-back. Without it nothing is sent: the switch would go
+    /// out and still report an error, and a caller that retried would
+    /// switch twice.
+    fn do_set_output(&mut self, addr: DeviceId, field: FieldId, on: bool) -> Result<Value> {
+        if !self.do_eventable_outputs(addr).contains(&field) {
+            return Err(Error::NotAnOutput(field as i32));
+        }
+        if self.do_discover_field(addr, field).is_none() {
+            return Err(Error::FieldNotAvailable(field as i32));
+        }
+        self.do_write(addr, field, WriteValue::Bool(on))
     }
 
     /// Our own BusID; `Engine::connect` always sets one.
@@ -1183,6 +1230,87 @@ mod tests {
                 vec![0x14, 0x00, 0x1C, 0x45, 0x23, 0x01],
             ]
         );
+    }
+
+    /// The six-byte value and commit writes sent so far.
+    fn writes(bus: &FakeBus) -> Vec<Vec<u8>> {
+        bus.sent_class(can_class::MONITORING_REQ)
+            .into_iter()
+            .map(|(_, d)| d)
+            .filter(|d| d.len() == 6)
+            .collect()
+    }
+
+    /// A device lists its eventable outputs by `[0x08, 0x40 + K]` and refuses
+    /// the selector after the last; the list is asked once.
+    #[test]
+    fn a_device_lists_its_eventable_outputs() {
+        let device = Device::new().with_outputs(&[0x21, 0x23, 0x25, 0x27]);
+        let (engine, bus) = connect(device, test_config());
+        let want: Vec<FieldId> = [0x21, 0x23, 0x25, 0x27].map(field_id::btm1).to_vec();
+        assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
+        assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
+        let asked = bus
+            .sent_class(can_class::PROPERTY_REQ)
+            .into_iter()
+            .filter(|(_, d)| d.len() == 2 && d[0] == 0x08 && d[1] >= 0x40)
+            .count();
+        // The refusal after the last ends the list without a retry.
+        assert_eq!(asked, 5, "four outputs and the refused fifth, asked once");
+    }
+
+    /// An APR's `Stop charge` is an output no menu shows and no write may
+    /// reach (#29). It is switched like an event does it: the value, then the
+    /// commit naming us, and only then does the output act.
+    #[test]
+    fn an_output_no_menu_shows_is_switched_with_the_commit() {
+        let stop = field_id::btm1(0x27);
+        let device = Device::new()
+            .with_outputs(&[0x21, 0x23, 0x25, 0x27])
+            .with_field(stop, "Stop charge", "", 0x01, false);
+        let (engine, bus) = connect(device, test_config());
+
+        // A Float field, like the EasyView's switches: the read-back is the
+        // number the device reports.
+        assert_eq!(
+            engine.set_output(ADDR, stop, true).unwrap(),
+            Value::Float(1.0)
+        );
+        assert_eq!(
+            writes(&bus),
+            vec![
+                vec![0x27, 0x00, 0x00, 0x00, 0x80, 0x3F],
+                vec![0x28, 0x00, 0x1C, 0x45, 0x23, 0x01],
+            ]
+        );
+        assert_eq!(bus.device.lock().unwrap().btm1[&0x27], 1.0f32.to_le_bytes());
+    }
+
+    /// An output whose metadata does not come is not switched: the switch
+    /// would go out before the read-back failed, and a retry would switch it
+    /// again.
+    #[test]
+    fn an_output_without_metadata_is_not_switched() {
+        let device = Device::new().with_outputs(&[0x27]);
+        let (engine, bus) = connect(device, test_config());
+        let err = engine
+            .set_output(ADDR, field_id::btm1(0x27), true)
+            .unwrap_err();
+        assert!(matches!(err, Error::FieldNotAvailable(0x27)), "{err:?}");
+        assert!(writes(&bus).is_empty());
+    }
+
+    /// A field the device does not list as an output is not switched this
+    /// way, writable or not.
+    #[test]
+    fn a_field_that_is_not_an_output_is_not_switched() {
+        let device = Device::new().with_outputs(&[0x21, 0x23]);
+        let (engine, bus) = connect(device, test_config());
+        let err = engine
+            .set_output(ADDR, field_id::btm1(0x13), true)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotAnOutput(0x13)), "{err:?}");
+        assert!(writes(&bus).is_empty());
     }
 
     /// The CombiMaster answers the read-back straight after a relay-style

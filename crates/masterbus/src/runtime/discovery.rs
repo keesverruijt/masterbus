@@ -714,6 +714,23 @@ pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<Field
     out
 }
 
+/// The field ids of a device's eventable outputs, output `K` at position `K`,
+/// as the device lists them: `[0x08, 0x40 + K]` answers the field index of
+/// output `K` (PROTOCOL.md §4.3, §9a). The list ends at the device's
+/// refusal after the last, or at the first selector it does not answer, so
+/// a device that does not answer `K = 0` has none to drive.
+pub(super) fn eventable_outputs(disc: &mut Disc, addr: DeviceId) -> Vec<FieldId> {
+    let mut out = Vec::new();
+    for k in 0..=(0xFF - 0x40) {
+        match disc.group_count(addr, 0x40 + k) {
+            // Outputs are Monitoring fields, on the Btm1 channel.
+            Some(index) if index <= 0xFF => out.push(field_id::btm1(index as u8)),
+            _ => break,
+        }
+    }
+    out
+}
+
 /// Per-channel flat probe.
 ///
 /// Phase 1: pipelined existence sweep ([`Disc::probe_existence`]) identifies

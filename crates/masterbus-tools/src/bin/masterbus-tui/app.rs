@@ -1141,6 +1141,7 @@ impl PathEditor {
             truth: self.truth.clone(),
             notify: self.notify.clone(),
             put: false,
+            allow_off: false,
         }
     }
 
@@ -1457,10 +1458,10 @@ impl App {
             return;
         };
         let entry = s.map.devices.entry(serial).or_default();
-        let existing_put = entry
+        let (existing_put, existing_allow_off) = entry
             .fields
             .get(&field_key(ed.field))
-            .is_some_and(|f| f.put);
+            .map_or((false, false), |f| (f.put, f.allow_off));
         if let Some(i) = &identity {
             entry.article = i.article.clone();
             entry.firmware = i.firmware.clone();
@@ -1487,9 +1488,10 @@ impl App {
                 invert: ed.invert,
                 truth: plan.truth,
                 notify: plan.notify.clone(),
-                // The TUI does not edit this flag; an existing setting survives
-                // a re-map of the same field.
+                // The TUI does not edit these flags; an existing setting
+                // survives a re-map of the same field.
                 put: existing_put,
+                allow_off: existing_allow_off,
             },
         );
         s.dirty = true;
