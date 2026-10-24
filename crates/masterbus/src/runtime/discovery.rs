@@ -622,14 +622,15 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
         disc.req_std(&key, schema_field_count_req_class_raw(class, addr, g))
             .filter(|r| r.len() >= 8)
             .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]) as u32)
-            .unwrap_or(0)
     };
     // A field index is one byte, so a group can't have more than 256 fields.
     // A ChargeMaster Plus reports 54,650 for one group (#6): ask again, and
     // if it sticks, read the 256 indices there are and keep each field once.
-    let mut field_count = ask_count();
+    // A retry that goes unanswered keeps the first count, not zero, so the
+    // group isn't cached as empty.
+    let mut field_count = ask_count().unwrap_or(0);
     if field_count > MAX_GROUP_FIELDS {
-        field_count = ask_count();
+        field_count = ask_count().unwrap_or(field_count);
     }
     if field_count > MAX_GROUP_FIELDS {
         log::warn!(
@@ -1227,6 +1228,23 @@ mod enumeration_tests {
             .filter(|(_, d)| d.first() == Some(&0x03))
             .count();
         assert_eq!(field_id_reads, 256);
+    }
+
+    #[test]
+    fn an_unanswered_recount_keeps_the_first_count() {
+        let device = combi()
+            .with_claimed_field_count(Menu::Monitoring, 0, 54650.0)
+            .with_field_count_answers(Menu::Monitoring, 0, 1);
+        let (engine, _bus) = connect(device, test_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
+        let names: Vec<&str> = schema.groups[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Voltage", "State"]);
     }
 
     /// Monitoring, Configuration and Service share one global gid space: a
