@@ -1284,10 +1284,20 @@ mod tests {
     #[test]
     fn a_boolean_write_is_refused_when_our_bus_id_is_in_use() {
         let config = test_config();
+        let (ours, liveness) = (
+            crate::bus_id::addr_for_bus_id(config.bus_id.unwrap()),
+            config.liveness,
+        );
         let mut impostor = Device::new();
-        impostor.addr = crate::bus_id::addr_for_bus_id(config.bus_id.unwrap());
+        impostor.addr = ours;
         let (bus, transport) = FakeBus::start_many(vec![Device::new(), impostor]);
         let engine = Engine::connect(transport, config).expect("connect");
+        // `connect` returns at the first device heard, which may be the other.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while engine.state.status(ours, liveness) == DeviceStatus::Offline {
+            assert!(Instant::now() < deadline, "the impostor was never heard");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let f = field_id::btm1(0x13);
         seed_schema(
             &engine,
