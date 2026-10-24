@@ -20,6 +20,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon start. On Linux the link is now found from its HID `uevent` and
   used through its `/dev/hidrawN` node directly, without hidapi.
   (signalk-masterbus#4)
+- **A group that reports an impossible field count no longer stalls
+  discovery.** A ChargeMaster Plus reports 54,650 fields for one
+  Configuration group; discovery asked for every one, sweeping the 256
+  one-byte indices over 200 times, and its Configuration menu never
+  finished. A count past 256 is now asked again and, if it sticks, read
+  as 256, with each field kept once. (#6)
 
 ## [0.4.6] - 2026-10-14
 

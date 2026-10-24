@@ -71,6 +71,13 @@ pub struct FakeGroup {
     pub name_sid: u16,
     /// Btm1 wire indices of the group's fields, in display order.
     pub fields: Vec<u8>,
+    /// A field count to report instead of `fields.len()`. Field-id queries
+    /// past the real fields then answer them again, in order: the
+    /// ChargeMaster Plus that reports 54,650 fields does this (#6).
+    pub claimed_count: Option<f32>,
+    /// How many field-count queries to answer before going silent; `None`
+    /// answers them all.
+    pub count_answers: Option<u32>,
 }
 
 /// A scriptable MasterBus device.
@@ -182,10 +189,28 @@ impl Device {
             FakeGroup {
                 name_sid,
                 fields: fields.to_vec(),
+                claimed_count: None,
+                count_answers: None,
             },
         );
         if matches!(menu, Menu::Monitoring | Menu::Configuration | Menu::Service) {
             *self.group_counts.entry(menu.selector()).or_insert(0) += 1;
+        }
+        self
+    }
+
+    /// Make group `gid` of `menu` report `count` fields, whatever it has.
+    pub fn with_claimed_field_count(mut self, menu: Menu, gid: u8, count: f32) -> Device {
+        if let Some(g) = self.groups.get_mut(&(menu.schema_request_class(), gid)) {
+            g.claimed_count = Some(count);
+        }
+        self
+    }
+
+    /// Answer `n` field-count queries for this group, then stay silent.
+    pub fn with_field_count_answers(mut self, menu: Menu, gid: u8, n: u32) -> Device {
+        if let Some(g) = self.groups.get_mut(&(menu.schema_request_class(), gid)) {
+            g.count_answers = Some(n);
         }
         self
     }
@@ -347,16 +372,26 @@ impl Device {
                 }
                 None => Vec::new(),
             },
-            [0x07, gid, _] => match group(self, *gid) {
-                Some(g) => {
+            [0x07, gid, _] => match self.groups.get_mut(&(class, *gid)) {
+                Some(g) if g.count_answers != Some(0) => {
+                    if let Some(n) = &mut g.count_answers {
+                        *n -= 1;
+                    }
                     let mut d = vec![0x07, *gid, 0x00, 0x00];
-                    d.extend_from_slice(&(g.fields.len() as f32).to_le_bytes());
+                    let count = g.claimed_count.unwrap_or(g.fields.len() as f32);
+                    d.extend_from_slice(&count.to_le_bytes());
                     vec![(reply, d)]
                 }
-                None => Vec::new(),
+                _ => Vec::new(),
             },
             [0x03, gid, _, idx] => {
-                match group(self, *gid).and_then(|g| g.fields.get(*idx as usize).copied()) {
+                let field = group(self, *gid).and_then(|g| match g.claimed_count {
+                    Some(_) if !g.fields.is_empty() => {
+                        Some(g.fields[*idx as usize % g.fields.len()])
+                    }
+                    _ => g.fields.get(*idx as usize).copied(),
+                });
+                match field {
                     Some(wire) => vec![(reply, vec![0x03, *gid, 0x00, *idx, wire, 0x00])],
                     None => Vec::new(),
                 }

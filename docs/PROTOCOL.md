@@ -357,6 +357,15 @@ class-`0x09` response.
 
 The field-id response echoes `idx` in `bytes[3]` (used for matching, §8).
 
+**An impossible field count.** A ChargeMaster Plus answered the field-count
+query for one Configuration group with 54,650, consistently (#6). Field-id
+queries past its real fields answered those same fields again, so the count
+is not a list of that many distinct fields. The field index in the request is
+one byte, so a client can address at most 256 fields per group; that is a
+limit of the request format, not something the device states. The crate asks
+for the count again when it is over 256, reads the 256 indices if it sticks,
+and keeps each field id once.
+
 **Class `0x11` compact / NA response.** On the CombiMaster reference bus,
 schema queries for Configuration-tab group ids consistently came back on
 class `0x11` with a 4-byte payload `[opcode, group_id, sub, value]`,
