@@ -721,6 +721,10 @@ sibling `Event N target`.
 > APR answers `0x43` with `0x27`, its 4th output. `[0x08, 0x0D]`, which
 > MasterAdjust reads in its `MB_Device_General_Count` sweep, is **not** the
 > count: that DSD answers `0x2C`.
+>
+> An output's commit register is at its index + 1 (§7.3), so an output at
+> index `0xFF` would have none: masterbus leaves such an output out of the
+> list and does not switch it. No device has been seen to list one.
 
 ---
 
