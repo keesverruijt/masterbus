@@ -723,8 +723,9 @@ pub(super) fn eventable_outputs(disc: &mut Disc, addr: DeviceId) -> Vec<FieldId>
     let mut out = Vec::new();
     for k in 0..=(0xFF - 0x40) {
         match disc.group_count(addr, 0x40 + k) {
-            // Outputs are Monitoring fields, on the Btm1 channel.
-            Some(index) if index <= 0xFF => out.push(field_id::btm1(index as u8)),
+            // Outputs are Monitoring fields, on the Btm1 channel. Index 0xFF
+            // is left out: its commit register, index + 1, does not exist.
+            Some(index) if index < 0xFF => out.push(field_id::btm1(index as u8)),
             _ => break,
         }
     }

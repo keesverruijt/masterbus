@@ -756,7 +756,7 @@ fn switched_on(v: &Value) -> Option<bool> {
     match v {
         Value::Boolean(b) => Some(*b),
         Value::Float(x) => Some(*x != 0.0),
-        Value::List { index, .. } => Some(*index != 0),
+        Value::List { index, .. } | Value::Eventable { index, .. } => Some(*index != 0),
         _ => None,
     }
 }
@@ -1906,6 +1906,19 @@ mod tests {
             *state.switched.lock().unwrap(),
             vec![(id, 0x027, true), (id, 0x027, false)]
         );
+    }
+
+    /// Every kind of value a PUT can decode to says on or off the same way.
+    #[test]
+    fn a_put_value_means_on_unless_it_is_zero() {
+        assert_eq!(switched_on(&Value::Boolean(true)), Some(true));
+        assert_eq!(switched_on(&Value::Float(0.0)), Some(false));
+        let on = Value::Eventable {
+            index: 1,
+            labels: vec!["Off".into(), "On".into()],
+        };
+        assert_eq!(switched_on(&on), Some(true));
+        assert_eq!(switched_on(&Value::Invalid), None);
     }
 
     /// A device with no outputs is not asked again on every PUT to a
