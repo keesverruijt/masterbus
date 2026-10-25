@@ -41,6 +41,11 @@ pub enum Error {
     #[error("field is read-only")]
     ReadOnly,
 
+    /// The field is not one of the device's eventable outputs, so it can't be
+    /// switched the way another device's event switches it.
+    #[error("field 0x{0:03X} is not an eventable output of the device")]
+    NotAnOutput(i32),
+
     /// A device on the bus announces the address of our own BusID, so a
     /// write that names us as its writer would name that device. Set another
     /// `bus_id` in `config.ini`.

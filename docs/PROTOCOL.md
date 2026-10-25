@@ -225,7 +225,7 @@ class `0x06` with `u16LE(lo, hi)`. Selectors that matter:
 | `0x03` | Number of **Configuration** groups. **Unreliable** on some devices — see caveat below. |
 | `0x04` | Number of **Service** groups.                                            |
 | `0x3F` | **Total tab count** (`mon + alarm + history + config`), *not* a per-tab count. |
-| `0x40 + K` | Field index of the device's `K`-th **eventable output** (§9a); no answer past the last. |
+| `0x40 + K` | Field index of the device's `K`-th **eventable output** (§9a). Past the last, a DSD answers the selector alone (`[0x08, SEL]`, DLC 2) from `addr \| 0x800000`. |
 
 > **`[0x08, 0x03]` is unreliable** on Magic-class devices (and likely
 > others). The Mac/Magic family — e.g. the **INT Nav Chg** at `0x3A3B4B`
@@ -587,7 +587,7 @@ against incoming frames:
 | Exchange                | Key                                            |
 |-------------------------|------------------------------------------------|
 | Monitoring value (0x08) | `(device_addr, tab_index, field_index)`        |
-| Property (0x06)         | `p:{addr}:{data[0]}:{data[1]}`                 |
+| Property (0x06)         | `p:{addr}:{data[0]}:{data[1]}`; the 2-byte refusal of `[0x08, 0x40 + K]` from `addr \| 0x800000` matches the real address |
 | String chunk (0x06,0x30)| `str:{addr}:{str_id}:{seq}` (seq from data[3]) |
 | Schema (0x09)           | `schema:{addr}:{op}:{group}` (+`:{idx}` for 0x03 field-id, idx in data[3]) |
 | Btm1 metadata (0x08, hi bit) | `btm1_meta:{real_addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
@@ -716,11 +716,15 @@ sibling `Event N target`.
 > on the silent majority. Query it *best-effort* (the reply, when it comes,
 > arrives with the rest of the field's metadata batch) and only on Monitoring
 > fields — or ask the device for the list: `[0x08, 0x40 + K]` (§4.3) answers
-> the field index of eventable output `K`, and stops answering past the last.
+> the field index of eventable output `K`, and refuses past the last.
 > A DSD answers `03 05 07 09 0B 0D 0F 11 13 15 2E 31` (12 outputs), and the
 > APR answers `0x43` with `0x27`, its 4th output. `[0x08, 0x0D]`, which
 > MasterAdjust reads in its `MB_Device_General_Count` sweep, is **not** the
 > count: that DSD answers `0x2C`.
+>
+> An output's commit register is at its index + 1 (§7.3), so an output at
+> index `0xFF` would have none: masterbus leaves such an output out of the
+> list and does not switch it. No device has been seen to list one.
 
 ---
 

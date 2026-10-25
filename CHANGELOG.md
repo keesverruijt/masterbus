@@ -12,6 +12,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   install the four tools; the README and ENDUSER.md show the line to paste.
 - `MasterBus::bus_id`, and `MasterBus::joined_transport` for a tool that
   sends its own frames over the connection `auto_joined` would use.
+- **Switching an output that events drive.** Signal K can now switch an
+  output that until now only another device's event could reach, such as
+  the alternator regulator's `Stop charge` that the EasyView's Alternator
+  button drives. When the mapping editor opens a device, it lists these
+  outputs, including ones no menu shows. A mapped output with `put`
+  switches **on** from a PUT. It switches **off** only if the mapping entry
+  also has `allow_off`, because the batteries use the same output for
+  their own protection. In the library: `Device::eventable_output_fields`
+  and `Field::set_output`. (#29)
 
 ### Changed
 - **Switches are committed in our own name.** A relay-style switch (the

@@ -353,6 +353,16 @@ impl Device {
         evt.into_iter().map(|(_, n)| n).collect()
     }
 
+    /// The field ids of this device's eventable outputs, output `K` at
+    /// position `K`, **asked of the device** (`[0x08, 0x40 + K]`, PROTOCOL.md
+    /// §9a). Unlike [`Self::eventable_outputs`] this needs no discovery and
+    /// also lists outputs that no menu shows, such as an APR's `Stop charge`.
+    /// Empty when the device lists none. Switch one with
+    /// [`Field::set_output`].
+    pub fn eventable_output_fields(&self) -> Result<Vec<FieldId>> {
+        self.engine.eventable_outputs(self.id)
+    }
+
     /// Read the device's current access level (PROTOCOL.md §4.5).
     ///
     /// Note: a level change does not always change the index space, but it
@@ -512,6 +522,19 @@ impl Field {
             validate_editable_text(text)?;
         }
         self.engine.write(self.device, self.index, wv)
+    }
+
+    /// Switch this field on or off the way another device's event does
+    /// (PROTOCOL.md §9a): a boolean write followed by the commit naming our
+    /// BusID (§7.3). Returns the value observed afterwards.
+    ///
+    /// Only for the device's eventable outputs ([`Device::eventable_output_fields`]),
+    /// which may be read-only to [`Self::set`]; any other field gives
+    /// [`Error::NotAnOutput`] and nothing is sent. An output may be shared:
+    /// an APR's `Stop charge` is also driven by the batteries' own events, so
+    /// switching it off can undo what a battery asked for.
+    pub fn set_output(&self, on: bool) -> Result<Value> {
+        self.engine.set_output(self.device, self.index, on)
     }
 
     /// Subscribe to live updates of just this field.

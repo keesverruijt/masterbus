@@ -87,6 +87,8 @@ of every menu discovered on it (Monitoring at least).
         "group": "Battery",
         "path": "electrical.inverters.inverter.dc.voltage",
         "put": false,
+        "output": false,
+        "allowOff": false,
         "value": 25.6
       }
     ]
@@ -97,7 +99,11 @@ of every menu discovered on it (Monitoring at least).
 - `instance` is the Signal K instance the mapping records for the device, or
   the one that would be proposed for it.
 - `options` are an enum's labels; empty otherwise.
-- `path` and `put` come from the mapping; `path` is `null` for an unmapped field.
+- `path`, `put` and `allowOff` come from the mapping; `path` is `null` for
+  an unmapped field.
+- `output` is `true` for one of the device's eventable outputs, which other
+  devices' events switch (see the PUT below). It is known once the device
+  has been opened with `GET /api/devices/{serial}`.
 - `value` is the last value the stream saw, **in the device's own unit**
   (the mapping's SI conversion is not applied), or `null` if none has been
   seen. Only mapped fields are streamed, so an unmapped field has a value
@@ -109,6 +115,10 @@ One device, same shape. With `?menu=configuration` (or `service`) that menu
 is discovered first if it has not been, and its fields are merged in. A cold
 discovery can take a few seconds. `404` for an unknown serial, `400` for an
 unknown menu, `502` if the device would not enumerate.
+
+The first time a device is opened, the daemon also asks it for its
+eventable outputs, and adds the ones no menu lists (an alternator
+regulator's `Stop charge`) to its fields, so they can be mapped.
 
 ### `GET /api/devices/{serial}/fields/{id}/value`
 
@@ -138,6 +148,13 @@ A field that is read-only at the device's current access level answers
 device in at that level and retry once; `level` is `installer`,
 `distributor` or `mvservice`, and `code` is the vendor's numeric code. A
 rejected code is also `403`.
+
+An eventable output that is not writable is switched the way another
+device's event switches it instead. A value that means on (`true`, or a
+number or index other than 0) switches it on. Off is refused with `403`
+and `"needs": "allowOff"` unless the mapping entry carries
+`"allow_off": true`: the device's own events drive the output too, and
+switching it off can undo what one of them asked for.
 
 Success:
 
@@ -185,7 +202,8 @@ refused with `400` and nothing changes; a mapping that cannot be written to
 disk is refused with `500`.
 
 An entry may carry `"put": true` to say the plugin should accept Signal K
-PUTs on its path. A field outside Monitoring (the writable settings live on
+PUTs on its path, and, on an eventable output, `"allow_off": true` to let a
+PUT switch it off as well as on. A field outside Monitoring (the writable settings live on
 Configuration) is fine: the daemon discovers that menu when the mapping
 names one of its fields.
 
