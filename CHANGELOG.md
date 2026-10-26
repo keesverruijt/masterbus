@@ -9,6 +9,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - `MasterBus::link_connected`, and `Transport::link` with its `LinkState`,
   to ask whether the link to the bus is there. (#39)
+- **See how the start went.** The daemon logs one line per device when it
+  is identified and one when its values start streaming, each with the
+  seconds since start. The same times are in the API: `/api/devices` gives
+  each device a `timeline`, and `/api/status` says when the first pass
+  over the bus was done (`walked`). Thanks to @susteranna for asking. (#40)
 
 ### Fixed
 - **An alternator regulator's `Stop charge` can no longer be switched off
@@ -36,6 +41,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is lost and when it is back, and `/api/status` has a new `link` field,
   `connected` or `lost`, so the plugin can show it. Thanks to
   @Peter-Petrik for the report and the analysis. (#39)
+- **Values arrive device by device after a restart.** Each device now
+  starts publishing as soon as it has been identified, instead of when
+  every device on the bus has been. On a big bus the first values used to
+  wait minutes for the last device, and switches (PUT targets) waited
+  longer still. A device that joins late no longer restarts every other
+  device's stream, and no longer stops the stream while its switches are
+  looked up. Reported by @susteranna on a 19-device bus. (#40)
 
 ## [0.5.0] - 2026-10-25
 
