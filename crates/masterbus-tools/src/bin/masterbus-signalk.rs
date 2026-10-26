@@ -457,6 +457,10 @@ struct Progress {
     /// Diagnostics already printed, so re-resolving as each device arrives
     /// does not repeat them. Cleared when the mapping changes.
     printed: HashSet<String>,
+    /// A first run whose walk seeded nothing (it found no device yet) seeds
+    /// from the first device that arrives. Off once something is seeded or
+    /// the mapping is replaced, so a mapping emptied on purpose stays empty.
+    may_seed: bool,
 }
 
 fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
@@ -581,11 +585,22 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                 Found::Device { id, mapped } => {
                     progress.ready.insert(id);
                     changed |= mapped;
+                    // A first run whose walk found nobody (the bus still
+                    // starting) seeded nothing: seed from the first device
+                    // that does arrive, or it never publishes.
+                    if progress.may_seed && seed_if_empty(&shared, mapping_path, false) {
+                        progress.may_seed = false;
+                        seeded = true;
+                        changed = true;
+                        stamp = mtime(mapping_path);
+                    }
                 }
                 Found::Walked => {
                     progress.walked = true;
                     changed = true;
-                    seeded = seed_if_empty(&shared, mapping_path);
+                    let first_run = shared.mapping.lock().unwrap().is_empty();
+                    seeded = seed_if_empty(&shared, mapping_path, true);
+                    progress.may_seed = first_run && !seeded;
                     if seeded {
                         stamp = mtime(mapping_path);
                     }
@@ -611,6 +626,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
             eprintln!("masterbus-signalk: mapping replaced over the API; reloading");
             stamp = mtime(mapping_path);
             progress.printed.clear();
+            progress.may_seed = false;
             active = activate(
                 &bus,
                 &shared,
@@ -637,6 +653,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                         eprintln!("masterbus-signalk: {} changed; reloading", p.display());
                         *shared.mapping.lock().unwrap() = m;
                         progress.printed.clear();
+                        progress.may_seed = false;
                         active = activate(
                             &bus,
                             &shared,
@@ -777,12 +794,17 @@ impl Active {
 
 /// On a first run there is no mapping: seed one from the devices found and
 /// write it out, so there is something to publish and, more importantly,
-/// something to edit. Returns whether it seeded one.
-fn seed_if_empty(shared: &Shared, path: Option<&Path>) -> bool {
+/// something to edit. Returns whether it seeded one. `report_empty` says
+/// whether seeding nothing is worth a log line (at the end of the walk,
+/// not again for every device after it).
+fn seed_if_empty(shared: &Shared, path: Option<&Path>, report_empty: bool) -> bool {
     if !shared.mapping.lock().unwrap().is_empty() {
         return false;
     }
     let mapping = publish::seed_mapping(&shared.devices.lock().unwrap());
+    if mapping.is_empty() && !report_empty {
+        return false;
+    }
     match path {
         Some(p) if !mapping.is_empty() => match mapping.save(p) {
             Ok(()) => eprintln!(

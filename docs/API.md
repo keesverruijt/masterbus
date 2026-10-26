@@ -128,7 +128,8 @@ of every menu discovered on it (Monitoring at least).
   beyond Monitoring), how long that `took`, whether it was `late` (first
   heard after the first pass over the bus), and when its mapped fields
   started `streaming` (`null` while none are). The same times are on the
-  daemon's stderr, one line per device.
+  daemon's stderr: one line when a device is identified, and another when
+  its fields start streaming.
 
 ### `GET /api/devices/{serial}`
 
