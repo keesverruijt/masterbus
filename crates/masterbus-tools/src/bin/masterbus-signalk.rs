@@ -587,8 +587,15 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                     changed |= mapped;
                     // A first run whose walk found nobody (the bus still
                     // starting) seeded nothing: seed from the first device
-                    // that does arrive, or it never publishes.
-                    if progress.may_seed && seed_if_empty(&shared, mapping_path, false) {
+                    // that does arrive, or it never publishes. Only while
+                    // there is still no mapping file: a mapping saved over
+                    // the API, even an empty one, is a file, and is never
+                    // seeded over, whatever order its reload and this
+                    // device arrive in.
+                    if progress.may_seed
+                        && no_mapping_file(mapping_path)
+                        && seed_if_empty(&shared, mapping_path, false)
+                    {
                         progress.may_seed = false;
                         seeded = true;
                         changed = true;
@@ -598,7 +605,9 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                 Found::Walked => {
                     progress.walked = true;
                     changed = true;
-                    let first_run = shared.mapping.lock().unwrap().is_empty();
+                    // A first run is one with no mapping file. An empty
+                    // mapping someone saved is a file, and stays empty.
+                    let first_run = no_mapping_file(mapping_path);
                     seeded = seed_if_empty(&shared, mapping_path, true);
                     progress.may_seed = first_run && !seeded;
                     if seeded {
@@ -790,6 +799,12 @@ impl Active {
             connections_seen: usize::MAX,
         }
     }
+}
+
+/// Whether the mapping has a file to live in and it does not exist yet: a
+/// first run. Without a file there is nothing to tell a first run by.
+fn no_mapping_file(path: Option<&Path>) -> bool {
+    path.is_some_and(|p| !p.exists())
 }
 
 /// On a first run there is no mapping: seed one from the devices found and
@@ -1515,6 +1530,24 @@ mod tests {
             order.into_inner(),
             ["1", "2", "3", "walked", "7L", "5L"].map(String::from)
         );
+    }
+
+    /// Only a missing mapping file is a first run: a mapping saved empty, on
+    /// purpose or over the API, is a file and is never seeded over.
+    #[test]
+    fn only_a_missing_mapping_file_is_a_first_run() {
+        let dir = std::env::temp_dir().join(format!("mb-first-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("mapping.json");
+        let _ = std::fs::remove_file(&p);
+        assert!(no_mapping_file(Some(&p)));
+        Mapping::new().save(&p).unwrap();
+        assert!(
+            !no_mapping_file(Some(&p)),
+            "an empty mapping saved is not a first run"
+        );
+        assert!(!no_mapping_file(None), "no file to tell a first run by");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A device whose subscribed fields are unchanged keeps its
