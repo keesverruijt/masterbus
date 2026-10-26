@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 
@@ -24,6 +24,9 @@ use crate::transport::TransportRx;
 pub(super) fn value_key(addr: DeviceId, field: FieldId) -> String {
     format!("val:{:06X}:{:04X}", addr, field)
 }
+
+/// How long one receive waits for a frame.
+const POLL: Duration = Duration::from_millis(200);
 
 pub(super) fn spawn(
     mut rx: Box<dyn TransportRx>,
@@ -49,11 +52,17 @@ fn reader_loop(
 ) {
     let mut alive: HashSet<DeviceId> = HashSet::new();
     while !shutdown.load(Ordering::Relaxed) {
-        match rx.recv(Duration::from_millis(200)) {
+        let asked = Instant::now();
+        match rx.recv(POLL) {
             Ok(Some((raw_id, data))) => handle_frame(raw_id, &data, state, waiter),
             Ok(None) => {}
-            Err(_) => {
-                // transient transport error; keep going
+            Err(e) => {
+                // Keep going: the USB transport reopens a lost link itself,
+                // and other errors are transient. But a transport that fails
+                // at once, every time, must not spin this thread (#39), so
+                // wait out the rest of the poll.
+                log::debug!("receive: {e}");
+                std::thread::sleep(POLL.saturating_sub(asked.elapsed()));
             }
         }
 
@@ -370,6 +379,35 @@ mod tests {
             waiter.wait(key, Duration::ZERO),
             Some(vec![0x02, 0x17, 0x00, 0x00, 0x01])
         );
+    }
+
+    /// A receive that fails at once, every time, as a hung-up descriptor's
+    /// does, is retried once per poll rather than in a tight loop (#39).
+    #[test]
+    fn a_failing_transport_does_not_spin_the_reader() {
+        struct Failing(Arc<std::sync::atomic::AtomicUsize>);
+        impl TransportRx for Failing {
+            fn recv(&mut self, _: Duration) -> crate::error::Result<Option<(u32, Vec<u8>)>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(crate::error::Error::Connection("gone".into()))
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (dev_tx, _dev_rx) = crossbeam_channel::unbounded();
+        let reader = spawn(
+            Box::new(Failing(calls.clone())),
+            Arc::new(State::new()),
+            Arc::new(Waiter::new()),
+            dev_tx,
+            shutdown.clone(),
+            test_config(ALIVE),
+        );
+        std::thread::sleep(POLL * 3);
+        shutdown.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+        let n = calls.load(Ordering::Relaxed);
+        assert!((1..=5).contains(&n), "{n} receives in three polls");
     }
 
     // ── liveness, over the fake bus ─────────────────────────────────────────

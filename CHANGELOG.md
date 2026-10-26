@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `MasterBus::link_connected`, and `Transport::link` with its `LinkState`,
+  to ask whether the link to the bus is there. (#39)
+
 ### Fixed
 - **An alternator regulator's `Stop charge` can no longer be switched off
   from Signal K without `allow_off`.** The regulator reports its outputs as
@@ -23,6 +27,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   events: exactly five actions, none of which sets a chosen value, and
   outputs that can have more states than on and off. The unused
   `protocol::menu::TOTAL` is deprecated in favour of `EVENTABLES`.
+- **The USB link comes back after it is unplugged.** When the Mastervolt
+  USB link was unplugged and plugged back in, `masterbus-signalk` kept
+  running but never received anything again until it was restarted. It now
+  notices the link is gone, looks for it every two seconds (the same link by
+  serial number, when one is configured), and carries on as soon as it is
+  back; the devices reappear within a few seconds. The log says when the link
+  is lost and when it is back, and `/api/status` has a new `link` field,
+  `connected` or `lost`, so the plugin can show it. Thanks to
+  @Peter-Petrik for the report and the analysis. (#39)
 
 ## [0.5.0] - 2026-10-25
 
