@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-26
+
 ### Added
 - `MasterBus::link_connected`, and `Transport::link` with its `LinkState`,
   to ask whether the link to the bus is there. (#39)
