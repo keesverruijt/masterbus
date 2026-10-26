@@ -65,6 +65,7 @@ impl Transport for Reconnecting {
                 reopen: self.reopen,
                 retry: self.retry,
                 next_try: Instant::now(),
+                opened: Instant::now(),
                 link: self.link,
             }),
             Box::new(Tx {
@@ -88,6 +89,10 @@ struct Rx {
     retry: Duration,
     /// When to try to open the link again, while it is lost.
     next_try: Instant,
+    /// When the current link was opened. A link lost within `retry` of
+    /// opening waits out the rest before the next try, so one that opens
+    /// but fails at once is not reopened several times a second.
+    opened: Instant,
     link: LinkState,
 }
 
@@ -102,7 +107,7 @@ impl TransportRx for Rx {
                     self.inner = None;
                     *self.slot.lock().unwrap() = None;
                     self.link.set(false);
-                    self.next_try = Instant::now();
+                    self.next_try = (self.opened + self.retry).max(Instant::now());
                     log::warn!(
                         "{} lost ({e}); looking for it every {:?}",
                         self.what,
@@ -122,6 +127,7 @@ impl TransportRx for Rx {
                     self.inner = Some(rx);
                     *self.slot.lock().unwrap() = Some(tx);
                     self.link.set(true);
+                    self.opened = now;
                     log::info!("{} back", self.what);
                     return Ok(None);
                 }
@@ -278,6 +284,49 @@ mod tests {
         assert_eq!(rx.recv(tick).unwrap(), Some((4, vec![4])));
         tx.send(5, &[5]).unwrap();
         assert_eq!(r.on_wire.try_recv().unwrap(), (5, vec![5]));
+    }
+
+    /// A link that opens but fails its first read (a stale node) is reopened
+    /// once per retry interval, not on every receive.
+    #[test]
+    fn a_link_that_fails_at_once_is_reopened_once_per_interval() {
+        struct Stale;
+        struct StaleRx;
+        impl Transport for Stale {
+            fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
+                (Box::new(StaleRx), Box::new(PlugTx(unbounded().0)))
+            }
+        }
+        impl TransportRx for StaleRx {
+            fn recv(&mut self, _: Duration) -> Result<Option<Frame>> {
+                Err(Error::Connection("USB read: the USB link went away".into()))
+            }
+        }
+        let opens = Arc::new(AtomicUsize::new(0));
+        let reopen = {
+            let opens = opens.clone();
+            move || {
+                opens.fetch_add(1, Ordering::Relaxed);
+                Ok(Box::new(Stale) as Box<dyn Transport>)
+            }
+        };
+        let retry = Duration::from_millis(100);
+        let t: Box<dyn Transport> = Box::new(Reconnecting::new(
+            "USB link",
+            Box::new(Stale),
+            reopen,
+            retry,
+        ));
+        let (mut rx, _tx) = t.split();
+        let t0 = Instant::now();
+        while t0.elapsed() < retry * 5 {
+            // The reader waits out a short poll after an error.
+            if rx.recv(Duration::from_millis(10)).is_err() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let n = opens.load(Ordering::Relaxed);
+        assert!((3..=6).contains(&n), "{n} opens in five retry intervals");
     }
 
     // ── the whole engine, over the fake bus ─────────────────────────────────
