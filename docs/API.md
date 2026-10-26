@@ -88,6 +88,7 @@ of every menu discovered on it (Monitoring at least).
         "path": "electrical.inverters.inverter.dc.voltage",
         "put": false,
         "output": false,
+        "eventOnly": false,
         "allowOff": false,
         "value": 25.6
       }
@@ -104,6 +105,9 @@ of every menu discovered on it (Monitoring at least).
 - `output` is `true` for one of the device's eventable outputs, which other
   devices' events switch (see the PUT below). It is known once the device
   has been opened with `GET /api/devices/{serial}`.
+- `eventOnly` is `true` for an output a PUT switches the way an event does:
+  every output except a writable field without options (a plain switch, like
+  a DSD channel, which is written like any other field).
 - `value` is the last value the stream saw, **in the device's own unit**
   (the mapping's SI conversion is not applied), or `null` if none has been
   seen. Only mapped fields are streamed, so an unmapped field has a value
@@ -149,9 +153,11 @@ device in at that level and retry once; `level` is `installer`,
 `distributor` or `mvservice`, and `code` is the vendor's numeric code. A
 rejected code is also `403`.
 
-An eventable output that is not writable is switched the way another
-device's event switches it instead. A value that means on (`true`, or a
-number or index other than 0) switches it on. Off is refused with `403`
+An output marked `eventOnly` is switched the way another device's event
+switches it instead, whether or not the device calls it writable (an
+alternator regulator does, for outputs that are enums without labels). A
+value that means on (`true`, or a number or index other than 0) switches
+it on. Off is refused with `403`
 and `"needs": "allowOff"` unless the mapping entry carries
 `"allow_off": true`: the device's own events drive the output too, and
 switching it off can undo what one of them asked for.

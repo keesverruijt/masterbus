@@ -214,7 +214,10 @@ own protection both drive. When the editor opens a device, the daemon asks
 it for them and lists the ones no menu shows. With `"put": true` a PUT
 switches such an output **on** the way an event does. It switches it
 **off** only if the entry also carries `"allow_off": true`, because
-switching off would also undo a stop that a battery asked for.
+switching off would also undo a stop that a battery asked for. An output
+that is a plain writable switch, like a DSD channel, is the exception: it
+is written like any other field, off included. An output whose options
+have no labels, like the regulator's, publishes and takes `true` / `false`.
 
 ### Run as a systemd service
 
