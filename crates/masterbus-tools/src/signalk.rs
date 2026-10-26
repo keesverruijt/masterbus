@@ -238,7 +238,7 @@ pub fn plan(
     let boolean_leaf = leaf_is_boolean(path);
 
     let mut truth = entry.truth.clone();
-    if boolean_leaf && !options.is_empty() {
+    if boolean_leaf && !options.is_empty() && !unlabeled(options) {
         if truth.is_empty() {
             truth = truth_default(options).ok_or_else(|| Refusal::Truth {
                 labels: options.to_vec(),
@@ -297,6 +297,22 @@ pub fn plan(
         notify: entry.notify.clone(),
         warning,
     })
+}
+
+/// Whether an enum's labels are all empty, as on an APR's outputs, whose
+/// options all name string 0 (#29). Such an enum says only off (option 0) or
+/// on (any other), so it publishes and takes a boolean, with no truth table.
+pub fn unlabeled(options: &[String]) -> bool {
+    !options.is_empty() && options.iter().all(|o| o.trim().is_empty())
+}
+
+/// The enum's labels, or `None` for a value that is not an enum.
+fn labels_of(value: &Value) -> Option<&[String]> {
+    match value {
+        Value::List { options, .. } => Some(options),
+        Value::Eventable { labels, .. } => Some(labels),
+        _ => None,
+    }
 }
 
 /// The notification state an enum label conventionally deserves, for the
@@ -442,6 +458,17 @@ pub fn encode(
             Some(serde_json::Value::from(conv.apply(secs)))
         }
         Value::Time(_) => None,
+        // An enum without labels: off for option 0, on for any other it has.
+        // An index past its options is not a value; nothing is published.
+        Value::List { index, .. } | Value::Eventable { index, .. }
+            if labels_of(value).is_some_and(unlabeled) =>
+        {
+            let n = labels_of(value).map_or(0, <[String]>::len);
+            usize::try_from(*index)
+                .ok()
+                .filter(|i| *i < n)
+                .map(|i| serde_json::Value::Bool((i != 0) ^ invert))
+        }
         // An enum with a truth table is a boolean in disguise.
         Value::List { .. } | Value::Eventable { .. } if !truth.is_empty() => {
             let label = value.label()?;
@@ -495,6 +522,11 @@ pub fn decode(
         Value::Boolean(_) => {
             let b = as_bool(json).ok_or_else(|| format!("expected true or false, got {json}"))?;
             Ok(Value::Boolean(b ^ invert))
+        }
+        // An enum without labels takes on (option 1) or off (option 0).
+        Value::List { .. } | Value::Eventable { .. } if unlabeled(labels) => {
+            let b = as_bool(json).ok_or_else(|| format!("expected true or false, got {json}"))?;
+            Ok(with_index(template, i32::from(b ^ invert)))
         }
         Value::List { .. } | Value::Eventable { .. } if !truth.is_empty() => {
             let want = as_bool(json)
@@ -574,6 +606,50 @@ fn with_index(template: &Value, index: i32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An APR's outputs are enums whose three labels are all empty (#29).
+    /// They publish and take a boolean by option number, and a boolean leaf
+    /// needs no truth table for them.
+    #[test]
+    fn an_enum_without_labels_is_off_or_on() {
+        let options = vec![String::new(); 3];
+        let entry = FieldMapping {
+            path: "electrical.chargers.alternator.stopCharge.state".into(),
+            ..Default::default()
+        };
+        let p = plan(&entry.path, "", &options, &entry).unwrap();
+        assert!(p.truth.is_empty());
+        let at = |index| Value::List {
+            index,
+            options: options.clone(),
+        };
+        let none = BTreeMap::new();
+        let id = Conversion::IDENTITY;
+        assert_eq!(
+            encode(&at(0), id, false, &none),
+            Some(serde_json::json!(false))
+        );
+        assert_eq!(
+            encode(&at(1), id, false, &none),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(
+            encode(&at(2), id, false, &none),
+            Some(serde_json::json!(true))
+        );
+        // An index the field does not have publishes nothing.
+        assert_eq!(encode(&at(3), id, false, &none), None);
+        assert_eq!(encode(&at(-1), id, false, &none), None);
+        assert_eq!(
+            decode(&serde_json::json!(true), &at(0), id, false, &none),
+            Ok(at(1))
+        );
+        assert_eq!(
+            decode(&serde_json::json!("off"), &at(1), id, false, &none),
+            Ok(at(0))
+        );
+        assert!(decode(&serde_json::json!("maybe"), &at(0), id, false, &none).is_err());
+    }
     use crate::units::conversion;
     use masterbus::value::Time;
 

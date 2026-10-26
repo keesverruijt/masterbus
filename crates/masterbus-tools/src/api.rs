@@ -308,6 +308,17 @@ impl Shared {
             .is_some_and(|(o, _)| o.contains(&field))
     }
 
+    /// Whether a PUT on this field must switch it the way an event does,
+    /// asking the device for its outputs if it has not been asked yet. A
+    /// field whose options have no labels always is, whether or not the
+    /// device listed it: if the list could not be had (a busy bus), an APR's
+    /// writable `Stop charge` must still not take the ordinary write. The
+    /// switch itself then refuses a field the device does not list, so it
+    /// fails closed.
+    fn event_only(&self, id: DeviceId, f: &crate::publish::FieldRec) -> bool {
+        signalk::unlabeled(&f.options) || (event_only(f) && self.is_output(id, f.id))
+    }
+
     /// Put a new mapping in force: persist, replace, re-resolve, tell the
     /// daemon. Returns what resolving it had to say.
     fn adopt(&self, m: Mapping) -> Result<publish::Resolved, String> {
@@ -529,6 +540,7 @@ fn device_json(
                 "path": entry.map(|e| e.path.clone()),
                 "put": entry.is_some_and(|e| e.put),
                 "output": outputs.is_some_and(|o| o.contains(&f.id)),
+                "eventOnly": outputs.is_some_and(|o| o.contains(&f.id)) && event_only(f),
                 "allowOff": entry.is_some_and(|e| e.allow_off),
                 "value": values.get(&(d.id, f.id)).map(raw_json),
             })
@@ -558,10 +570,13 @@ pub fn raw_json(v: &Value) -> Json {
         }
         Value::Float(_) | Value::Invalid => Json::Null,
         Value::Boolean(b) => json!(b),
-        Value::List { index, .. } | Value::Eventable { index, .. } => match v.label() {
-            Some(l) => json!(l),
-            None => json!(index),
-        },
+        // An option without a label shows as its number, not as "".
+        Value::List { index, .. } | Value::Eventable { index, .. } => {
+            match v.label().filter(|l| !l.trim().is_empty()) {
+                Some(l) => json!(l),
+                None => json!(index),
+            }
+        }
         Value::Text { text, .. } => json!(text),
         Value::Time(t) if t.sec >= 0 => {
             json!(
@@ -689,10 +704,9 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
         Ok(v) => v,
         Err(e) => return Response::error(400, e),
     };
-    // An eventable output the device won't let us write is switched the
-    // way an event switches it: on always, off only when the mapping allows
-    // it (#29).
-    if !f.writable && shared.is_output(d.id, f.id) {
+    // An output that events drive is switched the way an event switches
+    // it: on always, off only when the mapping allows it (#29).
+    if shared.event_only(d.id, &f) {
         let Some(on) = switched_on(&value) else {
             return Response::error(400, format!("{} takes on or off", f.name));
         };
@@ -748,6 +762,17 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
         }
         Err(e) => Response::error(502, format!("writing {}: {e}", f.name)),
     }
+}
+
+/// Whether an eventable output is one that a PUT must switch the way an
+/// event does: on always, off only when the mapping allows it (#29). That is
+/// an output the device does not let us write, or one whose options have no
+/// labels: an APR's outputs are writable, but as enums whose labels are all
+/// empty, and the batteries drive `Stop charge` for their own protection.
+/// Any other writable output (a DSD channel, a CZone control, an INT's
+/// `Override`) is a switch people use, written like any other field.
+fn event_only(f: &crate::publish::FieldRec) -> bool {
+    !f.writable || signalk::unlabeled(&f.options)
 }
 
 /// Whether a decoded PUT value means on: a boolean, or a number or list
@@ -910,7 +935,7 @@ fn validate(shared: &Shared, body: &[u8]) -> Response {
                     signalk::mode_leaf(path)
                 ));
             }
-            let output = !f.writable && shared.is_output(f_device, f.id);
+            let output = shared.event_only(f_device, &f);
             if b.entry.put && output && !b.entry.allow_off {
                 warnings.push(format!(
                     "{} is an output the device's own events also drive; a PUT can only switch it on",
@@ -1170,8 +1195,16 @@ mod tests {
         }
         fn set_output(&self, id: DeviceId, field: FieldId, on: bool) -> masterbus::Result<Value> {
             self.0.switched.lock().unwrap().push((id, field, on));
-            let v = Value::Float(if on { 1.0 } else { 0.0 });
-            self.0.values.lock().unwrap().insert((id, field), v.clone());
+            let mut values = self.0.values.lock().unwrap();
+            // The field keeps its kind; an enum selects option 1 or 0.
+            let v = match values.get(&(id, field)) {
+                Some(Value::List { options, .. }) => Value::List {
+                    index: i32::from(on),
+                    options: options.clone(),
+                },
+                _ => Value::Float(if on { 1.0 } else { 0.0 }),
+            };
+            values.insert((id, field), v.clone());
             Ok(v)
         }
     }
@@ -1794,7 +1827,8 @@ mod tests {
     }
 
     /// An APR-like device: `Stop charge` (`0x027`) is its fourth eventable
-    /// output, which no menu lists and no write may reach (#29).
+    /// output, which no menu lists. As on Peter's APR (#29) it reports itself
+    /// writable, as an enum of three options whose labels are all empty.
     fn apr() -> (Arc<Shared>, Arc<StubState>, DeviceId) {
         let d = dev("APR-1", "APR ALT 110A", &[(0x005, "Charger state", "")]);
         let id = d.id;
@@ -1810,20 +1844,23 @@ mod tests {
                 index: 0x027,
                 name: "Stop charge".into(),
                 unit: String::new(),
-                viz_type: masterbus::VisualizationType::Float,
-                writeable: false,
+                viz_type: masterbus::VisualizationType::DropDown,
+                writeable: true,
                 eventable: true,
                 min: 0.0,
-                max: 1.0,
+                max: 3.0,
                 step: 1.0,
-                options: vec![],
+                options: vec![String::new(); 3],
             },
         );
-        state
-            .values
-            .lock()
-            .unwrap()
-            .insert((id, 0x027), Value::Float(0.0));
+        state.writable.lock().unwrap().insert((id, 0x027), true);
+        state.values.lock().unwrap().insert(
+            (id, 0x027),
+            Value::List {
+                index: 0,
+                options: vec![String::new(); 3],
+            },
+        );
         let (shared, _) = shared_with(bus, vec![d], Mapping::new());
         (shared, state, id)
     }
@@ -1842,7 +1879,8 @@ mod tests {
             .expect("Stop charge");
         assert_eq!(stop["name"], "Stop charge");
         assert_eq!(stop["output"], true);
-        assert_eq!(stop["writable"], false);
+        assert_eq!(stop["writable"], true);
+        assert_eq!(stop["eventOnly"], true, "writable, but an enum");
         let state_field = fields.iter().find(|f| f["id"] == "0x005").unwrap();
         assert_eq!(state_field["output"], false);
         // The three outputs the stub can't describe are left out, and the
@@ -1882,10 +1920,11 @@ mod tests {
             )
         };
 
-        let r = put(json!(1));
+        let r = put(json!(true));
         assert_eq!(r.status, 200, "{}", r.body);
-        assert_eq!(r.body["applied"], 1.0);
-        let r = put(json!(0));
+        assert_eq!(r.body["applied"], 1, "option 1, which has no label");
+        assert_eq!(r.body["published"], true);
+        let r = put(json!(false));
         assert_eq!(r.status, 403, "{}", r.body);
         assert_eq!(r.body["needs"], "allowOff");
         assert_eq!(*state.switched.lock().unwrap(), vec![(id, 0x027, true)]);
@@ -1901,7 +1940,7 @@ mod tests {
             .unwrap()
             .fields
             .insert(field_key(0x027), entry(true));
-        assert_eq!(put(json!(0)).status, 200);
+        assert_eq!(put(json!(false)).status, 200);
         assert_eq!(
             *state.switched.lock().unwrap(),
             vec![(id, 0x027, true), (id, 0x027, false)]
@@ -1949,6 +1988,137 @@ mod tests {
         shared.outputs.lock().unwrap().get_mut(&id).unwrap().1 -= NO_OUTPUTS_KEPT;
         get(&shared, "/api/devices/MLI-1");
         assert_eq!(*state.output_asks.lock().unwrap(), 2);
+    }
+
+    /// If the device's output list could not be had (a busy bus at the first
+    /// ask), an APR's writable, label-less `Stop charge` still never takes the
+    /// ordinary write: off stays refused without `allow_off`, and on goes
+    /// through the switch, which refuses a field the device does not list.
+    #[test]
+    fn an_output_without_labels_is_guarded_without_the_output_list() {
+        let (shared, state, id) = apr();
+        state.outputs.lock().unwrap().remove(&id);
+        let d = shared.devices.lock().unwrap()[0].clone();
+        shared.devices.lock().unwrap()[0]
+            .fields
+            .push(crate::publish::FieldRec {
+                id: 0x027,
+                name: "Stop charge".into(),
+                unit: String::new(),
+                options: vec![String::new(); 3],
+                writable: true,
+                menu: Menu::Monitoring,
+                group: String::new(),
+            });
+        let mut dm = DeviceMapping::default();
+        dm.fields.insert(
+            field_key(0x027),
+            FieldMapping {
+                path: "electrical.chargers.alternator.stopCharge".into(),
+                put: true,
+                ..Default::default()
+            },
+        );
+        shared
+            .mapping
+            .lock()
+            .unwrap()
+            .devices
+            .insert(d.serial.clone(), dm);
+        let r = send(
+            &shared,
+            "PUT",
+            "/api/devices/APR-1/fields/0x027",
+            json!({"value": false}),
+        );
+        assert_eq!(r.status, 403, "{}", r.body);
+        assert_eq!(r.body["needs"], "allowOff");
+        assert!(state.writes.lock().unwrap().is_empty());
+    }
+
+    /// A DSD channel is an eventable output too, but a writable switch: a
+    /// PUT writes it like any other field, off included, with no
+    /// `allow_off` needed. Suster Anna switches its DSD channels this way.
+    #[test]
+    fn a_writable_switch_that_is_also_an_output_switches_off_as_before() {
+        let mut d = dev("DSD-1", "DSD 1 Power", &[]);
+        d.fields.push(crate::publish::FieldRec {
+            id: 0x011,
+            name: "Backup H5 Pilot".into(),
+            unit: String::new(),
+            options: vec![],
+            writable: true,
+            menu: Menu::Monitoring,
+            group: "Outputs".into(),
+        });
+        let id = d.id;
+        let (bus, state) = StubBus::new(0.0);
+        state.outputs.lock().unwrap().insert(id, vec![0x011]);
+        state.writable.lock().unwrap().insert((id, 0x011), true);
+        state
+            .values
+            .lock()
+            .unwrap()
+            .insert((id, 0x011), Value::Boolean(true));
+        let mut m = Mapping::new();
+        let mut dm = DeviceMapping::default();
+        dm.fields.insert(
+            field_key(0x011),
+            FieldMapping {
+                path: "electrical.switches.dsd1.port8.state".into(),
+                put: true,
+                ..Default::default()
+            },
+        );
+        m.devices.insert("DSD-1".into(), dm);
+        let (shared, _) = shared_with(bus, vec![d], m);
+
+        let dev_json = get(&shared, "/api/devices/DSD-1").body;
+        assert_eq!(dev_json["fields"][0]["output"], true);
+        assert_eq!(dev_json["fields"][0]["eventOnly"], false);
+        let r = send(
+            &shared,
+            "PUT",
+            "/api/devices/DSD-1/fields/0x011",
+            json!({"value": false}),
+        );
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(
+            *state.writes.lock().unwrap(),
+            vec![(id, 0x011, Value::Boolean(false))]
+        );
+        assert!(state.switched.lock().unwrap().is_empty());
+    }
+
+    /// Only an output that cannot be written, or whose options have no
+    /// labels, is switched like an event. A labelled writable list, like an
+    /// INT's `Override` (`Standby` / `Activated`), stays an ordinary switch
+    /// even if a device lists it among its outputs.
+    #[test]
+    fn only_unwritable_or_unlabeled_outputs_are_event_only() {
+        let f = |writable, options: &[&str]| crate::publish::FieldRec {
+            id: 0x001,
+            name: "x".into(),
+            unit: String::new(),
+            options: options.iter().map(|s| s.to_string()).collect(),
+            writable,
+            menu: Menu::Monitoring,
+            group: String::new(),
+        };
+        assert!(event_only(&f(false, &[])));
+        assert!(event_only(&f(true, &["", "", ""])));
+        assert!(!event_only(&f(true, &[])));
+        assert!(!event_only(&f(true, &["Standby", "Activated"])));
+    }
+
+    /// An option without a label reads as its number, not as "".
+    #[test]
+    fn an_option_without_a_label_shows_its_number() {
+        let v = Value::List {
+            index: 2,
+            options: vec![String::new(); 3],
+        };
+        assert_eq!(raw_json(&v), json!(2));
     }
 
     /// A Signal K PUT of `true` on an inverted boolean writes `false` to the

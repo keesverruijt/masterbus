@@ -312,10 +312,17 @@ impl Disc<'_> {
     /// Group count for a menu selector; `None` if the device didn't answer,
     /// which is not the same as a count of zero. (#31)
     fn group_count(&mut self, addr: DeviceId, selector: u8) -> Option<u32> {
+        self.selector(addr, selector).flatten()
+    }
+
+    /// Ask `[0x08, selector]`: `None` if the device didn't answer,
+    /// `Some(None)` if it refused (the selector echoed alone, which is matched
+    /// only for the output-list selectors, see `waiter_key_for_frame`), else
+    /// the value.
+    fn selector(&mut self, addr: DeviceId, selector: u8) -> Option<Option<u32>> {
         let key = format!("p:{:06X}:08:{:02X}", addr, selector);
         self.req_std(&key, group_count_req_raw(addr, selector))
-            .filter(|r| r.len() >= 4)
-            .map(|r| u16::from_le_bytes([r[2], r[3]]) as u32)
+            .map(|r| (r.len() >= 4).then(|| u16::from_le_bytes([r[2], r[3]]) as u32))
     }
 }
 
@@ -715,14 +722,22 @@ pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<Field
 }
 
 /// The field ids of a device's eventable outputs, output `K` at position `K`,
-/// as the device lists them: `[0x08, 0x40 + K]` answers the field index of
-/// output `K` (PROTOCOL.md §4.3, §9a). The list ends at the device's
-/// refusal after the last, or at the first selector it does not answer, so
-/// a device that does not answer `K = 0` has none to drive.
+/// as the device lists them, the way MasterAdjust asks: `[0x08, 0x3F]` for
+/// their number (at most 32), then `[0x08, 0x40 + K]` for the field index of
+/// output `K` (PROTOCOL.md §4.3, §9a). A device that gives no number is asked
+/// until it refuses or does not answer, so a device that does not answer
+/// `K = 0` has none to drive.
 pub(super) fn eventable_outputs(disc: &mut Disc, addr: DeviceId) -> Vec<FieldId> {
+    use crate::protocol::menu::{EVENTABLE_0, EVENTABLES, MAX_EVENTABLES};
+    let count = match disc.selector(addr, EVENTABLES) {
+        Some(Some(n)) => n.min(u32::from(MAX_EVENTABLES)) as u8,
+        // Refused: the device has none.
+        Some(None) => return Vec::new(),
+        None => MAX_EVENTABLES,
+    };
     let mut out = Vec::new();
-    for k in 0..=(0xFF - 0x40) {
-        match disc.group_count(addr, 0x40 + k) {
+    for k in 0..count {
+        match disc.group_count(addr, EVENTABLE_0 + k) {
             // Outputs are Monitoring fields, on the Btm1 channel. Index 0xFF
             // is left out: its commit register, index + 1, does not exist.
             Some(index) if index < 0xFF => out.push(field_id::btm1(index as u8)),

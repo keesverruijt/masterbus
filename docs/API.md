@@ -88,6 +88,7 @@ of every menu discovered on it (Monitoring at least).
         "path": "electrical.inverters.inverter.dc.voltage",
         "put": false,
         "output": false,
+        "eventOnly": false,
         "allowOff": false,
         "value": 25.6
       }
@@ -104,6 +105,10 @@ of every menu discovered on it (Monitoring at least).
 - `output` is `true` for one of the device's eventable outputs, which other
   devices' events switch (see the PUT below). It is known once the device
   has been opened with `GET /api/devices/{serial}`.
+- `eventOnly` is `true` for an output a PUT switches the way an event does:
+  one the device does not let us write, or one whose options have no labels
+  (an alternator regulator's). Any other writable output, like a DSD
+  channel, is written like any other field.
 - `value` is the last value the stream saw, **in the device's own unit**
   (the mapping's SI conversion is not applied), or `null` if none has been
   seen. Only mapped fields are streamed, so an unmapped field has a value
@@ -149,9 +154,15 @@ device in at that level and retry once; `level` is `installer`,
 `distributor` or `mvservice`, and `code` is the vendor's numeric code. A
 rejected code is also `403`.
 
-An eventable output that is not writable is switched the way another
-device's event switches it instead. A value that means on (`true`, or a
-number or index other than 0) switches it on. Off is refused with `403`
+An output marked `eventOnly` is switched the way another device's event
+switches it instead, whether or not the device calls it writable (an
+alternator regulator does, for outputs that are enums without labels). The
+value is decoded as for any field first, so it is `true` / `false` for a
+boolean, a number, an enum without labels or an enum with a truth table,
+and a label or option index for any other enum. A value that means on
+(`true`, a number other than 0, an option other than the first) switches it
+on. An enum without labels is always switched this way; if the device does
+not list it as an output, the write is refused (`502`). Off is refused with `403`
 and `"needs": "allowOff"` unless the mapping entry carries
 `"allow_off": true`: the device's own events drive the output too, and
 switching it off can undo what one of them asked for.

@@ -1241,8 +1241,19 @@ mod tests {
             .collect()
     }
 
-    /// A device lists its eventable outputs by `[0x08, 0x40 + K]` and refuses
-    /// the selector after the last; the list is asked once.
+    /// The output-list questions sent so far: `[0x08, 0x3F]` and
+    /// `[0x08, 0x40 + K]`.
+    fn output_asks(bus: &FakeBus) -> Vec<u8> {
+        bus.sent_class(can_class::PROPERTY_REQ)
+            .into_iter()
+            .filter(|(_, d)| d.len() == 2 && d[0] == 0x08 && d[1] >= 0x3F)
+            .map(|(_, d)| d[1])
+            .collect()
+    }
+
+    /// A device says how many eventable outputs it has (`[0x08, 0x3F]`), and
+    /// `[0x08, 0x40 + K]` lists each, the way MasterAdjust asks; the list is
+    /// asked once.
     #[test]
     fn a_device_lists_its_eventable_outputs() {
         let device = Device::new().with_outputs(&[0x21, 0x23, 0x25, 0x27]);
@@ -1250,13 +1261,33 @@ mod tests {
         let want: Vec<FieldId> = [0x21, 0x23, 0x25, 0x27].map(field_id::btm1).to_vec();
         assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
         assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
-        let asked = bus
-            .sent_class(can_class::PROPERTY_REQ)
-            .into_iter()
-            .filter(|(_, d)| d.len() == 2 && d[0] == 0x08 && d[1] >= 0x40)
-            .count();
-        // The refusal after the last ends the list without a retry.
-        assert_eq!(asked, 5, "four outputs and the refused fifth, asked once");
+        assert_eq!(output_asks(&bus), vec![0x3F, 0x40, 0x41, 0x42, 0x43]);
+    }
+
+    /// A device that does not answer the count is asked output by output
+    /// until it refuses; the refusal ends the list without a retry.
+    #[test]
+    fn a_device_without_a_count_is_asked_until_it_refuses() {
+        let mut device = Device::new().with_outputs(&[0x21, 0x23]);
+        device.uncounted = true;
+        let (engine, bus) = connect(device, test_config());
+        let want: Vec<FieldId> = [0x21, 0x23].map(field_id::btm1).to_vec();
+        assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
+        let asks = output_asks(&bus);
+        assert!(asks.iter().all(|&s| s == 0x3F || s >= 0x40));
+        assert_eq!(
+            asks.iter().filter(|&&s| s >= 0x40).count(),
+            3,
+            "{asks:02X?}"
+        );
+    }
+
+    /// A device with no outputs refuses the count, and nothing more is asked.
+    #[test]
+    fn a_device_without_outputs_is_asked_once() {
+        let (engine, bus) = connect(Device::new(), test_config());
+        assert!(engine.eventable_outputs(ADDR).unwrap().is_empty());
+        assert_eq!(output_asks(&bus), vec![0x3F]);
     }
 
     /// An APR's `Stop charge` is an output no menu shows and no write may

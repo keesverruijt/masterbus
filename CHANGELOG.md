@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **An alternator regulator's `Stop charge` can no longer be switched off
+  from Signal K without `allow_off`.** The regulator reports its outputs as
+  writable, so in 0.5.0 a PUT took the ordinary write and the off rule did
+  not apply. An output whose options have no labels now goes through the
+  event switch too, writable or not; other writable outputs, like a DSD
+  channel, are written like any other field. Its outputs' options have no
+  labels, so they read as `""`; such an enum now publishes and takes
+  `true` / `false` (option 0 is off), and the API shows its option number.
+  Thanks to @Peter-Petrik for finding both. (#29)
+- **A device's outputs are listed the way MasterAdjust lists them:** first
+  their number (`[0x08, 0x3F]`, at most 32), then each one. A device with
+  none says so at once. PROTOCOL.md now calls `0x3F` the output count, not
+  a total tab count, and records what MasterAdjust's code says about
+  events: exactly five actions, none of which sets a chosen value, and
+  outputs that can have more states than on and off. The unused
+  `protocol::menu::TOTAL` is deprecated in favour of `EVENTABLES`.
+
 ## [0.5.0] - 2026-10-25
 
 ### Added
