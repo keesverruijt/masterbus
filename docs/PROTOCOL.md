@@ -224,8 +224,10 @@ class `0x06` with `u16LE(lo, hi)`. Selectors that matter:
 | `0x02` | Number of **Monitoring** groups (selector for the schema offset, §5).    |
 | `0x03` | Number of **Configuration** groups. **Unreliable** on some devices — see caveat below. |
 | `0x04` | Number of **Service** groups.                                            |
-| `0x3F` | **Total tab count** (`mon + alarm + history + config`), *not* a per-tab count. |
-| `0x40 + K` | Field index of the device's `K`-th **eventable output** (§9a). Past the last, a DSD answers the selector alone (`[0x08, SEL]`, DLC 2) from `addr \| 0x800000`. |
+| `0x0D` | Named `MasterBusVoltage` in MasterAdjust (`FUN_00490b20`); a DSD answers `0x2C`, so the unit is not known. |
+| `0x3E` | `EventGeneratingGroup` in MasterAdjust: the Configuration group that holds the device's events. |
+| `0x3F` | **Number of eventable outputs** (`Eventables` in MasterAdjust, which accepts at most 32). An ISO GI Trafo with one output (`Reset`) answers `1`. A device with none refuses it like `0x40 + K` below. Earlier versions of this document called it a total tab count, which it is not. |
+| `0x40 + K` | Field index of the device's `K`-th **eventable output** (§9a), for `K` below the `0x3F` count. Past the last, a DSD answers the selector alone (`[0x08, SEL]`, DLC 2) from `addr \| 0x800000`. |
 
 > **`[0x08, 0x03]` is unreliable** on Magic-class devices (and likely
 > others). The Mac/Magic family — e.g. the **INT Nav Chg** at `0x3A3B4B`
@@ -688,7 +690,14 @@ consecutive config fields**:
 | `Event N source`  | 0x03 DropDown   | the trigger condition on this device (device-specific list, e.g. `Stop charge`, `Battery low`) |
 | `Event N target`  | 0x09 DeviceList | **which device to act on** |
 | `Event N command` | 0x0A            | **which of the target's eventable outputs** |
-| `Event N data`    | 0x03 DropDown   | the action: `Off` / `On` / `Copy` / `Copy invert` / `Toggle` |
+| `Event N data`    | 0x03 DropDown   | the action, one of exactly five: `Off` / `On` / `Copy` / `Copy invert` / `Toggle` |
+
+The actions are carried out by the device firmware; MasterAdjust has no code
+for them and only shows the device's labels. Its hidden "Check event list"
+(`FUN_00637234`) requires the data field to have exactly 5 options, and every
+event on the reference bus does. There is no action that sets a target to a
+chosen value. An INT's string table also has `Pulse (1 sec)`, but no event
+field on the reference bus offers it.
 
 **The target is an index into the bus device list sorted by device address
 ascending** — the exact order `masterbus_devices()` (and this crate's
@@ -715,12 +724,26 @@ sibling `Event N target`.
 > fields don't reply. So querying it blocking on every field pays a full timeout
 > on the silent majority. Query it *best-effort* (the reply, when it comes,
 > arrives with the rest of the field's metadata batch) and only on Monitoring
-> fields — or ask the device for the list: `[0x08, 0x40 + K]` (§4.3) answers
-> the field index of eventable output `K`, and refuses past the last.
-> A DSD answers `03 05 07 09 0B 0D 0F 11 13 15 2E 31` (12 outputs), and the
-> APR answers `0x43` with `0x27`, its 4th output. `[0x08, 0x0D]`, which
-> MasterAdjust reads in its `MB_Device_General_Count` sweep, is **not** the
-> count: that DSD answers `0x2C`.
+> fields — or ask the device for the list, as MasterAdjust does
+> (`FUN_00687418`): `[0x08, 0x3F]` (§4.3) answers how many outputs there are
+> (at most 32), and `[0x08, 0x40 + K]` the field index of output `K`, refused
+> past the last. A DSD answers `03 05 07 09 0B 0D 0F 11 13 15 2E 31`
+> (12 outputs), and the APR answers `0x43` with `0x27`, its 4th output.
+> MasterAdjust asks `0x0D` (the eventable flag) only of Monitoring fields of
+> viz 3, 4, 5 or 11 (`FUN_00681ed0`), which is why no other field is ever an
+> output.
+>
+> **An output is not always on/off.** An EasyView's outputs (`State`,
+> `Feed back 1`–`6`) are drop-downs `Off` / `On` / `Alarm`. An APR's four
+> outputs are drop-downs with three options whose labels all name string 0,
+> so what option 2 means there is not known. What `On`, `Copy` or `Toggle`
+> writes into such an output is up to the firmware.
+>
+> **MasterAdjust commits every write to an eventable field** (`FUN_006832d8`
+> sets the commit flag from op `0x0D`), whatever its type: a drop-down is
+> written as its option index, then committed (§7.3). masterbus commits only
+> boolean writes, and switches an output with `1.0` (on) or `0.0` (off) plus
+> the commit.
 >
 > An output's commit register is at its index + 1 (§7.3), so an output at
 > index `0xFF` would have none: masterbus leaves such an output out of the

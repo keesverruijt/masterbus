@@ -224,12 +224,13 @@ pub fn waiter_key_for_frame(can_class_byte: u8, device_addr: u32, data: &[u8]) -
             if data.len() < 2 {
                 return None;
             }
-            // Past its last eventable output a device refuses `[0x08, 0x40 +
-            // K]` with the selector alone, from the shadow address (§4.3).
-            // Matched to the request so the output list ends at once; other
-            // replies from the shadow address are not answers anyone waits on.
+            // A device refuses `[0x08, 0x3F]` (no outputs) and `[0x08, 0x40 +
+            // K]` past its last output with the selector alone, from the
+            // shadow address (§4.3). Matched to the request so the output
+            // list ends at once; other replies from the shadow address are
+            // not answers anyone waits on.
             if device_addr & BTM1_META_ADDR_FLAG != 0 {
-                return (data.len() == 2 && data[0] == 0x08 && data[1] >= 0x40).then(|| {
+                return (data.len() == 2 && data[0] == 0x08 && data[1] >= 0x3F).then(|| {
                     format!(
                         "p:{:06X}:08:{:02X}",
                         device_addr & !BTM1_META_ADDR_FLAG,
@@ -350,6 +351,10 @@ mod tests {
         assert_eq!(
             waiter_key_for_frame(p, 0xC0944B, &[0x08, 0x4C]).as_deref(),
             Some("p:40944B:08:4C")
+        );
+        assert_eq!(
+            waiter_key_for_frame(p, 0xC12D03, &[0x08, 0x3F]).as_deref(),
+            Some("p:412D03:08:3F")
         );
         assert_eq!(waiter_key_for_frame(p, 0xC0944B, &[0x08, 0x20]), None);
         assert_eq!(

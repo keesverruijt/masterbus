@@ -78,8 +78,18 @@ pub mod menu {
     pub const CONFIG: u8 = 0x03;
     /// Service-level groups.
     pub const SERVICE: u8 = 0x04;
-    /// Total group count (all menus).
+    /// The number of eventable outputs, which MasterAdjust calls
+    /// `Eventables` (PROTOCOL.md §4.3). Named `TOTAL` from an early reading
+    /// as a total group count; kept under that name for compatibility.
+    #[deprecated(note = "0x3F is the eventable-output count; use `EVENTABLES`")]
     pub const TOTAL: u8 = 0x3F;
+    /// The number of eventable outputs (`Eventables` in MasterAdjust); output
+    /// `K` is then asked with [`EVENTABLE_0`]` + K` (PROTOCOL.md §4.3, §9a).
+    pub const EVENTABLES: u8 = 0x3F;
+    /// The selector of eventable output 0; output `K` is `EVENTABLE_0 + K`.
+    pub const EVENTABLE_0: u8 = 0x40;
+    /// The most eventable outputs MasterAdjust accepts from a device.
+    pub const MAX_EVENTABLES: u8 = 32;
 }
 
 /// Per-field metadata opcodes carried inside Btm1 and Btm3 metadata frames.
