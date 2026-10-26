@@ -660,6 +660,9 @@ pub struct FakeBus {
     pub devices: Vec<Arc<Mutex<Device>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// The engine's ends of the wire, for [`FakeBus::connector`].
+    up_rx: Receiver<Frame>,
+    down_tx: Sender<Frame>,
 }
 
 impl FakeBus {
@@ -745,6 +748,8 @@ impl FakeBus {
                 devices,
                 stop,
                 thread: Some(thread),
+                up_rx: up_rx.clone(),
+                down_tx: down_tx.clone(),
             },
             Box::new(FakeTransport { up_rx, down_tx }),
         )
@@ -761,6 +766,19 @@ impl FakeBus {
             .into_iter()
             .filter(|(raw_id, _)| ((raw_id >> 24) & 0x1F) as u8 == class)
             .collect()
+    }
+
+    /// Opens another connection to this bus each time it is called, the way
+    /// a link that was lost is opened again. Frames the device sends go to
+    /// whichever connection receives first, so a test drops the old one.
+    pub fn connector(&self) -> impl Fn() -> Box<dyn Transport> + Send + 'static {
+        let (up_rx, down_tx) = (self.up_rx.clone(), self.down_tx.clone());
+        move || {
+            Box::new(FakeTransport {
+                up_rx: up_rx.clone(),
+                down_tx: down_tx.clone(),
+            })
+        }
     }
 
     /// Edit the device mid-test (change a value, go quiet, add a login code).

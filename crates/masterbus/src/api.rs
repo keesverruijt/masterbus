@@ -180,6 +180,16 @@ impl MasterBus {
         self.engine.device_events()
     }
 
+    /// Whether the link to the bus is there. Only the USB link can be lost
+    /// (unplugged) and found again, which it is by itself; while it is lost
+    /// no frames arrive, sends are dropped and devices go offline, and they
+    /// announce themselves again once it is back. A connection through
+    /// another process's relay is lost when that process stops. Every other
+    /// transport is always connected.
+    pub fn link_connected(&self) -> bool {
+        self.engine.link_connected()
+    }
+
     /// Subscribe to live updates of `fields` on `device` at `interval`.
     pub fn subscribe(
         &self,

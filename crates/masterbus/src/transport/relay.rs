@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use super::{Transport, TransportRx, TransportTx};
+use super::{LinkState, Transport, TransportRx, TransportTx};
 use crate::error::{Error, Result};
 
 /// The announcement file's name, in the cache folder.
@@ -54,6 +54,7 @@ pub fn share(
         .local_addr()
         .map_err(|e| Error::Connection(format!("relay address: {e}")))?;
     let token = new_token();
+    let link = transport.link();
     let (mut rx, tx) = transport.split();
     let tx: SharedTx = Arc::new(Mutex::new(tx));
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
@@ -116,7 +117,14 @@ pub fn share(
         }
     }
 
-    Ok((Box::new(Owned { rx: own_rx, tx }), addr))
+    Ok((
+        Box::new(Owned {
+            rx: own_rx,
+            tx,
+            link,
+        }),
+        addr,
+    ))
 }
 
 fn serve_client(stream: TcpStream, token: &str, tx: SharedTx, clients: Arc<Mutex<Vec<TcpStream>>>) {
@@ -156,11 +164,17 @@ fn serve_client(stream: TcpStream, token: &str, tx: SharedTx, clients: Arc<Mutex
 struct Owned {
     rx: Receiver<Result<Frame>>,
     tx: SharedTx,
+    /// The wire's own link: the relay is connected when the wire is.
+    link: LinkState,
 }
 
 impl Transport for Owned {
     fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
         (Box::new(OwnedRx(self.rx)), Box::new(OwnedTx(self.tx)))
+    }
+
+    fn link(&self) -> LinkState {
+        self.link.clone()
     }
 }
 
@@ -189,6 +203,8 @@ pub struct RelayTransport {
     rx: Receiver<Frame>,
     stream: TcpStream,
     addr: SocketAddr,
+    /// Lost when the daemon sharing the bus goes away.
+    link: LinkState,
 }
 
 impl RelayTransport {
@@ -211,11 +227,23 @@ impl RelayTransport {
         }
         reader.get_ref().set_read_timeout(None).map_err(fail)?;
         let (tx, rx) = unbounded();
-        std::thread::Builder::new()
-            .name("masterbus-relay-client".into())
-            .spawn(move || pump(reader, tx))
-            .map_err(fail)?;
-        Ok(RelayTransport { rx, stream, addr })
+        let link = LinkState::new();
+        {
+            let link = link.clone();
+            std::thread::Builder::new()
+                .name("masterbus-relay-client".into())
+                .spawn(move || {
+                    pump(reader, tx);
+                    link.set(false);
+                })
+                .map_err(fail)?;
+        }
+        Ok(RelayTransport {
+            rx,
+            stream,
+            addr,
+            link,
+        })
     }
 
     /// The relay's address.
@@ -235,6 +263,10 @@ fn pump(mut reader: BufReader<TcpStream>, tx: Sender<Frame>) {
 impl Transport for RelayTransport {
     fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
         (Box::new(ClientRx(self.rx)), Box::new(ClientTx(self.stream)))
+    }
+
+    fn link(&self) -> LinkState {
+        self.link.clone()
     }
 }
 

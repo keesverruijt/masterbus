@@ -24,7 +24,7 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 use crate::error::{Error, Result};
 use crate::model::{DeviceId, FieldId};
-use crate::transport::Transport;
+use crate::transport::{LinkState, Transport};
 use crate::value::{Value, WriteValue};
 
 /// Tunable, lib-level behaviour.
@@ -226,6 +226,7 @@ pub(crate) struct Engine {
     device_events: Receiver<DeviceEvent>,
     next_sub_id: AtomicU64,
     shutdown: Arc<AtomicBool>,
+    link: LinkState,
     _reader: JoinHandle<()>,
     _scheduler: JoinHandle<()>,
 }
@@ -239,6 +240,7 @@ impl Engine {
             return Err(Error::InvalidBusId { bus_id });
         }
         let started = Instant::now();
+        let link = transport.link();
         let (rx, tx) = transport.split();
         let state = Arc::new(State::new());
         let waiter = Arc::new(Waiter::new());
@@ -290,6 +292,7 @@ impl Engine {
             device_events: dev_rx,
             next_sub_id: AtomicU64::new(1),
             shutdown,
+            link,
             _reader: reader,
             _scheduler: scheduler,
         }))
@@ -500,6 +503,11 @@ impl Engine {
     /// Device presence event stream.
     pub fn device_events(&self) -> Receiver<DeviceEvent> {
         self.device_events.clone()
+    }
+
+    /// Whether the transport's link to the bus is there.
+    pub fn link_connected(&self) -> bool {
+        self.link.is_connected()
     }
 }
 

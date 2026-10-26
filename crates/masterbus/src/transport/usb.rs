@@ -29,7 +29,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{Transport, TransportRx, TransportTx};
+use super::reconnect::Reconnecting;
+use super::{LinkState, Transport, TransportRx, TransportTx};
 use crate::error::{Error, Result};
 
 /// Mastervolt USB vendor id.
@@ -40,14 +41,52 @@ const MAX_DATA: usize = 8;
 /// Cap each blocking HID read so the writer can't be starved of the shared lock.
 const READ_CAP: Duration = Duration::from_millis(50);
 
+/// How often a lost link is looked for again. A link that is plugged back
+/// in takes about a second to appear.
+const RETRY: Duration = Duration::from_secs(2);
+
 /// Mastervolt USB-link transport (HID).
-pub struct UsbTransport {
-    dev: Arc<Mutex<Dev>>,
-}
+///
+/// When the link goes away (it is unplugged, or the host resets it), the
+/// transport closes it and looks for it again every two seconds, the same way
+/// it was found at start: by serial number when one was given, else the
+/// first link. [`Transport::link`] says whether it is there.
+pub struct UsbTransport(Reconnecting);
 
 impl UsbTransport {
     /// Open the first MasterBus USB Link, or the one with the given serial number.
     pub fn open(serial: Option<&str>) -> Result<Self> {
+        let first = UsbLink::open(serial)?;
+        let serial = serial.map(str::to_owned);
+        let reopen =
+            move || UsbLink::open(serial.as_deref()).map(|l| Box::new(l) as Box<dyn Transport>);
+        Ok(UsbTransport(Reconnecting::new(
+            "USB link",
+            Box::new(first),
+            reopen,
+            RETRY,
+        )))
+    }
+}
+
+impl Transport for UsbTransport {
+    fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
+        Box::new(self.0).split()
+    }
+
+    fn link(&self) -> LinkState {
+        self.0.link()
+    }
+}
+
+/// One opening of the link; [`UsbTransport`] makes a new one each time the
+/// link comes back.
+struct UsbLink {
+    dev: Arc<Mutex<Dev>>,
+}
+
+impl UsbLink {
+    fn open(serial: Option<&str>) -> Result<Self> {
         let not_found = || {
             Error::Connection(match serial {
                 Some(s) => format!("no MasterBus USB Link with serial {s}"),
@@ -55,7 +94,7 @@ impl UsbTransport {
             })
         };
         let dev = Dev::open(serial, not_found)?;
-        Ok(UsbTransport {
+        Ok(UsbLink {
             dev: Arc::new(Mutex::new(dev)),
         })
     }
@@ -219,7 +258,7 @@ fn link_serial(uevent: &str) -> Option<String> {
     Some(value("HID_UNIQ").unwrap_or("").to_string())
 }
 
-impl Transport for UsbTransport {
+impl Transport for UsbLink {
     fn split(self: Box<Self>) -> (Box<dyn TransportRx>, Box<dyn TransportTx>) {
         (
             Box::new(Rx {

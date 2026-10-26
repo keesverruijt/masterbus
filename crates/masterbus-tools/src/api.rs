@@ -63,6 +63,10 @@ pub trait BusOps: Send + Sync {
     /// Switch an eventable output the way an event does; returns the value
     /// observed afterwards.
     fn set_output(&self, id: DeviceId, field: FieldId, on: bool) -> masterbus::Result<Value>;
+    /// Whether the link to the bus is there (the USB link can be unplugged).
+    fn link_connected(&self) -> bool {
+        true
+    }
 }
 
 impl BusOps for MasterBus {
@@ -86,6 +90,9 @@ impl BusOps for MasterBus {
     }
     fn set_output(&self, id: DeviceId, field: FieldId, on: bool) -> masterbus::Result<Value> {
         self.device(id).field(field).set_output(on)
+    }
+    fn link_connected(&self) -> bool {
+        MasterBus::link_connected(self)
     }
 }
 
@@ -439,12 +446,18 @@ fn status(shared: &Shared) -> Response {
         "stream": shared.info.stream,
         "api": shared.info.api,
         "uptime": shared.started.elapsed().as_secs(),
+        "link": link_name(shared.bus.link_connected()),
         "devices": devices.len(),
         "mapped": { "devices": mapping.devices.len(), "fields": mapping.len() },
         "streaming": shared.streaming.load(Ordering::Relaxed),
         "clients": shared.clients.load(Ordering::Relaxed),
         "diagnostics": { "errors": count(Severity::Error), "warnings": count(Severity::Warning) },
     }))
+}
+
+/// The link's state as `/api/status` reports it.
+fn link_name(connected: bool) -> &'static str {
+    if connected { "connected" } else { "lost" }
 }
 
 fn devices(shared: &Shared) -> Response {
@@ -1287,6 +1300,8 @@ mod tests {
         assert_eq!(r.body["mapped"]["fields"], mapping.len());
         assert_eq!(r.body["streaming"], 3);
         assert_eq!(r.body["transport"], "can:vcan0");
+        assert_eq!(r.body["link"], "connected");
+        assert_eq!(link_name(false), "lost");
     }
 
     /// The device listing carries everything the editor shows per field: the

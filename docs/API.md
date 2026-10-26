@@ -48,6 +48,7 @@ incompatible. A client should refuse a version it does not know.
   "stream": "0.0.0.0:3009",
   "api": "127.0.0.1:3010",
   "uptime": 3612,
+  "link": "connected",
   "devices": 13,
   "mapped": { "devices": 4, "fields": 25 },
   "streaming": 25,
@@ -55,6 +56,11 @@ incompatible. A client should refuse a version it does not know.
   "diagnostics": { "errors": 0, "warnings": 1 }
 }
 ```
+
+`link` is `connected`, or `lost` while the USB link is unplugged or has
+stopped answering. The daemon looks for the link again every two seconds and
+opens it as soon as it is back; meanwhile no values arrive and `devices`
+still counts every device discovered. A CAN interface is always `connected`.
 
 `streaming` is the number of mapped fields the daemon is actually subscribed
 to (entries with an error diagnostic are not). `clients` counts stream
