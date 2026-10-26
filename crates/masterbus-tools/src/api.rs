@@ -761,12 +761,13 @@ fn write_field(shared: &Shared, serial: &str, key: &str, body: &[u8]) -> Respons
 
 /// Whether an eventable output is one that a PUT must switch the way an
 /// event does: on always, off only when the mapping allows it (#29). That is
-/// every output except a writable field without options, a plain switch or
-/// number like a DSD channel, which is written like any other field. An
-/// APR's outputs are writable, but as enums whose labels are all empty, and
-/// the batteries drive `Stop charge` for their own protection.
+/// an output the device does not let us write, or one whose options have no
+/// labels: an APR's outputs are writable, but as enums whose labels are all
+/// empty, and the batteries drive `Stop charge` for their own protection.
+/// Any other writable output (a DSD channel, a CZone control, an INT's
+/// `Override`) is a switch people use, written like any other field.
 fn event_only(f: &crate::publish::FieldRec) -> bool {
-    !(f.writable && f.options.is_empty())
+    !f.writable || signalk::unlabeled(&f.options)
 }
 
 /// Whether a decoded PUT value means on: a boolean, or a number or list
@@ -2036,6 +2037,27 @@ mod tests {
             vec![(id, 0x011, Value::Boolean(false))]
         );
         assert!(state.switched.lock().unwrap().is_empty());
+    }
+
+    /// Only an output that cannot be written, or whose options have no
+    /// labels, is switched like an event. A labelled writable list, like an
+    /// INT's `Override` (`Standby` / `Activated`), stays an ordinary switch
+    /// even if a device lists it among its outputs.
+    #[test]
+    fn only_unwritable_or_unlabeled_outputs_are_event_only() {
+        let f = |writable, options: &[&str]| crate::publish::FieldRec {
+            id: 0x001,
+            name: "x".into(),
+            unit: String::new(),
+            options: options.iter().map(|s| s.to_string()).collect(),
+            writable,
+            menu: Menu::Monitoring,
+            group: String::new(),
+        };
+        assert!(event_only(&f(false, &[])));
+        assert!(event_only(&f(true, &["", "", ""])));
+        assert!(!event_only(&f(true, &[])));
+        assert!(!event_only(&f(true, &["Standby", "Activated"])));
     }
 
     /// An option without a label reads as its number, not as "".

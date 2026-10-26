@@ -106,8 +106,9 @@ of every menu discovered on it (Monitoring at least).
   devices' events switch (see the PUT below). It is known once the device
   has been opened with `GET /api/devices/{serial}`.
 - `eventOnly` is `true` for an output a PUT switches the way an event does:
-  every output except a writable field without options (a plain switch, like
-  a DSD channel, which is written like any other field).
+  one the device does not let us write, or one whose options have no labels
+  (an alternator regulator's). Any other writable output, like a DSD
+  channel, is written like any other field.
 - `value` is the last value the stream saw, **in the device's own unit**
   (the mapping's SI conversion is not applied), or `null` if none has been
   seen. Only mapped fields are streamed, so an unmapped field has a value

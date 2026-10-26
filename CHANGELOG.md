@@ -10,9 +10,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **An alternator regulator's `Stop charge` can no longer be switched off
   from Signal K without `allow_off`.** The regulator reports its outputs as
   writable, so in 0.5.0 a PUT took the ordinary write and the off rule did
-  not apply. Every output that events drive now goes through the event
-  switch, writable or not; only a plain writable switch, like a DSD
-  channel, is written like any other field. Its outputs' options have no
+  not apply. An output whose options have no labels now goes through the
+  event switch too, writable or not; other writable outputs, like a DSD
+  channel, are written like any other field. Its outputs' options have no
   labels, so they read as `""`; such an enum now publishes and takes
   `true` / `false` (option 0 is off), and the API shows its option number.
   Thanks to @Peter-Petrik for finding both. (#29)
