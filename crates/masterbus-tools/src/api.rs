@@ -309,9 +309,14 @@ impl Shared {
     }
 
     /// Whether a PUT on this field must switch it the way an event does,
-    /// asking the device for its outputs if it has not been asked yet.
+    /// asking the device for its outputs if it has not been asked yet. A
+    /// field whose options have no labels always is, whether or not the
+    /// device listed it: if the list could not be had (a busy bus), an APR's
+    /// writable `Stop charge` must still not take the ordinary write. The
+    /// switch itself then refuses a field the device does not list, so it
+    /// fails closed.
     fn event_only(&self, id: DeviceId, f: &crate::publish::FieldRec) -> bool {
-        self.is_output(id, f.id) && event_only(f)
+        signalk::unlabeled(&f.options) || (event_only(f) && self.is_output(id, f.id))
     }
 
     /// Put a new mapping in force: persist, replace, re-resolve, tell the
@@ -1983,6 +1988,52 @@ mod tests {
         shared.outputs.lock().unwrap().get_mut(&id).unwrap().1 -= NO_OUTPUTS_KEPT;
         get(&shared, "/api/devices/MLI-1");
         assert_eq!(*state.output_asks.lock().unwrap(), 2);
+    }
+
+    /// If the device's output list could not be had (a busy bus at the first
+    /// ask), an APR's writable, label-less `Stop charge` still never takes the
+    /// ordinary write: off stays refused without `allow_off`, and on goes
+    /// through the switch, which refuses a field the device does not list.
+    #[test]
+    fn an_output_without_labels_is_guarded_without_the_output_list() {
+        let (shared, state, id) = apr();
+        state.outputs.lock().unwrap().remove(&id);
+        let d = shared.devices.lock().unwrap()[0].clone();
+        shared.devices.lock().unwrap()[0]
+            .fields
+            .push(crate::publish::FieldRec {
+                id: 0x027,
+                name: "Stop charge".into(),
+                unit: String::new(),
+                options: vec![String::new(); 3],
+                writable: true,
+                menu: Menu::Monitoring,
+                group: String::new(),
+            });
+        let mut dm = DeviceMapping::default();
+        dm.fields.insert(
+            field_key(0x027),
+            FieldMapping {
+                path: "electrical.chargers.alternator.stopCharge".into(),
+                put: true,
+                ..Default::default()
+            },
+        );
+        shared
+            .mapping
+            .lock()
+            .unwrap()
+            .devices
+            .insert(d.serial.clone(), dm);
+        let r = send(
+            &shared,
+            "PUT",
+            "/api/devices/APR-1/fields/0x027",
+            json!({"value": false}),
+        );
+        assert_eq!(r.status, 403, "{}", r.body);
+        assert_eq!(r.body["needs"], "allowOff");
+        assert!(state.writes.lock().unwrap().is_empty());
     }
 
     /// A DSD channel is an eventable output too, but a writable switch: a

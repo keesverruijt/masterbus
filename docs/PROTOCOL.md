@@ -734,9 +734,13 @@ sibling `Event N target`.
 > output.
 >
 > **An output is not always on/off.** An EasyView's outputs (`State`,
-> `Feed back 1`–`6`) are drop-downs `Off` / `On` / `Alarm`. An APR's four
-> outputs are drop-downs with three options whose labels all name string 0,
-> so what option 2 means there is not known. What `On`, `Copy` or `Toggle`
+> `Feed back 1`–`6`) are drop-downs `Off` / `On` / `Alarm`. An APR ALT 110A
+> (article 45513000, firmware 4.0) reports its four outputs (`0x21` Bulk,
+> `0x23` Absorption, `0x25` Float, `0x27` Stop charge) as **writable**
+> (op `0x0B` = 1) drop-downs with a maximum of 3 and three options whose
+> labels all name string 0, which is not a label (#29; MasterAdjust's export
+> shows the same). The EasyView turns Stop charge on with `1.0` and off with
+> `0.0`; what option 2 means is not known. What `On`, `Copy` or `Toggle`
 > writes into such an output is up to the firmware.
 >
 > **MasterAdjust commits every write to an eventable field** (`FUN_006832d8`

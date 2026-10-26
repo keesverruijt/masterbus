@@ -156,9 +156,13 @@ rejected code is also `403`.
 
 An output marked `eventOnly` is switched the way another device's event
 switches it instead, whether or not the device calls it writable (an
-alternator regulator does, for outputs that are enums without labels). A
-value that means on (`true`, or a number or index other than 0) switches
-it on. Off is refused with `403`
+alternator regulator does, for outputs that are enums without labels). The
+value is decoded as for any field first, so it is `true` / `false` for a
+boolean, a number, an enum without labels or an enum with a truth table,
+and a label or option index for any other enum. A value that means on
+(`true`, a number other than 0, an option other than the first) switches it
+on. An enum without labels is always switched this way; if the device does
+not list it as an output, the write is refused (`502`). Off is refused with `403`
 and `"needs": "allowOff"` unless the mapping entry carries
 `"allow_off": true`: the device's own events drive the output too, and
 switching it off can undo what one of them asked for.

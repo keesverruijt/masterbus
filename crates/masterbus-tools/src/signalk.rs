@@ -458,11 +458,16 @@ pub fn encode(
             Some(serde_json::Value::from(conv.apply(secs)))
         }
         Value::Time(_) => None,
-        // An enum without labels: off for option 0, on for any other.
+        // An enum without labels: off for option 0, on for any other it has.
+        // An index past its options is not a value; nothing is published.
         Value::List { index, .. } | Value::Eventable { index, .. }
             if labels_of(value).is_some_and(unlabeled) =>
         {
-            Some(serde_json::Value::Bool((*index != 0) ^ invert))
+            let n = labels_of(value).map_or(0, <[String]>::len);
+            usize::try_from(*index)
+                .ok()
+                .filter(|i| *i < n)
+                .map(|i| serde_json::Value::Bool((i != 0) ^ invert))
         }
         // An enum with a truth table is a boolean in disguise.
         Value::List { .. } | Value::Eventable { .. } if !truth.is_empty() => {
@@ -632,6 +637,9 @@ mod tests {
             encode(&at(2), id, false, &none),
             Some(serde_json::json!(true))
         );
+        // An index the field does not have publishes nothing.
+        assert_eq!(encode(&at(3), id, false, &none), None);
+        assert_eq!(encode(&at(-1), id, false, &none), None);
         assert_eq!(
             decode(&serde_json::json!(true), &at(0), id, false, &none),
             Ok(at(1))
