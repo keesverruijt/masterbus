@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use masterbus::{
@@ -38,7 +38,7 @@ use crate::units::Conversion;
 
 /// How long a device's answer that it has no eventable outputs is kept
 /// before it is asked again.
-const NO_OUTPUTS_KEPT: std::time::Duration = std::time::Duration::from_secs(300);
+const NO_OUTPUTS_KEPT: Duration = Duration::from_secs(300);
 
 /// The version of the API's shapes. The plugin refuses to talk to a daemon
 /// whose `apiVersion` it does not know.
@@ -141,6 +141,38 @@ pub struct Shared {
     /// Each device's eventable outputs once asked (see `ensure_outputs`),
     /// and when.
     pub outputs: Mutex<HashMap<DeviceId, (Vec<FieldId>, Instant)>>,
+    /// When the devices were identified and started streaming.
+    pub timeline: Mutex<Timeline>,
+}
+
+/// How the start went, measured from the daemon's start: when the first
+/// pass over the bus ended, and per device when it was identified and when
+/// its mapped fields started streaming. With these a slow start can be told
+/// apart from one slow device, without guessing from the Signal K side (#40).
+#[derive(Debug, Default)]
+pub struct Timeline {
+    /// When the first pass over the bus ended; `None` while it runs.
+    pub walked: Option<Duration>,
+    /// Per device, once it is identified.
+    pub devices: HashMap<DeviceId, DeviceTimes>,
+}
+
+/// One device's line in the [`Timeline`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DeviceTimes {
+    /// When its identity (and, if mapped, its PUT targets) was known.
+    pub identified: Duration,
+    /// How long identifying it took, from the first request to it.
+    pub took: Duration,
+    /// Whether it was first heard after the first pass over the bus.
+    pub late: bool,
+    /// When its mapped fields were first subscribed; `None` while none are.
+    pub streaming: Option<Duration>,
+}
+
+/// Seconds to a tenth, for the API and the log.
+pub fn secs(d: Duration) -> f64 {
+    (d.as_secs_f64() * 10.0).round() / 10.0
 }
 
 impl Shared {
@@ -452,6 +484,7 @@ fn status(shared: &Shared) -> Response {
         "streaming": shared.streaming.load(Ordering::Relaxed),
         "clients": shared.clients.load(Ordering::Relaxed),
         "diagnostics": { "errors": count(Severity::Error), "warnings": count(Severity::Warning) },
+        "walked": shared.timeline.lock().unwrap().walked.map(secs),
     }))
 }
 
@@ -465,12 +498,16 @@ fn devices(shared: &Shared) -> Response {
     let mapping = shared.mapping.lock().unwrap();
     let values = shared.values.lock().unwrap();
     let outputs = shared.outputs.lock().unwrap();
+    let timeline = shared.timeline.lock().unwrap();
     let mut sorted: Vec<&DeviceRec> = devices.iter().collect();
     sorted.sort_by_key(|d| d.id);
     Response::ok(Json::Array(
         sorted
             .into_iter()
-            .map(|d| device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o)))
+            .map(|d| {
+                device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o))
+                    .with_times(timeline.devices.get(&d.id))
+            })
             .collect(),
     ))
 }
@@ -519,13 +556,12 @@ fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
     let mapping = shared.mapping.lock().unwrap();
     let values = shared.values.lock().unwrap();
     let outputs = shared.outputs.lock().unwrap();
+    let timeline = shared.timeline.lock().unwrap();
     match devices.iter().find(|d| d.serial == serial) {
-        Some(d) => Response::ok(device_json(
-            d,
-            &mapping,
-            &values,
-            outputs.get(&d.id).map(|(o, _)| o),
-        )),
+        Some(d) => Response::ok(
+            device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o))
+                .with_times(timeline.devices.get(&d.id)),
+        ),
         None => Response::error(404, format!("no device with serial {serial}")),
     }
 }
@@ -570,6 +606,26 @@ fn device_json(
         "mapped": dm.map(|m| m.fields.len()).unwrap_or(0),
         "fields": fields,
     })
+}
+
+/// Adds a device's [`DeviceTimes`] to its JSON as `timeline`.
+trait WithTimes {
+    fn with_times(self, times: Option<&DeviceTimes>) -> Json;
+}
+
+impl WithTimes for Json {
+    fn with_times(mut self, times: Option<&DeviceTimes>) -> Json {
+        self["timeline"] = match times {
+            Some(t) => json!({
+                "identified": secs(t.identified),
+                "took": secs(t.took),
+                "late": t.late,
+                "streaming": t.streaming.map(secs),
+            }),
+            None => Json::Null,
+        };
+        self
+    }
 }
 
 /// A device value as plain JSON, in the device's own unit: what the editor
@@ -1247,6 +1303,7 @@ mod tests {
             clients: AtomicUsize::new(0),
             asked: Mutex::new(HashSet::new()),
             outputs: Mutex::new(HashMap::new()),
+            timeline: Mutex::new(Timeline::default()),
         };
         (Arc::new(shared), rx)
     }
@@ -1302,6 +1359,45 @@ mod tests {
         assert_eq!(r.body["transport"], "can:vcan0");
         assert_eq!(r.body["link"], "connected");
         assert_eq!(link_name(false), "lost");
+        assert_eq!(r.body["walked"], Json::Null);
+        shared.timeline.lock().unwrap().walked = Some(Duration::from_millis(171_240));
+        assert_eq!(get(&shared, "/api/status").body["walked"], 171.2);
+    }
+
+    /// Each device says when it was identified and when its fields started
+    /// streaming, so a slow start can be measured from the API (#40).
+    #[test]
+    fn devices_carry_when_they_were_identified_and_started_streaming() {
+        let devices = vec![mli()];
+        let id = devices[0].id;
+        let mapping = publish::seed_mapping(&devices);
+        let (shared, _) = shared_with(StubBus::plain(), devices, mapping);
+        // Not identified by the daemon's discovery (a test or a stub): null.
+        assert_eq!(get(&shared, "/api/devices").body[0]["timeline"], Json::Null);
+        shared.timeline.lock().unwrap().devices.insert(
+            id,
+            DeviceTimes {
+                identified: Duration::from_millis(312_440),
+                took: Duration::from_millis(8_050),
+                late: true,
+                streaming: None,
+            },
+        );
+        let t = &get(&shared, "/api/devices").body[0]["timeline"];
+        assert_eq!(t["identified"], 312.4);
+        assert_eq!(t["took"], 8.1);
+        assert_eq!(t["late"], true);
+        assert_eq!(t["streaming"], Json::Null);
+        shared
+            .timeline
+            .lock()
+            .unwrap()
+            .devices
+            .get_mut(&id)
+            .unwrap()
+            .streaming = Some(Duration::from_millis(313_000));
+        let d = get(&shared, "/api/devices/MLI-1").body;
+        assert_eq!(d["timeline"]["streaming"], 313.0);
     }
 
     /// The device listing carries everything the editor shows per field: the

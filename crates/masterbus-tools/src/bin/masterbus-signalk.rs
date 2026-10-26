@@ -52,12 +52,19 @@
 //! the file is also re-read when it changes on disk, so an edit in
 //! `masterbus-tui --mapping` lands within a couple of seconds.
 //!
-//! Discovery does not end at startup. A device that announces itself after
-//! the initial pass — a quiet interface, or a charger switched on when shore
-//! power is connected — is identified as it appears and, if the mapping names
-//! its serial, starts publishing then (#22). A mapping that names a field
-//! outside the Monitoring menu (a writable setting exposed as a PUT target)
-//! has that device's Configuration menu discovered before it is resolved.
+//! Each device starts publishing as soon as it is identified, rather than
+//! once the whole bus has been walked: identifying a device costs a few dozen
+//! round trips, and on a big bus the last one is minutes behind the first
+//! (#40). Discovery does not end at startup either. A device that announces
+//! itself after the initial pass — a quiet interface, or a charger switched
+//! on when shore power is connected — is identified as it appears and, if
+//! the mapping names its serial, starts publishing then (#22). A mapping that
+//! names a field outside the Monitoring menu (a writable setting exposed as a
+//! PUT target) has that device's Configuration menu discovered before it is
+//! resolved. All of this runs on one discovery thread, a device at a time,
+//! so the stream never waits for it. Each device's identification and the
+//! start of its stream are logged with the seconds since start, and served
+//! by the API as its `timeline`.
 //!
 //! An enum whose mapping names alarm labels (`"notify": {"Alarm": "alarm"}`)
 //! also drives `notifications.<path>`: the spec's `state` / `method` /
@@ -75,8 +82,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use masterbus::{Config, DeviceId, FieldId, MasterBus, Subscription, Value};
-use masterbus_tools::api::{self, Info, Shared};
+use crossbeam_channel::{Receiver, Sender};
+use masterbus::{Config, DeviceEvent, DeviceId, FieldId, MasterBus, Subscription, Value};
+use masterbus_tools::api::{self, DeviceTimes, Info, Shared, secs};
 use masterbus_tools::mapping::{Mapping, NotifyState};
 use masterbus_tools::publish::{self, DeviceRec, Emit};
 use masterbus_tools::signalk;
@@ -311,21 +319,148 @@ struct Options {
     transport: String,
 }
 
-/// Walk the bus and collect every device's monitoring fields, adding each
-/// to `shared` as it is done. From a cold cache a big bus takes a minute or
-/// more, and the API (and the plugin's editor behind it) should show the
-/// devices as they arrive rather than nothing until the last one.
-fn discover(bus: &MasterBus, shared: &Shared) {
-    let mut devices = bus.devices_all();
-    devices.sort_by_key(|d| d.id());
-    for dev in &devices {
-        let rec = DeviceRec::discover(dev);
+/// What the discovery thread tells the main loop.
+#[derive(Debug, PartialEq)]
+enum Found {
+    /// A device's record is in `shared.devices`, with whatever its mapping
+    /// needs beyond Monitoring already discovered. `mapped` says whether the
+    /// mapping names it, which is when the stream has to be re-resolved.
+    Device { id: DeviceId, mapped: bool },
+    /// The first pass over the bus is done.
+    Walked,
+}
+
+/// The order devices are identified in: the ones on the bus at start
+/// (`first`), then each one that announces itself later, once. One at a
+/// time, on one thread, so each device can start publishing as soon as it
+/// is identified. (A thread per late device queued every identity request
+/// ahead of every menu request on the one scheduler, so none of them
+/// finished until nearly all had; #40.)
+fn walk(
+    first: Vec<DeviceId>,
+    events: Receiver<DeviceEvent>,
+    mut identify: impl FnMut(DeviceId, bool),
+    walked: impl FnOnce(),
+) {
+    let mut known: HashSet<DeviceId> = HashSet::new();
+    for id in first {
+        if known.insert(id) {
+            identify(id, false);
+        }
+    }
+    walked();
+    for ev in events.iter() {
+        if let DeviceEvent::Alive(id) = ev
+            && known.insert(id)
+        {
+            identify(id, true);
+        }
+    }
+}
+
+/// Identify one device and add its record to `shared` (the API shows the
+/// devices as they arrive). When the mapping names it, what its mapped
+/// fields need beyond Monitoring is discovered here too, on the discovery
+/// thread, rather than in the main loop, where it would hold up the stream.
+fn identify(bus: &MasterBus, shared: &Shared, id: DeviceId, late: bool, found: &Sender<Found>) {
+    let t0 = Instant::now();
+    let rec = DeviceRec::discover(&bus.device(id));
+    let mapping = shared.mapping.lock().unwrap().clone();
+    let mapped = mapping.devices.contains_key(&rec.serial);
+    {
         let mut list = shared.devices.lock().unwrap();
         if !list.iter().any(|d| d.id == rec.id) {
-            list.push(rec);
+            list.push(rec.clone());
             list.sort_by_key(|d| d.id);
         }
     }
+    if mapped {
+        shared.ensure_menus(&mapping);
+    }
+    let times = DeviceTimes {
+        identified: shared.started.elapsed(),
+        took: t0.elapsed(),
+        late,
+        streaming: None,
+    };
+    let what = if late {
+        "joined the bus late,"
+    } else {
+        "identified"
+    };
+    let tail = if rec.serial.is_empty() {
+        "; it did not identify itself, so it cannot be mapped"
+    } else if !late {
+        ""
+    } else if mapped {
+        "; resolving its mapping"
+    } else {
+        "; it is not in the mapping — add it in the Signal K plugin or `masterbus-tui --mapping`"
+    };
+    eprintln!(
+        "masterbus-signalk: {} ({}) [{:06X}] {what} {:.1} s after start, in {:.1} s{tail}",
+        rec.name,
+        rec.serial,
+        rec.id,
+        secs(times.identified),
+        secs(times.took),
+    );
+    shared.timeline.lock().unwrap().devices.insert(id, times);
+    let _ = found.send(Found::Device { id, mapped });
+}
+
+/// Start the discovery thread: the first pass over the bus, then the
+/// devices that join later, for as long as the daemon runs.
+fn spawn_discovery(bus: MasterBus, shared: Arc<Shared>) -> Receiver<Found> {
+    let (tx, rx) = crossbeam_channel::unbounded::<Found>();
+    std::thread::Builder::new()
+        .name("masterbus-discovery".into())
+        .spawn(move || {
+            let events = bus.device_events();
+            let mut first: Vec<DeviceId> = bus.devices_all().iter().map(|d| d.id()).collect();
+            first.sort();
+            eprintln!(
+                "masterbus-signalk: {} device(s) on the bus {:.1} s after start; identifying them",
+                first.len(),
+                secs(shared.started.elapsed()),
+            );
+            let done = tx.clone();
+            walk(
+                first,
+                events,
+                |id, late| identify(&bus, &shared, id, late, &tx),
+                || {
+                    let at = shared.started.elapsed();
+                    shared.timeline.lock().unwrap().walked = Some(at);
+                    eprintln!(
+                        "masterbus-signalk: first pass over the bus done {:.1} s after start",
+                        secs(at)
+                    );
+                    let _ = done.send(Found::Walked);
+                },
+            );
+        })
+        .expect("spawn the discovery thread");
+    rx
+}
+
+/// What the main loop knows about discovery, for [`activate`].
+#[derive(Default)]
+struct Progress {
+    /// Devices the discovery thread is done with. One still being prepared
+    /// is left out of the stream until it is, so its PUT targets are not
+    /// reported missing in the meantime.
+    ready: HashSet<DeviceId>,
+    /// Whether the first pass over the bus is done. Until then, a mapped
+    /// device that is not on the bus may just not have been reached yet.
+    walked: bool,
+    /// Diagnostics already printed, so re-resolving as each device arrives
+    /// does not repeat them. Cleared when the mapping changes.
+    printed: HashSet<String>,
+    /// A first run whose walk seeded nothing (it found no device yet) seeds
+    /// from the first device that arrives. Off once something is seeded or
+    /// the mapping is replaced, so a mapping emptied on purpose stays empty.
+    may_seed: bool,
 }
 
 fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
@@ -365,6 +500,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
         clients: AtomicUsize::new(0),
         asked: Mutex::new(std::collections::HashSet::new()),
         outputs: Mutex::new(HashMap::new()),
+        timeline: Mutex::new(api::Timeline::default()),
     });
 
     {
@@ -419,96 +555,86 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
     );
     let _ = std::io::stdout().flush();
 
-    discover(&bus, &shared);
-
-    // Load the curated mapping; seed one on first run so there is something to
-    // publish and, more importantly, something to edit.
-    let mut mapping = match &opts.mapping_path {
+    // Load the curated mapping before the bus is walked, so each device can
+    // start publishing as soon as it is identified (#40). A first run has no
+    // mapping; one is seeded once the walk is done, because seeding needs
+    // the devices.
+    let mapping = match &opts.mapping_path {
         Some(p) => Mapping::load(p).unwrap_or_else(|e| {
             eprintln!("masterbus-signalk: {e}; starting from an empty mapping");
             Mapping::new()
         }),
         None => Mapping::new(),
     };
-    if mapping.is_empty() {
-        mapping = publish::seed_mapping(&shared.devices.lock().unwrap());
-        match &opts.mapping_path {
-            Some(p) if !mapping.is_empty() => match mapping.save(p) {
-                Ok(()) => eprintln!(
-                    "masterbus-signalk: no mapping yet — seeded {} field(s) from the built-in \
-                     heuristics and wrote {}. Review it in the Signal K plugin or with \
-                     `masterbus-tui --mapping`.",
-                    mapping.len(),
-                    p.display()
-                ),
-                Err(e) => eprintln!("masterbus-signalk: could not write {}: {e}", p.display()),
-            },
-            _ => eprintln!(
-                "masterbus-signalk: no mapping file; using {} heuristic field(s) for this run",
-                mapping.len()
-            ),
-        }
-    }
     *shared.mapping.lock().unwrap() = mapping;
 
-    let mut active = activate(&bus, &shared, &clients, &static_batch);
+    let found = spawn_discovery(bus.clone(), shared.clone());
+    let mut progress = Progress::default();
+    let mut active = Active::new();
     let mapping_path = opts.mapping_path.as_deref();
     let mut stamp = mtime(mapping_path);
     let mut last_check = Instant::now();
 
-    // Devices that announce themselves after the discovery pass — the quiet
-    // interfaces on a big bus, or a charger switched on when shore power is
-    // connected hours later (#22). Presence events name them; each is
-    // identified on its own thread, because reading a schema from a cold
-    // cache can take a while and the values already streaming must not stall
-    // behind it, and joins the bus here when its record arrives.
-    let events = bus.device_events();
-    let (found_tx, found_rx) = crossbeam_channel::unbounded::<DeviceRec>();
-    let mut pending: HashSet<DeviceId> = HashSet::new();
-
     loop {
-        while let Ok(ev) = events.try_recv() {
-            let masterbus::DeviceEvent::Alive(id) = ev else {
-                continue;
-            };
-            if shared.devices.lock().unwrap().iter().any(|d| d.id == id) || !pending.insert(id) {
-                continue;
-            }
-            let dev = bus.device(id);
-            let tx = found_tx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(DeviceRec::discover(&dev));
-            });
-        }
-        while let Ok(rec) = found_rx.try_recv() {
-            pending.remove(&rec.id);
-            let mapped = shared
-                .mapping
-                .lock()
-                .unwrap()
-                .devices
-                .contains_key(&rec.serial);
-            eprintln!(
-                "masterbus-signalk: {} ({}) [{:06X}] joined the bus late; {}",
-                rec.name,
-                rec.serial,
-                rec.id,
-                if mapped {
-                    "resolving its mapping"
-                } else if rec.serial.is_empty() {
-                    "it did not identify itself, so it cannot be mapped"
-                } else {
-                    "it is not in the mapping — add it in the Signal K plugin or `masterbus-tui --mapping`"
+        // Devices the discovery thread is done with. A burst of them (a warm
+        // cache on a quiet bus) is resolved once.
+        let mut changed = false;
+        let mut seeded = false;
+        while let Ok(f) = found.try_recv() {
+            match f {
+                Found::Device { id, mapped } => {
+                    progress.ready.insert(id);
+                    changed |= mapped;
+                    // A first run whose walk found nobody (the bus still
+                    // starting) seeded nothing: seed from the first device
+                    // that does arrive, or it never publishes. Only while
+                    // there is still no mapping file: a mapping saved over
+                    // the API, even an empty one, is a file, and is never
+                    // seeded over, whatever order its reload and this
+                    // device arrive in.
+                    if progress.may_seed
+                        && no_mapping_file(mapping_path)
+                        && seed_if_empty(&shared, mapping_path, false)
+                    {
+                        progress.may_seed = false;
+                        seeded = true;
+                        changed = true;
+                        stamp = mtime(mapping_path);
+                    }
                 }
+                Found::Walked => {
+                    progress.walked = true;
+                    changed = true;
+                    // A first run is one with no mapping file. An empty
+                    // mapping someone saved is a file, and stays empty; so
+                    // does one that could not be read, rather than being
+                    // overwritten.
+                    let first_run = no_mapping_file(mapping_path) || mapping_path.is_none();
+                    seeded = first_run && seed_if_empty(&shared, mapping_path, true);
+                    if !first_run && shared.mapping.lock().unwrap().is_empty() {
+                        eprintln!(
+                            "masterbus-signalk: the mapping is empty; nothing is published \
+                             until fields are mapped in the Signal K plugin or \
+                             `masterbus-tui --mapping`"
+                        );
+                    }
+                    progress.may_seed = first_run && !seeded && mapping_path.is_some();
+                    if seeded {
+                        stamp = mtime(mapping_path);
+                    }
+                }
+            }
+        }
+        if changed {
+            active = activate(
+                &bus,
+                &shared,
+                &clients,
+                &static_batch,
+                active,
+                &mut progress,
+                seeded,
             );
-            {
-                let mut devices = shared.devices.lock().unwrap();
-                devices.push(rec);
-                devices.sort_by_key(|d| d.id);
-            }
-            if mapped {
-                active = activate(&bus, &shared, &clients, &static_batch);
-            }
         }
 
         // A mapping replaced through the API is already in `shared`; just
@@ -517,7 +643,17 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
             while reload_rx.try_recv().is_ok() {}
             eprintln!("masterbus-signalk: mapping replaced over the API; reloading");
             stamp = mtime(mapping_path);
-            active = activate(&bus, &shared, &clients, &static_batch);
+            progress.printed.clear();
+            progress.may_seed = false;
+            active = activate(
+                &bus,
+                &shared,
+                &clients,
+                &static_batch,
+                active,
+                &mut progress,
+                true,
+            );
         }
 
         // Pick up edits made in `masterbus-tui --mapping` without a restart:
@@ -534,7 +670,17 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                     Ok(m) => {
                         eprintln!("masterbus-signalk: {} changed; reloading", p.display());
                         *shared.mapping.lock().unwrap() = m;
-                        active = activate(&bus, &shared, &clients, &static_batch);
+                        progress.printed.clear();
+                        progress.may_seed = false;
+                        active = activate(
+                            &bus,
+                            &shared,
+                            &clients,
+                            &static_batch,
+                            active,
+                            &mut progress,
+                            true,
+                        );
                     }
                     Err(e) => eprintln!("masterbus-signalk: {e}; keeping the previous mapping"),
                 }
@@ -554,7 +700,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
         }
         let mut batch: Vec<u8> = Vec::new();
         let mut new_meta: Vec<serde_json::Value> = Vec::new();
-        for sub in &active.subs {
+        for (_, sub) in active.subs.values() {
             // Coalesce to the latest value per path this cycle: a field can be
             // updated many times between polls (the boat's real masters poll some
             // values rapidly, and we emit those too).
@@ -632,11 +778,14 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
 }
 
 /// The live state a mapping resolves to: what to publish, the subscriptions
-/// feeding it, and the unit metadata each path carries. Rebuilt whole when
-/// the mapping changes; dropping the old one unsubscribes.
+/// feeding it, and the unit metadata each path carries. Rebuilt when the
+/// mapping changes or a mapped device arrives; a device whose subscribed
+/// fields are unchanged keeps its subscription, and dropping the rest
+/// unsubscribes them.
 struct Active {
     emit: HashMap<(DeviceId, FieldId), Emit>,
-    subs: Vec<Subscription>,
+    /// Per device, the fields subscribed (sorted) and the subscription.
+    subs: HashMap<DeviceId, (Vec<FieldId>, Subscription)>,
     /// Path → unit metadata, from the device units behind each path.
     units: HashMap<String, &'static str>,
     /// Paths whose unit `meta` has already been published this activation.
@@ -645,6 +794,98 @@ struct Active {
     notified: HashMap<String, Option<NotifyState>>,
     /// The accept counter as of the last poll, to spot new clients.
     connections_seen: usize,
+}
+
+impl Active {
+    /// Nothing resolved yet.
+    fn new() -> Active {
+        Active {
+            emit: HashMap::new(),
+            subs: HashMap::new(),
+            units: HashMap::new(),
+            meta_sent: HashSet::new(),
+            notified: HashMap::new(),
+            connections_seen: usize::MAX,
+        }
+    }
+}
+
+/// Whether the mapping has a file to live in and it does not exist yet: a
+/// first run. Without a file there is nothing to tell a first run by.
+fn no_mapping_file(path: Option<&Path>) -> bool {
+    path.is_some_and(|p| !p.exists())
+}
+
+/// On a first run there is no mapping: seed one from the devices found and
+/// write it out, so there is something to publish and, more importantly,
+/// something to edit. Returns whether it seeded one. `report_empty` says
+/// whether seeding nothing is worth a log line (at the end of the walk,
+/// not again for every device after it).
+fn seed_if_empty(shared: &Shared, path: Option<&Path>, report_empty: bool) -> bool {
+    if !shared.mapping.lock().unwrap().is_empty() {
+        return false;
+    }
+    let mapping = publish::seed_mapping(&shared.devices.lock().unwrap());
+    if mapping.is_empty() && !report_empty {
+        return false;
+    }
+    match path {
+        Some(p) if !mapping.is_empty() => match mapping.save(p) {
+            Ok(()) => eprintln!(
+                "masterbus-signalk: no mapping yet — seeded {} field(s) from the built-in \
+                 heuristics and wrote {}. Review it in the Signal K plugin or with \
+                 `masterbus-tui --mapping`.",
+                mapping.len(),
+                p.display()
+            ),
+            Err(e) => eprintln!("masterbus-signalk: could not write {}: {e}", p.display()),
+        },
+        _ => eprintln!(
+            "masterbus-signalk: no mapping file; using {} heuristic field(s) for this run",
+            mapping.len()
+        ),
+    }
+    let seeded = !mapping.is_empty();
+    *shared.mapping.lock().unwrap() = mapping;
+    seeded
+}
+
+/// Which devices keep their subscription and which need a new one. A device
+/// whose subscribed fields are unchanged keeps it, so a device joining does
+/// not restart every other device's stream (all their fields due at once,
+/// on the one scheduler thread the joining device's discovery also needs).
+fn plan_subs(
+    old: &HashMap<DeviceId, Vec<FieldId>>,
+    wanted: &HashMap<DeviceId, Vec<FieldId>>,
+) -> (Vec<DeviceId>, Vec<DeviceId>) {
+    let mut keep = Vec::new();
+    let mut new = Vec::new();
+    for (device, fields) in wanted {
+        if old.get(device) == Some(fields) {
+            keep.push(*device);
+        } else {
+            new.push(*device);
+        }
+    }
+    keep.sort();
+    new.sort();
+    (keep, new)
+}
+
+/// The diagnostics to print now: each once, and while the first pass over
+/// the bus runs, only those about devices already identified. The rest
+/// would mostly say "not on the bus" about a device not reached yet.
+fn to_print(
+    diagnostics: &[publish::Diagnostic],
+    ready_serials: &HashSet<&str>,
+    progress: &mut Progress,
+) -> Vec<String> {
+    diagnostics
+        .iter()
+        .filter(|d| progress.walked || ready_serials.contains(d.serial.as_str()))
+        .map(|d| d.to_string())
+        .filter(|line| progress.printed.insert(line.clone()))
+        .collect()
 }
 
 /// The notification delta a value update calls for, if any: the first
@@ -668,31 +909,63 @@ fn notification(
     Some((path, signalk::notification_value(&e.device, label, state)))
 }
 
-/// Resolve the mapping against the bus, subscribe to what it names, and
-/// (re)publish the static per-device metadata.
+/// Resolve the mapping against the devices discovery is done with, subscribe
+/// to what it names, and (re)publish the static per-device metadata.
+/// `ensure` first discovers what the mapping needs beyond Monitoring, for a
+/// mapping that has just changed; for a device that joins, the discovery
+/// thread has done that already, so the stream does not wait for the bus.
 fn activate(
     bus: &MasterBus,
     shared: &Shared,
     clients: &Mutex<Vec<TcpStream>>,
     static_batch: &Mutex<Vec<u8>>,
+    previous: Active,
+    progress: &mut Progress,
+    ensure: bool,
 ) -> Active {
     let mapping = shared.mapping.lock().unwrap().clone();
-    shared.ensure_menus(&mapping);
-    let devices = shared.devices.lock().unwrap();
+    if ensure {
+        shared.ensure_menus(&mapping);
+    }
+    let devices: Vec<DeviceRec> = shared
+        .devices
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|d| progress.ready.contains(&d.id))
+        .cloned()
+        .collect();
     let resolved = publish::resolve(&devices, &mapping);
-    for d in &resolved.diagnostics {
-        eprintln!("masterbus-signalk: {d}");
+    let ready_serials: HashSet<&str> = devices.iter().map(|d| d.serial.as_str()).collect();
+    for line in to_print(&resolved.diagnostics, &ready_serials, progress) {
+        eprintln!("masterbus-signalk: {line}");
     }
     let emit = resolved.emit;
     let mut per_device: HashMap<DeviceId, Vec<FieldId>> = HashMap::new();
     for (device, field) in emit.keys() {
         per_device.entry(*device).or_default().push(*field);
     }
-    let published: HashSet<DeviceId> = per_device.keys().copied().collect();
-    let mut subs = Vec::new();
-    for (device, indices) in per_device {
-        subs.push(bus.subscribe(device, indices, RATE, false));
+    for fields in per_device.values_mut() {
+        fields.sort();
     }
+    let published: HashSet<DeviceId> = per_device.keys().copied().collect();
+    let mut old = previous.subs;
+    let old_fields: HashMap<DeviceId, Vec<FieldId>> =
+        old.iter().map(|(d, (f, _))| (*d, f.clone())).collect();
+    let (keep, new) = plan_subs(&old_fields, &per_device);
+    let mut subs = HashMap::new();
+    for device in keep {
+        if let Some(s) = old.remove(&device) {
+            subs.insert(device, s);
+        }
+    }
+    for device in new {
+        let fields = per_device.remove(&device).unwrap_or_default();
+        let sub = bus.subscribe(device, fields.clone(), RATE, false);
+        subs.insert(device, (fields, sub));
+    }
+    // What is left is no longer wanted, or wanted with other fields.
+    drop(old);
     let units: HashMap<String, &'static str> = emit
         .values()
         .filter_map(|e| e.plan.unit.map(|u| (e.path.clone(), u)))
@@ -707,6 +980,25 @@ fn activate(
         cs.retain_mut(|c| c.write_all(&sb).and_then(|()| c.flush()).is_ok());
     }
 
+    // When each device first streams, for the log and the API (#40).
+    let now = shared.started.elapsed();
+    {
+        let mut timeline = shared.timeline.lock().unwrap();
+        for d in devices.iter().filter(|d| published.contains(&d.id)) {
+            let times = timeline.devices.entry(d.id).or_default();
+            if times.streaming.is_none() {
+                times.streaming = Some(now);
+                eprintln!(
+                    "masterbus-signalk: {} ({}): streaming {} field(s) {:.1} s after start",
+                    d.name,
+                    d.serial,
+                    subs.get(&d.id).map_or(0, |(f, _)| f.len()),
+                    secs(now),
+                );
+            }
+        }
+    }
+
     let total: usize = devices.iter().map(|d| d.fields.len()).sum();
     eprintln!(
         "masterbus-signalk: streaming {} of {total} known fields from {} of {} device(s)",
@@ -714,7 +1006,6 @@ fn activate(
         published.len(),
         devices.len(),
     );
-    drop(devices);
     *shared.diagnostics.lock().unwrap() = resolved.diagnostics;
     shared.streaming.store(emit.len(), Ordering::Relaxed);
     Active {
@@ -1214,5 +1505,107 @@ mod tests {
     fn civil_from_days_matches_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+    }
+
+    /// The devices on the bus at start are identified in order, one at a
+    /// time, before any that joins later; each device once, however often it
+    /// announces itself or goes away and comes back (#40).
+    #[test]
+    fn devices_are_identified_one_at_a_time_and_once() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        for ev in [
+            DeviceEvent::Alive(2), // on the bus at start: already done
+            DeviceEvent::Alive(7),
+            DeviceEvent::Offline(7),
+            DeviceEvent::Alive(7),
+            DeviceEvent::Offline(9),
+            DeviceEvent::Alive(5),
+        ] {
+            tx.send(ev).unwrap();
+        }
+        drop(tx);
+        let order = std::cell::RefCell::new(Vec::new());
+        walk(
+            vec![1, 2, 3],
+            rx,
+            |id, late| {
+                order
+                    .borrow_mut()
+                    .push(format!("{id}{}", if late { "L" } else { "" }))
+            },
+            || order.borrow_mut().push("walked".into()),
+        );
+        assert_eq!(
+            order.into_inner(),
+            ["1", "2", "3", "walked", "7L", "5L"].map(String::from)
+        );
+    }
+
+    /// Only a missing mapping file is a first run: a mapping saved empty, on
+    /// purpose or over the API, is a file and is never seeded over.
+    #[test]
+    fn only_a_missing_mapping_file_is_a_first_run() {
+        let dir = std::env::temp_dir().join(format!("mb-first-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("mapping.json");
+        let _ = std::fs::remove_file(&p);
+        assert!(no_mapping_file(Some(&p)));
+        Mapping::new().save(&p).unwrap();
+        assert!(
+            !no_mapping_file(Some(&p)),
+            "an empty mapping saved is not a first run"
+        );
+        assert!(!no_mapping_file(None), "no file to tell a first run by");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A device whose subscribed fields are unchanged keeps its
+    /// subscription when another device joins; only a new device, or one
+    /// whose fields changed, is subscribed anew.
+    #[test]
+    fn a_joining_device_leaves_the_other_subscriptions_alone() {
+        let old: HashMap<DeviceId, Vec<FieldId>> =
+            HashMap::from([(1, vec![0x01, 0x02]), (2, vec![0x05]), (3, vec![0x07])]);
+        let wanted: HashMap<DeviceId, Vec<FieldId>> = HashMap::from([
+            (1, vec![0x01, 0x02]), // unchanged
+            (2, vec![0x05, 0x06]), // a field added to the mapping
+            (4, vec![0x01]),       // joined
+        ]);
+        let (keep, new) = plan_subs(&old, &wanted);
+        assert_eq!(keep, [1]);
+        assert_eq!(new, [2, 4]);
+    }
+
+    /// While the first pass runs, re-resolving as each device arrives prints
+    /// only what is new about devices already identified: not a "not on the
+    /// bus" for every mapped device not reached yet, and not the same line
+    /// again for every device after it.
+    #[test]
+    fn diagnostics_are_printed_once_and_not_about_devices_not_reached_yet() {
+        let diag = |serial: &str, message: &str| publish::Diagnostic {
+            severity: publish::Severity::Info,
+            serial: serial.into(),
+            device: String::new(),
+            field: None,
+            path: None,
+            message: message.into(),
+        };
+        let diagnostics = [
+            diag("MLI-1", "firmware differs"),
+            diag("DSD-1", "not on the bus"),
+        ];
+        let ready = HashSet::from(["MLI-1"]);
+        let mut progress = Progress::default();
+        assert_eq!(
+            to_print(&diagnostics, &ready, &mut progress),
+            ["MLI-1: firmware differs"]
+        );
+        assert!(to_print(&diagnostics, &ready, &mut progress).is_empty());
+        // Once the pass is done, a device still missing is news.
+        progress.walked = true;
+        assert_eq!(
+            to_print(&diagnostics, &ready, &mut progress),
+            ["DSD-1: not on the bus"]
+        );
     }
 }

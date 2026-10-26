@@ -53,7 +53,8 @@ incompatible. A client should refuse a version it does not know.
   "mapped": { "devices": 4, "fields": 25 },
   "streaming": 25,
   "clients": 1,
-  "diagnostics": { "errors": 0, "warnings": 1 }
+  "diagnostics": { "errors": 0, "warnings": 1 },
+  "walked": 21.4
 }
 ```
 
@@ -64,7 +65,9 @@ still counts every device discovered. A CAN interface is always `connected`.
 
 `streaming` is the number of mapped fields the daemon is actually subscribed
 to (entries with an error diagnostic are not). `clients` counts stream
-connections.
+connections. `walked` is when the first pass over the bus ended, in seconds
+after the daemon started, or `null` while it runs; each device starts
+streaming as soon as it is identified, so values arrive before then.
 
 ### `GET /api/devices`
 
@@ -98,7 +101,8 @@ of every menu discovered on it (Monitoring at least).
         "allowOff": false,
         "value": 25.6
       }
-    ]
+    ],
+    "timeline": { "identified": 6.2, "took": 0.9, "late": false, "streaming": 6.2 }
   }
 ]
 ```
@@ -119,6 +123,13 @@ of every menu discovered on it (Monitoring at least).
   (the mapping's SI conversion is not applied), or `null` if none has been
   seen. Only mapped fields are streamed, so an unmapped field has a value
   only after `GET .../value` below.
+- `timeline` says how the device's start went, in seconds after the daemon
+  started: when it was `identified` (including what its mapping needs
+  beyond Monitoring), how long that `took`, whether it was `late` (first
+  heard after the first pass over the bus), and when its mapped fields
+  started `streaming` (`null` while none are). The same times are on the
+  daemon's stderr: one line when a device is identified, and another when
+  its fields start streaming.
 
 ### `GET /api/devices/{serial}`
 
