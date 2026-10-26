@@ -48,6 +48,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer still. A device that joins late no longer restarts every other
   device's stream, and no longer stops the stream while its switches are
   looked up. Reported by @susteranna on a 19-device bus. (#40)
+- **An empty `mapping.json` is no longer replaced at start.** The daemon
+  filled an empty or unreadable mapping file with its built-in guesses on
+  every start, undoing a mapping that was emptied on purpose. It now seeds
+  one only when there is no mapping file yet. (#40)
 
 ## [0.5.0] - 2026-10-25
 

@@ -606,10 +606,19 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                     progress.walked = true;
                     changed = true;
                     // A first run is one with no mapping file. An empty
-                    // mapping someone saved is a file, and stays empty.
-                    let first_run = no_mapping_file(mapping_path);
-                    seeded = seed_if_empty(&shared, mapping_path, true);
-                    progress.may_seed = first_run && !seeded;
+                    // mapping someone saved is a file, and stays empty; so
+                    // does one that could not be read, rather than being
+                    // overwritten.
+                    let first_run = no_mapping_file(mapping_path) || mapping_path.is_none();
+                    seeded = first_run && seed_if_empty(&shared, mapping_path, true);
+                    if !first_run && shared.mapping.lock().unwrap().is_empty() {
+                        eprintln!(
+                            "masterbus-signalk: the mapping is empty; nothing is published \
+                             until fields are mapped in the Signal K plugin or \
+                             `masterbus-tui --mapping`"
+                        );
+                    }
+                    progress.may_seed = first_run && !seeded && mapping_path.is_some();
                     if seeded {
                         stamp = mtime(mapping_path);
                     }
