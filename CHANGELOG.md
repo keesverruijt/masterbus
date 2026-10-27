@@ -14,6 +14,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for once more; a field left out for want of metadata is logged. A group
   that reports more fields than a group can have (54,650 on that charger)
   is skipped instead of read. Thanks to @Peter-Petrik for the traces. (#6)
+  A menu already in the cache is not read again: to get the fixed menus,
+  delete the device's files from the cache folder (see the README) and
+  restart.
 
 ## [0.5.1] - 2026-10-26
 

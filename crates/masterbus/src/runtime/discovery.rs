@@ -69,21 +69,37 @@ pub(super) struct Disc<'a> {
 
 /// How many metadata retries of one op may go unanswered on a device before
 /// that op is no longer retried there. A device that never answers an op
-/// would otherwise cost a retry window on every field.
+/// would otherwise cost a retry window on every field. The same limit holds
+/// for fields in a row whose retry stayed wholly silent.
 const UNANSWERED_META_LIMIT: u32 = 2;
 
-/// Metadata ops whose retry went unanswered, by device. Lasts until the next
+/// Metadata retries that went unanswered, by device. Lasts until the next
 /// discovery. (#6)
 #[derive(Default)]
-pub(super) struct MetaMisses(HashMap<(DeviceId, u8), u32>);
+pub(super) struct MetaMisses {
+    /// Per op, retries left out by a field that answered other ops.
+    ops: HashMap<(DeviceId, u8), u32>,
+    /// Fields in a row whose retry got no answer at all. A retry that
+    /// answers resets it, so a device that is only slow keeps its retries.
+    silent: HashMap<DeviceId, u32>,
+}
 
 impl MetaMisses {
     fn retried(&self, addr: DeviceId, op: u8) -> bool {
-        self.0.get(&(addr, op)).copied().unwrap_or(0) < UNANSWERED_META_LIMIT
+        self.ops.get(&(addr, op)).copied().unwrap_or(0) < UNANSWERED_META_LIMIT
     }
 
     fn missed(&mut self, addr: DeviceId, op: u8) {
-        *self.0.entry((addr, op)).or_default() += 1;
+        *self.ops.entry((addr, op)).or_default() += 1;
+    }
+
+    fn silent_retried(&self, addr: DeviceId) -> bool {
+        self.silent.get(&addr).copied().unwrap_or(0) < UNANSWERED_META_LIMIT
+    }
+
+    fn silent_retry(&mut self, addr: DeviceId, answered: bool) {
+        let n = self.silent.entry(addr).or_default();
+        *n = if answered { 0 } else { *n + 1 };
     }
 }
 
@@ -108,12 +124,35 @@ pub(super) struct StrMemo {
 
 impl Disc<'_> {
     fn req(&mut self, key: &str, frame: (u32, Vec<u8>), retries: usize) -> Option<Vec<u8>> {
+        self.req_with(key, frame, retries, false)
+    }
+
+    /// [`Disc::req_std`], but `key` stays registered when every attempt is
+    /// given up, so a late reply is kept for [`Disc::collect_late`].
+    fn req_keeping(&mut self, key: &str, frame: (u32, Vec<u8>)) -> Option<Vec<u8>> {
+        let n = self.cfg.discovery_retries;
+        self.req_with(key, frame, n, true)
+    }
+
+    fn req_with(
+        &mut self,
+        key: &str,
+        frame: (u32, Vec<u8>),
+        retries: usize,
+        keep: bool,
+    ) -> Option<Vec<u8>> {
         for attempt in 0..retries {
             self.bus.between();
             self.waiter.register(key);
             frame_log("Tx", frame.0, &frame.1);
             let _ = self.bus.tx().send(frame.0, &frame.1);
-            if let Some(r) = self.waiter.wait(key, self.cfg.discovery_timeout) {
+            let last = attempt + 1 == retries;
+            let r = if keep && last {
+                self.waiter.wait_or_keep(key, self.cfg.discovery_timeout)
+            } else {
+                self.waiter.wait(key, self.cfg.discovery_timeout)
+            };
+            if let Some(r) = r {
                 if attempt > 0 {
                     log::debug!(target: "masterbus::discovery", "{key}: ok on retry {attempt}");
                 }
@@ -132,13 +171,7 @@ impl Disc<'_> {
         None
     }
 
-    /// Keep `key` registered after its request was given up, so a reply
-    /// that comes in late is kept for [`Disc::collect_late`].
-    fn keep_listening(&self, key: &str) {
-        self.waiter.register(key);
-    }
-
-    /// Collect the replies kept by [`Disc::keep_listening`], waiting at most
+    /// Collect the replies kept by [`Disc::req_keeping`], waiting at most
     /// one more discovery timeout for those still out. Every key is
     /// unregistered on return.
     fn collect_late<T>(&self, keys: &[(T, String)]) -> Vec<Option<Vec<u8>>> {
@@ -705,12 +738,11 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
     let mut late: Vec<(usize, String)> = Vec::new();
     for idx in 0..field_count {
         let key = format!("{}:{:06X}:03:{}:{}", key_prefix, addr, g, idx as u8);
-        let r = disc.req_std(
+        let r = disc.req_keeping(
             &key,
             schema_field_id_req_class_raw(class, addr, g, idx as u8),
         );
         if r.is_none() {
-            disc.keep_listening(&key);
             late.push((replies.len(), key));
         }
         replies.push(r);
@@ -867,17 +899,26 @@ pub(super) fn enumerate_field(
     // A slow device can answer after the window closed (#6): ask once more
     // for what is missing, rather than drop the field or keep it with
     // default metadata.
-    let missing: Vec<u8> = ops
-        .iter()
-        .copied()
-        .filter(|o| !meta.contains_key(o) && disc.meta_misses.retried(addr, *o))
-        .collect();
+    let silent = meta.is_empty();
+    let missing: Vec<u8> = if silent {
+        if disc.meta_misses.silent_retried(addr) {
+            ops.to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        ops.iter()
+            .copied()
+            .filter(|o| !meta.contains_key(o) && disc.meta_misses.retried(addr, *o))
+            .collect()
+    };
     if !missing.is_empty() {
         meta.extend(disc.meta_batch(addr, fid, &missing, &[]));
-        // Only an op left out by a field that answered others counts as
-        // one the device may not answer; a wholly silent field says nothing
-        // about the op.
-        if !meta.is_empty() {
+        if silent {
+            disc.meta_misses.silent_retry(addr, !meta.is_empty());
+        } else {
+            // Only an op left out by a field that answered others counts
+            // as one the device may not answer.
             for o in missing.into_iter().filter(|o| !meta.contains_key(o)) {
                 disc.meta_misses.missed(addr, o);
             }
@@ -1514,6 +1555,25 @@ mod enumeration_tests {
         let schema = engine.state.schema(ADDR).unwrap();
         assert_eq!(schema.groups.len(), 1);
         assert!(schema.groups[0].fields.is_empty());
+    }
+
+    /// Fields that answer no metadata at all are retried only until two in
+    /// a row stayed silent, so a run of them costs no window apiece.
+    #[test]
+    fn silent_fields_stop_being_retried() {
+        let device = Device::new()
+            .with_identity("44010250", "1234567", "Combi")
+            .with_group(Menu::Monitoring, 0, "DC", &[0x17, 0x18, 0x19, 0x1A]);
+        let (engine, bus) = connect(device, test_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let name_reads = bus
+            .sent_class(0x18)
+            .iter()
+            .filter(|(_, d)| d.len() == 3 && d[0] == crate::protocol::meta_op::NAME)
+            .count();
+        // One batch per field, plus a retry for the first two.
+        assert_eq!(name_reads, 4 + 2);
     }
 
     // ── the flat probe ──────────────────────────────────────────────────────
