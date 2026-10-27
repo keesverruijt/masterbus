@@ -63,6 +63,28 @@ pub(super) struct Disc<'a> {
     pub catalog: Option<&'static HashMap<u16, String>>,
     /// Strings fetched during this discovery. (#6)
     pub strs: StrMemo,
+    /// Metadata ops whose retry went unanswered, per device. (#6)
+    pub meta_misses: MetaMisses,
+}
+
+/// How many metadata retries of one op may go unanswered on a device before
+/// that op is no longer retried there. A device that never answers an op
+/// would otherwise cost a retry window on every field.
+const UNANSWERED_META_LIMIT: u32 = 2;
+
+/// Metadata ops whose retry went unanswered, by device. Lasts until the next
+/// discovery. (#6)
+#[derive(Default)]
+pub(super) struct MetaMisses(HashMap<(DeviceId, u8), u32>);
+
+impl MetaMisses {
+    fn retried(&self, addr: DeviceId, op: u8) -> bool {
+        self.0.get(&(addr, op)).copied().unwrap_or(0) < UNANSWERED_META_LIMIT
+    }
+
+    fn missed(&mut self, addr: DeviceId, op: u8) {
+        *self.0.entry((addr, op)).or_default() += 1;
+    }
 }
 
 /// How many fetches of a string id may go wholly unanswered before it is
@@ -108,6 +130,26 @@ impl Disc<'_> {
             "{key}: giving up after {retries} attempt(s)"
         );
         None
+    }
+
+    /// Keep `key` registered after its request was given up, so a reply
+    /// that comes in late is kept for [`Disc::collect_late`].
+    fn keep_listening(&self, key: &str) {
+        self.waiter.register(key);
+    }
+
+    /// Collect the replies kept by [`Disc::keep_listening`], waiting at most
+    /// one more discovery timeout for those still out. Every key is
+    /// unregistered on return.
+    fn collect_late<T>(&self, keys: &[(T, String)]) -> Vec<Option<Vec<u8>>> {
+        let deadline = Instant::now() + self.cfg.discovery_timeout;
+        keys.iter()
+            .map(|(_, key)| {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                self.waiter
+                    .wait(key, remaining.max(Duration::from_millis(1)))
+            })
+            .collect()
     }
 
     fn req_std(&mut self, key: &str, frame: (u32, Vec<u8>)) -> Option<Vec<u8>> {
@@ -631,20 +673,22 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
             .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]) as u32)
     };
     // A field index is one byte, so a group can't have more than 256 fields.
-    // A ChargeMaster Plus reports 54,650 for one group (#6): ask again, and
-    // if it sticks, read the 256 indices there are and keep each field once.
-    // A retry that goes unanswered keeps the first count, not zero, so the
-    // group isn't cached as empty.
+    // A ChargeMaster Plus reports 54,650 for some groups (#6): ask again, and
+    // if it sticks, skip the group. Such a group's indices mostly answer the
+    // same two ids and its name is the article number; reading it gave
+    // duplicate groups and a menu end that moved from run to run. A retry
+    // that goes unanswered keeps the first count.
     let mut field_count = ask_count().unwrap_or(0);
     if field_count > MAX_GROUP_FIELDS {
         field_count = ask_count().unwrap_or(field_count);
     }
     if field_count > MAX_GROUP_FIELDS {
-        log::warn!(
+        log::info!(
             target: "masterbus::discovery",
-            "0x{addr:06X} {menu:?} group {g} reports {field_count} fields; reading {MAX_GROUP_FIELDS}",
+            "0x{addr:06X} {menu:?} group {g} reports {field_count} fields, more than a group \
+             can have; skipped",
         );
-        field_count = MAX_GROUP_FIELDS;
+        return None;
     }
     // For Alarm/History, "no name and no fields" likely means the gid is
     // unallocated — the probe-and-stop loop above relies on this to terminate.
@@ -654,18 +698,34 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
 
     // Field ids returned by the schema query are 8-bit wire indices on the
     // Btm1 channel; widen to channel-tagged `FieldId` with the Btm1 bit clear.
-    let mut field_ids: Vec<FieldId> = Vec::new();
+    // A slow device can answer after all attempts were given up (#6); such
+    // an index is collected after the others, so the group comes out the
+    // same whichever replies were late.
+    let mut replies: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut late: Vec<(usize, String)> = Vec::new();
     for idx in 0..field_count {
         let key = format!("{}:{:06X}:03:{}:{}", key_prefix, addr, g, idx as u8);
-        if let Some(r) = disc.req_std(
+        let r = disc.req_std(
             &key,
             schema_field_id_req_class_raw(class, addr, g, idx as u8),
-        ) && r.len() >= 6
-        {
-            let fid = field_id::btm1(r[4]);
-            if !field_ids.contains(&fid) {
-                field_ids.push(fid);
-            }
+        );
+        if r.is_none() {
+            disc.keep_listening(&key);
+            late.push((replies.len(), key));
+        }
+        replies.push(r);
+    }
+    for ((i, key), r) in late.iter().zip(disc.collect_late(&late)) {
+        if r.is_some() {
+            log::debug!(target: "masterbus::discovery", "{key}: late reply kept");
+        }
+        replies[*i] = r;
+    }
+    let mut field_ids: Vec<FieldId> = Vec::new();
+    for r in replies.into_iter().flatten().filter(|r| r.len() >= 6) {
+        let fid = field_id::btm1(r[4]);
+        if !field_ids.contains(&fid) {
+            field_ids.push(fid);
         }
     }
     let name = name_sid
@@ -802,16 +862,32 @@ pub(super) fn enumerate_field(
     } else {
         &[]
     };
-    let meta = disc.meta_batch(
-        addr,
-        fid,
-        &[op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE],
-        best_effort,
-    );
-    // If nothing came back, this field index is unallocated on this channel —
-    // used by the `enumerate_all_fields` flat probe to skip holes in the index
-    // space and to give up on a channel the device doesn't speak.
+    let ops = [op::NAME, op::VIZ, op::MAX, op::UNIT, op::WRITEABLE];
+    let mut meta = disc.meta_batch(addr, fid, &ops, best_effort);
+    // A slow device can answer after the window closed (#6): ask once more
+    // for what is missing, rather than drop the field or keep it with
+    // default metadata.
+    let missing: Vec<u8> = ops
+        .iter()
+        .copied()
+        .filter(|o| !meta.contains_key(o) && disc.meta_misses.retried(addr, *o))
+        .collect();
+    if !missing.is_empty() {
+        meta.extend(disc.meta_batch(addr, fid, &missing, &[]));
+        // Only an op left out by a field that answered others counts as
+        // one the device may not answer; a wholly silent field says nothing
+        // about the op.
+        if !meta.is_empty() {
+            for o in missing.into_iter().filter(|o| !meta.contains_key(o)) {
+                disc.meta_misses.missed(addr, o);
+            }
+        }
+    }
     if meta.is_empty() {
+        log::info!(
+            target: "masterbus::discovery",
+            "0x{addr:06X} field 0x{fid:03X}: no metadata answered; left out",
+        );
         return None;
     }
     let u16_at4 = |o: u8| {
@@ -1034,6 +1110,7 @@ mod catalog_tests {
             level: AccessLevel::EndUser,
             catalog,
             strs: StrMemo::default(),
+            meta_misses: MetaMisses::default(),
         }
     }
 
@@ -1240,44 +1317,89 @@ mod enumeration_tests {
         assert_eq!(state.max, 2.0);
     }
 
-    /// A group whose field count is past what a one-byte index allows is read
-    /// for the 256 indices there are, and each field kept once (#6).
+    /// A group whose field count is past what a one-byte index allows is not
+    /// a group: it is skipped, without reading its indices (#6).
     #[test]
-    fn a_field_count_past_256_reads_each_field_once() {
-        let device = combi().with_claimed_field_count(Menu::Monitoring, 0, 54650.0);
+    fn a_group_counting_past_256_fields_is_skipped() {
+        let device = combi()
+            .with_group(Menu::Monitoring, 1, "AC", &[0x20])
+            .with_field(field_id::btm1(0x20), "Current", "A", VIZ_FLOAT, false)
+            .with_claimed_field_count(Menu::Monitoring, 0, 54650.0);
         let (engine, bus) = connect(device, test_config());
         engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
 
         let schema = engine.state.schema(ADDR).unwrap();
-        let names: Vec<&str> = schema.groups[0]
-            .fields
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["Voltage", "State"]);
-        let field_id_reads = bus
+        let groups: Vec<&str> = schema.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(groups, vec!["AC"]);
+        let field_id_reads: Vec<_> = bus
             .sent_class(0x19)
-            .iter()
+            .into_iter()
             .filter(|(_, d)| d.first() == Some(&0x03))
-            .count();
-        assert_eq!(field_id_reads, 256);
+            .collect();
+        assert_eq!(field_id_reads.len(), 1);
     }
 
+    /// An unanswered recount keeps the first count, so the group is still
+    /// recognised as one past 256 fields rather than read as empty.
     #[test]
     fn an_unanswered_recount_keeps_the_first_count() {
         let device = combi()
+            .with_group(Menu::Monitoring, 1, "AC", &[])
             .with_claimed_field_count(Menu::Monitoring, 0, 54650.0)
             .with_field_count_answers(Menu::Monitoring, 0, 1);
         let (engine, _bus) = connect(device, test_config());
         engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
 
         let schema = engine.state.schema(ADDR).unwrap();
+        let groups: Vec<&str> = schema.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(groups, vec!["AC"]);
+    }
+
+    /// Timeouts long enough for the slow-reply tests to place a reply after
+    /// the give-up but inside the extra window.
+    fn slow_config() -> Config {
+        Config {
+            discovery_timeout: Duration::from_millis(20),
+            ..test_config()
+        }
+    }
+
+    /// A field id that comes back after its request was given up is still
+    /// kept, in its place in the group (#6).
+    #[test]
+    fn a_late_field_id_reply_is_kept() {
+        let device = combi().with_slow_reply(0x19, &[0x03, 0, 0, 0], Duration::from_millis(30));
+        let (engine, _bus) = connect(device, slow_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
         let names: Vec<&str> = schema.groups[0]
             .fields
             .iter()
             .map(|f| f.name.as_str())
             .collect();
         assert_eq!(names, vec!["Voltage", "State"]);
+    }
+
+    /// Metadata missing when its window closes is asked for again, and the
+    /// first request's late reply counts (#6).
+    #[test]
+    fn late_metadata_is_asked_for_again() {
+        use crate::protocol::meta_op;
+        let device = combi().with_slow_reply(
+            0x18,
+            &[meta_op::NAME, 0x17, 0x00],
+            Duration::from_millis(30),
+        );
+        let (engine, _bus) = connect(device, slow_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
+        let voltage = &schema.groups[0].fields[0];
+        assert_eq!(
+            (voltage.name.as_str(), voltage.unit.as_str()),
+            ("Voltage", "V")
+        );
     }
 
     /// Monitoring, Configuration and Service share one global gid space: a

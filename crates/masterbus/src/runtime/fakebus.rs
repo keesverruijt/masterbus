@@ -135,6 +135,10 @@ pub struct Device {
     /// on, so requests sent back to back are answered back to back, as a
     /// real device's would be.
     pub reply_delay: Duration,
+    /// Requests answered late instead: (request class, data prefix, delay).
+    /// The ChargeMaster Plus of #6 answers some requests after all three
+    /// attempts were given up.
+    pub slow: Vec<(u8, Vec<u8>, Duration)>,
     /// Groups, keyed by (schema request class, gid). Alarm and History have
     /// their own gid namespaces, which is why the class is part of the key.
     pub groups: HashMap<(u8, u8), FakeGroup>,
@@ -175,6 +179,7 @@ impl Device {
             uncounted: false,
             mute_counts: false,
             reply_delay: Duration::ZERO,
+            slow: Vec::new(),
             groups: HashMap::new(),
             meta: HashMap::new(),
             next_sid: 0x100,
@@ -210,6 +215,22 @@ impl Device {
             *self.group_counts.entry(menu.selector()).or_insert(0) += 1;
         }
         self
+    }
+
+    /// Answer requests of `class` whose data starts with `prefix` only after
+    /// `delay`.
+    pub fn with_slow_reply(mut self, class: u8, prefix: &[u8], delay: Duration) -> Device {
+        self.slow.push((class, prefix.to_vec(), delay));
+        self
+    }
+
+    /// How long to take over answering this request.
+    fn delay_for(&self, raw_id: u32, data: &[u8]) -> Duration {
+        let class = ((raw_id >> 24) & 0x1F) as u8;
+        self.slow
+            .iter()
+            .find(|(c, prefix, _)| *c == class && data.starts_with(prefix))
+            .map_or(self.reply_delay, |(_, _, d)| *d)
     }
 
     /// Make group `gid` of `menu` report `count` fields, whatever it has.
@@ -721,14 +742,15 @@ impl FakeBus {
                                 for device in &devices {
                                     let mut d = device.lock().unwrap();
                                     let replies = d.respond(raw_id, &data);
-                                    if d.reply_delay.is_zero() {
+                                    let delay = d.delay_for(raw_id, &data);
+                                    if delay.is_zero() {
                                         for r in replies {
                                             if up_tx.send(r).is_err() {
                                                 return;
                                             }
                                         }
                                     } else {
-                                        let at = Instant::now() + d.reply_delay;
+                                        let at = Instant::now() + delay;
                                         delayed.extend(replies.into_iter().map(|r| (at, r)));
                                     }
                                 }

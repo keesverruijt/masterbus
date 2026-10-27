@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A slow device's menus come out the same on every run.** A ChargeMaster
+  Plus answers some discovery requests after they were given up, so each
+  run kept a different set of fields and groups. A field id that comes in
+  late is now kept, and metadata missing when its window closes is asked
+  for once more; a field left out for want of metadata is logged. A group
+  that reports more fields than a group can have (54,650 on that charger)
+  is skipped instead of read. Thanks to @Peter-Petrik for the traces. (#6)
+
 ## [0.5.1] - 2026-10-26
 
 ### Added
