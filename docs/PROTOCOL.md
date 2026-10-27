@@ -417,13 +417,22 @@ class-`0x09` response.
 The field-id response echoes `idx` in `bytes[3]` (used for matching, §8).
 
 **An impossible field count.** A ChargeMaster Plus answered the field-count
-query for one Configuration group with 54,650, consistently (#6). Field-id
+query for some Configuration groups with 54,650, consistently (#6). Field-id
 queries past its real fields answered those same fields again, so the count
 is not a list of that many distinct fields. The field index in the request is
 one byte, so a client can address at most 256 fields per group; that is a
-limit of the request format, not something the device states. The crate asks
-for the count again when it is over 256, reads the 256 indices if it sticks,
-and keeps each field id once.
+limit of the request format, not something the device states. Such a group's
+indices mostly answer the same two ids, its name is the article number, and
+none of it appears in MasterAdjust's export. The crate asks for the count
+again when it is over 256 and skips the group if it sticks.
+
+**Late replies.** The same charger answers some schema and metadata requests
+only after a client has given them up (three 150 ms attempts), sometimes all
+three answers at once while the next request is out (#6). The crate keeps
+listening for a field id it gave up on and collects it after the group's
+other indices, and asks once more for metadata missing when its window
+closes. A device that leaves out one metadata op for a field that answers
+the others is not asked again for that op after two such misses.
 
 **Class `0x11` compact / NA response.** On the CombiMaster reference bus,
 schema queries for Configuration-tab group ids consistently came back on

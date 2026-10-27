@@ -423,6 +423,7 @@ impl Sched {
             level,
             catalog,
             strs: Default::default(),
+            meta_misses: Default::default(),
         };
         let r = f(&mut disc);
         self.discovering -= 1;

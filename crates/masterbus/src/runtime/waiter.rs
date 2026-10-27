@@ -68,6 +68,27 @@ impl Waiter {
             .and_then(|s| if s.cancelled { None } else { s.data })
     }
 
+    /// Like [`Waiter::wait`], but on timeout `key` stays registered, under
+    /// the same lock, so a reply that arrives later is kept rather than
+    /// dropped. Collect it with [`Waiter::wait`].
+    pub fn wait_or_keep(&self, key: &str, timeout: Duration) -> Option<Vec<u8>> {
+        let map = self.inner.lock().unwrap();
+        let (mut map, _) = self
+            .cv
+            .wait_timeout_while(map, timeout, |m| {
+                m.get(key)
+                    .map(|s| s.data.is_none() && !s.cancelled)
+                    .unwrap_or(false)
+            })
+            .unwrap();
+        match map.get(key) {
+            Some(s) if s.data.is_none() && !s.cancelled => None,
+            _ => map
+                .remove(key)
+                .and_then(|s| if s.cancelled { None } else { s.data }),
+        }
+    }
+
     /// Block until one of `keys` has a response (or is cancelled), or until
     /// `timeout` elapses. Returns the position in `keys` of one that is ready,
     /// leaving it registered for [`Waiter::wait`] to collect; `None` on timeout.
@@ -94,5 +115,26 @@ impl Waiter {
             slot.cancelled = true;
         }
         self.cv.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reply after `wait_or_keep` timed out is kept for a later `wait`;
+    /// after plain `wait` times out it is dropped.
+    #[test]
+    fn a_kept_key_takes_a_late_reply() {
+        let w = Waiter::new();
+        w.register("k");
+        assert_eq!(w.wait_or_keep("k", Duration::from_millis(1)), None);
+        w.deliver("k", vec![1]);
+        assert_eq!(w.wait("k", Duration::from_millis(1)), Some(vec![1]));
+
+        w.register("d");
+        assert_eq!(w.wait("d", Duration::from_millis(1)), None);
+        w.deliver("d", vec![2]);
+        assert_eq!(w.wait("d", Duration::from_millis(1)), None);
     }
 }
