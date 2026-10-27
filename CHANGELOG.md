@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-27
+
 ### Fixed
 - **A slow device's menus come out the same on every run.** A ChargeMaster
   Plus answers some discovery requests after they were given up, so each
