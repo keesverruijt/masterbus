@@ -1387,6 +1387,11 @@ impl App {
         if let Some(d) = s.map.devices.get_mut(&serial)
             && d.fields.remove(&key).is_some()
         {
+            if let Some(used) =
+                signalk::main_instance(d.fields.values().map(|f| f.path.as_str()), &d.instance)
+            {
+                d.instance = used;
+            }
             s.dirty = true;
             self.status = format!("unmapped {key}");
         }
@@ -1467,17 +1472,6 @@ impl App {
             entry.firmware = i.firmware.clone();
             entry.name = i.name.clone();
         }
-        // Record the instance the path actually uses, not the one proposed for
-        // the device. People rename freely here — an `INT Nav Chg` gets mapped
-        // onto `electrical.chargers.nav-battery` because that is what it
-        // charges — and `instance` is what "apply to this article" substitutes.
-        // Left stale, that copy would substitute nothing and hand two devices
-        // the same Signal K node.
-        match signalk::instance_of(&path) {
-            Some(used) => entry.instance = used,
-            None if entry.instance.is_empty() => entry.instance = instance,
-            None => {}
-        }
         // Record the truth table the sidecar will use, even when it was
         // derived from the conventional label meanings, so the file says what
         // it does and a future build cannot silently change its mind.
@@ -1494,6 +1488,20 @@ impl App {
                 allow_off: existing_allow_off,
             },
         );
+        // Record the instance the paths actually use, not the one proposed
+        // for the device. People rename freely here — an `INT Nav Chg` gets
+        // mapped onto `electrical.chargers.nav-battery` because that is what
+        // it charges — and `instance` is what proposals and "apply to this
+        // article" build on. It is the one most of the device's paths use,
+        // so a switch mapped beside its readings doesn't take over (#47).
+        match signalk::main_instance(
+            entry.fields.values().map(|f| f.path.as_str()),
+            &entry.instance,
+        ) {
+            Some(used) => entry.instance = used,
+            None if entry.instance.is_empty() => entry.instance = instance,
+            None => {}
+        }
         s.dirty = true;
         self.status = if plan.notify.is_empty() {
             format!("{} → {path}", field_key(ed.field))
