@@ -443,9 +443,16 @@ pub fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
     m
 }
 
-/// The Signal K node a device's mapped paths already use, if any.
+/// The Signal K node a device's mapped paths already use, if any: one under
+/// the device's recorded instance when there is one, so a switch mapped
+/// beside its readings doesn't become the node new fields are proposed
+/// under (#47).
 pub fn mapped_node(dm: Option<&DeviceMapping>) -> Option<String> {
-    dm.and_then(|d| d.fields.values().find_map(|f| signalk::node_of(&f.path)))
+    let d = dm?;
+    let nodes = || d.fields.values().filter_map(|f| signalk::node_of(&f.path));
+    nodes()
+        .find(|n| n.rsplit('.').next() == Some(d.instance.as_str()))
+        .or_else(|| nodes().next())
 }
 
 /// What the editor pre-fills for a field with no suggestion: the node of a
@@ -853,5 +860,37 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(path_prefix(Some(&dm)), "electrical.solar.solar-chg.");
+    }
+
+    /// A switch mapped on a lower field id than the device's readings is not
+    /// the node new fields are proposed under: the recorded instance's is
+    /// (#47).
+    #[test]
+    fn the_mapped_node_is_the_recorded_instances() {
+        let mut dm = DeviceMapping {
+            instance: "alt-110a".into(),
+            ..Default::default()
+        };
+        for (id, path) in [
+            (0x001, "electrical.switches.alt-110a-stop-charge.state"),
+            (0x002, "electrical.alternators.alt-110a.voltage"),
+        ] {
+            dm.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: path.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(
+            mapped_node(Some(&dm)).as_deref(),
+            Some("electrical.alternators.alt-110a")
+        );
+        dm.instance = "elsewhere".into();
+        assert_eq!(
+            mapped_node(Some(&dm)).as_deref(),
+            Some("electrical.switches.alt-110a-stop-charge")
+        );
     }
 }
