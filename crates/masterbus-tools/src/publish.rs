@@ -443,9 +443,27 @@ pub fn seed_mapping(devices: &[DeviceRec]) -> Mapping {
     m
 }
 
-/// The Signal K node a device's mapped paths already use, if any.
+/// The Signal K node a device's mapped paths already use, if any: the one
+/// most of its paths under the recorded instance use, so a switch mapped
+/// beside its readings doesn't become the node new fields are proposed
+/// under (#47). A tie goes to the first field's node; with no path under
+/// the recorded instance, the first field's node is taken.
 pub fn mapped_node(dm: Option<&DeviceMapping>) -> Option<String> {
-    dm.and_then(|d| d.fields.values().find_map(|f| signalk::node_of(&f.path)))
+    let d = dm?;
+    let nodes: Vec<String> = d
+        .fields
+        .values()
+        .filter_map(|f| signalk::node_of(&f.path))
+        .collect();
+    let mine = |n: &&String| n.rsplit('.').next() == Some(d.instance.as_str());
+    let count = |n: &String| nodes.iter().filter(|m| *m == n).count();
+    let mut best: Option<&String> = None;
+    for n in nodes.iter().filter(mine) {
+        if best.is_none_or(|b| count(n) > count(b)) {
+            best = Some(n);
+        }
+    }
+    best.or(nodes.first()).cloned()
 }
 
 /// What the editor pre-fills for a field with no suggestion: the node of a
@@ -853,5 +871,65 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(path_prefix(Some(&dm)), "electrical.solar.solar-chg.");
+    }
+
+    /// A switch mapped on a lower field id than the device's readings is not
+    /// the node new fields are proposed under: the recorded instance's is
+    /// (#47).
+    #[test]
+    fn the_mapped_node_is_the_recorded_instances() {
+        let mut dm = DeviceMapping {
+            instance: "alt-110a".into(),
+            ..Default::default()
+        };
+        for (id, path) in [
+            (0x001, "electrical.switches.alt-110a-stop-charge.state"),
+            (0x002, "electrical.alternators.alt-110a.voltage"),
+        ] {
+            dm.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: path.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(
+            mapped_node(Some(&dm)).as_deref(),
+            Some("electrical.alternators.alt-110a")
+        );
+        dm.instance = "elsewhere".into();
+        assert_eq!(
+            mapped_node(Some(&dm)).as_deref(),
+            Some("electrical.switches.alt-110a-stop-charge")
+        );
+    }
+
+    /// When a switch and the readings share the recorded instance, the node
+    /// most of those paths use wins.
+    #[test]
+    fn the_mapped_node_is_the_most_used_under_the_instance() {
+        let mut dm = DeviceMapping {
+            instance: "main".into(),
+            ..Default::default()
+        };
+        for (id, path) in [
+            (0x001, "electrical.alternators.other.voltage"),
+            (0x002, "electrical.switches.main.state"),
+            (0x003, "electrical.alternators.main.voltage"),
+            (0x004, "electrical.alternators.main.current"),
+        ] {
+            dm.fields.insert(
+                field_key(id),
+                FieldMapping {
+                    path: path.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(
+            mapped_node(Some(&dm)).as_deref(),
+            Some("electrical.alternators.main")
+        );
     }
 }

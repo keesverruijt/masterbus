@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A device's recorded Signal K instance no longer follows the last field
+  mapped.** A device can publish under two nodes, such as a regulator's
+  readings under `electrical.alternators.alt-110a` and its `Stop charge`
+  under `electrical.switches.alt-110a-stop-charge`. The TUI recorded the
+  instance of whichever path was mapped last, and new mappings were then
+  proposed under it. It now records the instance most of the device's paths
+  use, keeping the current one on a tie. Thanks to @Peter-Petrik. (#47)
+
 ## [0.5.2] - 2026-10-27
 
 ### Fixed

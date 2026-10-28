@@ -431,6 +431,30 @@ pub fn instance_of(path: &str) -> Option<String> {
     node_of(path)?.rsplit('.').next().map(str::to_string)
 }
 
+/// The instance a device's mapped paths use most: what its entry records.
+///
+/// A device can publish into more than one node: a regulator's `Stop charge`
+/// is a switch under `electrical.switches`, its readings sit under
+/// `electrical.alternators` (#47). Recording the instance of whichever path
+/// was saved last let one such path take over the device's proposals. A tie
+/// keeps `current`, and otherwise goes to the alphabetically first instance,
+/// so the choice doesn't depend on map order. `None` when no path has an
+/// instance.
+pub fn main_instance<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    current: &str,
+) -> Option<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for i in paths.into_iter().filter_map(instance_of) {
+        *counts.entry(i).or_default() += 1;
+    }
+    let top = *counts.values().max()?;
+    if counts.get(current) == Some(&top) {
+        return Some(current.to_string());
+    }
+    counts.into_iter().find(|(_, n)| *n == top).map(|(i, _)| i)
+}
+
 /// Encode a device value as the JSON a Signal K delta carries.
 ///
 /// `conv` is the unit conversion derived from the field's unit (see
@@ -937,6 +961,31 @@ mod tests {
         );
         // A branch with no per-device node has no instance to report.
         assert_eq!(instance_of("environment.outside.temperature"), None);
+    }
+
+    /// A switch mapped beside a device's readings doesn't take over the
+    /// recorded instance; a tie keeps the current one (#47).
+    #[test]
+    fn the_main_instance_is_the_one_most_paths_use() {
+        let paths = [
+            "electrical.alternators.alt-110a.voltage",
+            "electrical.alternators.alt-110a.current",
+            "electrical.switches.alt-110a-stop-charge.state",
+        ];
+        assert_eq!(
+            main_instance(paths, "alt-110a-stop-charge").as_deref(),
+            Some("alt-110a")
+        );
+        let tie = [
+            "electrical.batteries.li-ion.voltage",
+            "electrical.batteries.li-ion-1.voltage",
+        ];
+        assert_eq!(main_instance(tie, "li-ion-1").as_deref(), Some("li-ion-1"));
+        assert_eq!(main_instance(tie, "other").as_deref(), Some("li-ion"));
+        assert_eq!(
+            main_instance(["environment.outside.temperature"], "x"),
+            None
+        );
     }
 
     #[test]

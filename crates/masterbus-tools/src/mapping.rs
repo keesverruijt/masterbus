@@ -88,12 +88,15 @@ pub struct Mapping {
 /// One device's mapping.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceMapping {
-    /// Article (model) number. Informational, refreshed on discovery; the key
-    /// a suggestion database is looked up by.
+    /// Article (model) number. Informational; the key a suggestion database
+    /// is looked up by. Like `firmware` and `name`, it is recorded from the
+    /// live device when a field is mapped, or when the firmware warning is
+    /// marked as checked in the web editor; discovery doesn't change it.
     #[serde(default)]
     pub article: String,
     /// Firmware version at the time the mapping was written. Informational;
     /// a change is worth warning about, because field ids may have moved.
+    /// The warning lasts until the firmware is recorded again (#46).
     #[serde(default)]
     pub firmware: String,
     /// The device's name when the mapping was written. Purely to make the file
