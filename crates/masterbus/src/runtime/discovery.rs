@@ -127,11 +127,26 @@ impl Disc<'_> {
         self.req_with(key, frame, retries, false)
     }
 
-    /// [`Disc::req_std`], but `key` stays registered when every attempt is
+    /// [`Disc::req`], but `key` stays registered when every attempt is
     /// given up, so a late reply is kept for [`Disc::collect_late`].
-    fn req_keeping(&mut self, key: &str, frame: (u32, Vec<u8>)) -> Option<Vec<u8>> {
+    fn req_keeping(&mut self, key: &str, frame: (u32, Vec<u8>), retries: usize) -> Option<Vec<u8>> {
+        self.req_with(key, frame, retries, true)
+    }
+
+    /// [`Disc::req_std`] for a reply the next request depends on: when every
+    /// attempt is given up, a reply that comes within one more discovery
+    /// timeout is still taken. A slow device answers all attempts together,
+    /// after the last one was given up. (#6)
+    fn req_patient(&mut self, key: &str, frame: (u32, Vec<u8>)) -> Option<Vec<u8>> {
         let n = self.cfg.discovery_retries;
-        self.req_with(key, frame, n, true)
+        if let Some(r) = self.req_keeping(key, frame, n) {
+            return Some(r);
+        }
+        let r = self.waiter.wait(key, self.cfg.discovery_timeout);
+        if r.is_some() {
+            log::debug!(target: "masterbus::discovery", "{key}: late reply kept");
+        }
+        r
     }
 
     fn req_with(
@@ -217,7 +232,7 @@ impl Disc<'_> {
         let mut seq: u8 = 0;
         loop {
             let key = format!("str:{:06X}:{:04X}:{}", addr, str_id, seq);
-            let r = match self.req_std(&key, string_chunk_req_raw(addr, str_id, seq)) {
+            let r = match self.req_patient(&key, string_chunk_req_raw(addr, str_id, seq)) {
                 Some(r) => r,
                 // No answer at all counts against the id. A lost later chunk
                 // is the bus, not the id; the partial string is not kept.
@@ -370,18 +385,39 @@ impl Disc<'_> {
     }
 
     /// Per-channel option-string query. Used during list/enum field discovery
-    /// to resolve each option's label string id. Same channel dispatch as
-    /// [`Self::meta_batch`].
-    fn meta_option_req(&mut self, addr: DeviceId, fid: FieldId, opt: u8) -> Option<u16> {
+    /// to resolve each option's label string id, one per option `0..n`. Same
+    /// channel dispatch as [`Self::meta_batch`]. Each option is asked once; a
+    /// reply that comes after it was given up is collected after the others,
+    /// in its place. (#6)
+    fn option_labels(&mut self, addr: DeviceId, fid: FieldId, n: u8) -> Vec<Option<u16>> {
         let wire = field_id::wire_index(fid);
         let (prefix, encode): (&str, MetaOptionEncode) = match field_id::channel(fid) {
             Channel::Btm1 => ("btm1_meta", btm1_meta_option_req_raw),
             Channel::Btm3 => ("btm3_meta", btm3_meta_option_req_raw),
         };
-        let key = format!("{}:{:06X}:26:{}:{}", prefix, addr, wire, opt);
-        self.req(&key, encode(addr, wire, opt), OPTIONAL_RETRIES)
-            .filter(|r| r.len() >= 6)
-            .map(|r| u16::from_le_bytes([r[4], r[5]]))
+        let mut replies = Vec::with_capacity(n as usize);
+        let mut late = Vec::new();
+        for opt in 0..n {
+            let key = format!("{}:{:06X}:26:{}:{}", prefix, addr, wire, opt);
+            let r = self.req_keeping(&key, encode(addr, wire, opt), OPTIONAL_RETRIES);
+            if r.is_none() {
+                late.push((replies.len(), key));
+            }
+            replies.push(r);
+        }
+        for ((i, key), r) in late.iter().zip(self.collect_late(&late)) {
+            if r.is_some() {
+                log::debug!(target: "masterbus::discovery", "{key}: late reply kept");
+            }
+            replies[*i] = r;
+        }
+        replies
+            .into_iter()
+            .map(|r| {
+                r.filter(|r| r.len() >= 6)
+                    .map(|r| u16::from_le_bytes([r[4], r[5]]))
+            })
+            .collect()
     }
 
     /// Group count for a menu selector; `None` if the device didn't answer,
@@ -560,7 +596,7 @@ pub(super) fn discover_menu(
     }
     let started = std::time::Instant::now();
     log::debug!(target: "masterbus::discovery", "0x{addr:06X} {menu:?}: enumerating");
-    let Some(g) = enumerate_menu(disc, addr, menu) else {
+    let Some((g, complete)) = enumerate_menu(disc, addr, menu) else {
         log::debug!(
             target: "masterbus::discovery",
             "0x{addr:06X} {menu:?}: group count unanswered; not cached",
@@ -573,7 +609,20 @@ pub(super) fn discover_menu(
         g.len(),
         started.elapsed(),
     );
-    store_cached_menu(dir, &id.serial, &id.firmware, level, menu, &g);
+    let path = dir
+        .filter(|_| !id.serial.is_empty())
+        .map(|d| cache_file(d, &id.serial, &id.firmware, level, menu));
+    if complete || incomplete_reads(path.as_deref()) >= INCOMPLETE_READ_LIMIT {
+        store_cached_menu(dir, &id.serial, &id.firmware, level, menu, &g);
+        if let Some(p) = &path {
+            let _ = std::fs::remove_file(incomplete_marker(p));
+        }
+    } else {
+        log::debug!(
+            target: "masterbus::discovery",
+            "0x{addr:06X} {menu:?}: a field count went unanswered; not cached",
+        );
+    }
     Some(g)
 }
 
@@ -614,9 +663,11 @@ fn repeats(earlier: &GroupInfo, g: &GroupInfo) -> bool {
             .all(|(a, b)| a.index == b.index)
 }
 
-fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<GroupInfo>> {
+/// A menu's groups, and whether every group's field count was answered.
+fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<(Vec<GroupInfo>, bool)> {
     let (offset, count) = menu_range(disc, addr, menu)?;
     let mut groups = Vec::new();
+    let mut complete = true;
     if count > 0 {
         // Some devices report more groups than they have and answer an id
         // past their last group with that group again (a Mass Combi Ultra
@@ -642,6 +693,7 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<Gro
                 );
                 break;
             }
+            complete &= shape.counted;
             groups.push(finish_group(disc, addr, gid, menu, shape.clone()));
             prev = Some(shape);
         }
@@ -650,10 +702,11 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<Gro
         // consecutive misses or when we hit PROBE_GID_MAX.
         let mut misses = 0;
         for gid in 0..PROBE_GID_MAX {
-            match enumerate_group(disc, addr, gid, menu) {
-                Some(g) => {
+            match group_shape(disc, addr, gid, menu) {
+                Some(shape) => {
                     misses = 0;
-                    groups.push(g);
+                    complete &= shape.counted;
+                    groups.push(finish_group(disc, addr, gid, menu, shape));
                 }
                 None => {
                     misses += 1;
@@ -664,31 +717,28 @@ fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<Vec<Gro
             }
         }
     }
-    Some(groups)
+    Some((groups, complete))
 }
 
 /// What a group is before its fields' metadata is read: its name and its
 /// field ids.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct GroupShape {
     name: String,
     field_ids: Vec<FieldId>,
+    /// Whether the device answered the group's field count.
+    counted: bool,
 }
 
 impl GroupShape {
     /// Whether this is `other` again: the same name and the same fields.
     fn repeats(&self, other: &GroupShape) -> bool {
-        !self.field_ids.is_empty() && self == other
+        !self.field_ids.is_empty() && self.name == other.name && self.field_ids == other.field_ids
     }
 }
 
 /// The most fields a group can have: field indices are one byte.
 const MAX_GROUP_FIELDS: u32 = 256;
-
-fn enumerate_group(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupInfo> {
-    let shape = group_shape(disc, addr, g, menu)?;
-    Some(finish_group(disc, addr, g, menu, shape))
-}
 
 fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupShape> {
     let class = menu.schema_request_class();
@@ -701,7 +751,7 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
     };
     let mut ask_count = || {
         let key = format!("{}:{:06X}:07:{}", key_prefix, addr, g);
-        disc.req_std(&key, schema_field_count_req_class_raw(class, addr, g))
+        disc.req_patient(&key, schema_field_count_req_class_raw(class, addr, g))
             .filter(|r| r.len() >= 8)
             .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]) as u32)
     };
@@ -711,7 +761,11 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
     // same two ids and its name is the article number; reading it gave
     // duplicate groups and a menu end that moved from run to run. A retry
     // that goes unanswered keeps the first count.
-    let mut field_count = ask_count().unwrap_or(0);
+    // An unanswered count reads no fields, and the menu is not cached, so
+    // the next discovery asks again. (#6)
+    let first = ask_count();
+    let counted = first.is_some();
+    let mut field_count = first.unwrap_or(0);
     if field_count > MAX_GROUP_FIELDS {
         field_count = ask_count().unwrap_or(field_count);
     }
@@ -728,6 +782,12 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
     if matches!(menu, Menu::Alarm | Menu::History) && name_sid.is_none() && field_count == 0 {
         return None;
     }
+    if !counted {
+        log::info!(
+            target: "masterbus::discovery",
+            "0x{addr:06X} {menu:?} group {g}: field count unanswered; read without fields",
+        );
+    }
 
     // Field ids returned by the schema query are 8-bit wire indices on the
     // Btm1 channel; widen to channel-tagged `FieldId` with the Btm1 bit clear.
@@ -741,6 +801,7 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
         let r = disc.req_keeping(
             &key,
             schema_field_id_req_class_raw(class, addr, g, idx as u8),
+            disc.cfg.discovery_retries,
         );
         if r.is_none() {
             late.push((replies.len(), key));
@@ -763,7 +824,11 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
     let name = name_sid
         .map(|sid| disc.fetch_str(addr, sid))
         .unwrap_or_default();
-    Some(GroupShape { name, field_ids })
+    Some(GroupShape {
+        name,
+        field_ids,
+        counted,
+    })
 }
 
 fn finish_group(
@@ -913,6 +978,10 @@ pub(super) fn enumerate_field(
             .collect()
     };
     if !missing.is_empty() {
+        log::debug!(
+            target: "masterbus::discovery",
+            "0x{addr:06X} field 0x{fid:03X}: metadata ops {missing:02X?} unanswered; asked again",
+        );
         meta.extend(disc.meta_batch(addr, fid, &missing, &[]));
         if silent {
             disc.meta_misses.silent_retry(addr, !meta.is_empty());
@@ -961,16 +1030,14 @@ pub(super) fn enumerate_field(
     ) && n_opts > 0
         && n_opts <= 64
     {
-        let mut opts = Vec::new();
-        for opt in 0..n_opts {
-            let osid = disc.meta_option_req(addr, fid, opt as u8);
-            opts.push(
+        disc.option_labels(addr, fid, n_opts as u8)
+            .into_iter()
+            .map(|osid| {
                 osid.filter(|&s| s != 0)
                     .map(|s| disc.fetch_str(addr, s))
-                    .unwrap_or_default(),
-            );
-        }
-        opts
+                    .unwrap_or_default()
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -1033,6 +1100,35 @@ fn cache_file(
         })
         .collect();
     dir.join(format!("{}.json", safe))
+}
+
+/// How many discoveries in a row may leave a group's field count unanswered
+/// before the menu is cached as read. A device that never answers one would
+/// otherwise be read from the bus at every start.
+const INCOMPLETE_READ_LIMIT: u32 = 2;
+
+/// The file counting a menu's incomplete reads, beside its cache file.
+fn incomplete_marker(cache: &Path) -> std::path::PathBuf {
+    cache.with_extension("incomplete")
+}
+
+/// Count one more incomplete read of the menu cached at `cache`, and return
+/// the count. Zero without a cache folder, so nothing is cached then.
+fn incomplete_reads(cache: Option<&Path>) -> u32 {
+    let Some(cache) = cache else { return 0 };
+    let marker = incomplete_marker(cache);
+    let n = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        + 1;
+    if n < INCOMPLETE_READ_LIMIT {
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&marker, n.to_string());
+    }
+    n
 }
 
 fn load_cached_menu(
@@ -1441,6 +1537,103 @@ mod enumeration_tests {
             (voltage.name.as_str(), voltage.unit.as_str()),
             ("Voltage", "V")
         );
+    }
+
+    /// A group's field count that comes back after its request was given up
+    /// is still taken, so the group keeps its fields (#6).
+    #[test]
+    fn a_late_field_count_reply_is_kept() {
+        let device = combi().with_slow_reply(0x19, &[0x07, 0], Duration::from_millis(30));
+        let (engine, _bus) = connect(device, slow_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert_eq!(schema.groups[0].fields.len(), 2);
+    }
+
+    /// Option labels that come back after their request was given up are
+    /// kept, each in its place (#6).
+    #[test]
+    fn late_option_labels_are_kept() {
+        use crate::protocol::meta_op;
+        let device =
+            combi().with_slow_reply(0x18, &[meta_op::OPTION, 0x18], Duration::from_millis(30));
+        let (engine, _bus) = connect(device, slow_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert_eq!(schema.groups[0].fields[1].options, vec!["Off", "On"]);
+    }
+
+    /// String chunks that come back after their request was given up are
+    /// kept, so a name is not cut off after its first four characters (#6).
+    #[test]
+    fn late_string_chunks_are_kept() {
+        let device =
+            combi().with_slow_reply(can_class::PROPERTY_REQ, &[0x30], Duration::from_millis(30));
+        let (engine, _bus) = connect(device, slow_config());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+        let schema = engine.state.schema(ADDR).unwrap();
+        assert_eq!(schema.groups[0].fields[0].name, "Voltage");
+    }
+
+    /// A group whose field count goes unanswered is read without fields,
+    /// and its menu is not cached, so the next start asks again; after
+    /// [`INCOMPLETE_READ_LIMIT`] such starts it is cached as read, so a
+    /// device that never answers is not read from the bus every time (#6).
+    #[test]
+    fn a_menu_with_an_unanswered_field_count_is_cached_only_at_the_limit() {
+        let dir = TempDir::new();
+        let config = Config {
+            cache_path: Some(dir.path.clone()),
+            ..test_config()
+        };
+        let cached = || {
+            std::fs::read_dir(&dir.path)
+                .map(|d| {
+                    d.filter_map(|e| e.ok())
+                        .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+                })
+                .unwrap_or(false)
+        };
+        for start in 1..=INCOMPLETE_READ_LIMIT {
+            let device = combi().with_field_count_answers(Menu::Monitoring, 0, 0);
+            let (engine, _bus) = connect(device, config.clone());
+            engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+
+            let schema = engine.state.schema(ADDR).unwrap();
+            assert_eq!(schema.groups[0].name, "DC");
+            assert!(schema.groups[0].fields.is_empty());
+            assert_eq!(cached(), start == INCOMPLETE_READ_LIMIT, "start {start}");
+        }
+        assert_eq!(std::fs::read_dir(&dir.path).unwrap().count(), 1);
+    }
+
+    /// A complete read clears the count of incomplete ones.
+    #[test]
+    fn a_complete_read_clears_the_incomplete_count() {
+        let dir = TempDir::new();
+        let config = Config {
+            cache_path: Some(dir.path.clone()),
+            ..test_config()
+        };
+        let device = combi().with_field_count_answers(Menu::Monitoring, 0, 0);
+        let (engine, _bus) = connect(device, config.clone());
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        drop(engine);
+        assert_eq!(std::fs::read_dir(&dir.path).unwrap().count(), 1);
+
+        let (engine, _bus) = connect(combi(), config);
+        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir.path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(names.len(), 1);
+        assert!(names[0].extension().is_some_and(|x| x == "json"));
+        assert_eq!(engine.state.schema(ADDR).unwrap().groups[0].fields.len(), 2);
     }
 
     /// Monitoring, Configuration and Service share one global gid space: a

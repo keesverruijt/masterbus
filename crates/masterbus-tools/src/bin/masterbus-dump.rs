@@ -94,6 +94,8 @@ struct Args {
     devices: Vec<DeviceId>,
     probe: bool,
     pretty: bool,
+    /// How long each discovery request waits for its reply.
+    discovery_timeout: Option<std::time::Duration>,
 }
 
 const USAGE: &str = "\
@@ -105,6 +107,8 @@ Usage: masterbus-dump [options] [output.json]
       --values <mode>   none | monitoring | all   (default: monitoring)
       --device <hex>    only this device address (repeatable, e.g. 286CA9)
       --probe           also flat-probe the field-index space per device (slow)
+      --discovery-timeout <ms>
+                        wait this long for each discovery reply (default: 150)
       --compact         one-line JSON instead of pretty-printed
   -V, --version         print the version
   -h, --help            show this help
@@ -147,6 +151,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args, Strin
         devices: Vec::new(),
         probe: false,
         pretty: true,
+        discovery_timeout: None,
     };
     let mut menus_set = false;
     let mut it = argv.into_iter();
@@ -203,6 +208,15 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args, Strin
                 args.devices.push(id);
             }
             "--probe" => args.probe = true,
+            "--discovery-timeout" => {
+                let v = it
+                    .next()
+                    .ok_or("--discovery-timeout needs a number of milliseconds")?;
+                let ms: u64 = v.trim().parse().ok().filter(|&ms| ms > 0).ok_or(format!(
+                    "--discovery-timeout {v:?} is not a number of milliseconds"
+                ))?;
+                args.discovery_timeout = Some(std::time::Duration::from_millis(ms));
+            }
             "--compact" => args.pretty = false,
             other if other.starts_with('-') => return Err(format!("unknown option {other:?}")),
             positional => {
@@ -427,7 +441,11 @@ fn main() {
         }
     };
 
-    let bus = match MasterBus::auto_joined(Config::default()) {
+    let mut config = Config::default();
+    if let Some(t) = args.discovery_timeout {
+        config.discovery_timeout = t;
+    }
+    let bus = match MasterBus::auto_joined(config) {
         Ok((b, relay)) => {
             if let Some(a) = relay {
                 eprintln!("masterbus-dump: using the bus shared by masterbus-signalk ({a})");
@@ -836,6 +854,22 @@ mod arg_tests {
         assert!(parse(&["a.json", "b.json"]).is_err());
         assert!(parse(&["-o", "a.json", "b.json"]).is_err());
         assert_eq!(err(&["-o"]), "--output needs a file name");
+    }
+
+    /// A slow device answers after the default wait (#6); the wait can be
+    /// raised, in whole milliseconds above zero.
+    #[test]
+    fn the_discovery_timeout_is_milliseconds_above_zero() {
+        assert_eq!(parse(&[]).unwrap().discovery_timeout, None);
+        let a = parse(&["--discovery-timeout", "500"]).unwrap();
+        assert_eq!(
+            a.discovery_timeout,
+            Some(std::time::Duration::from_millis(500))
+        );
+        for bad in ["0", "-5", "0.5", "fast"] {
+            assert!(parse(&["--discovery-timeout", bad]).is_err(), "{bad}");
+        }
+        assert!(parse(&["--discovery-timeout"]).is_err());
     }
 
     #[test]
