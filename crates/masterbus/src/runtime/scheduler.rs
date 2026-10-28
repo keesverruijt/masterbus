@@ -729,6 +729,13 @@ impl Sched {
                 // hidden. If a *named* user-facing field is in the way,
                 // refuse the write rather than silently failing to actuate.
                 if matches!(value, WriteValue::Bool(_)) {
+                    // The commit register is at index + 1, which index 0xFF
+                    // has none of: it would wrap to field 0.
+                    if wire == u8::MAX {
+                        return Err(Error::Protocol(format!(
+                            "field 0x{field:03X} has no commit register after it"
+                        )));
+                    }
                     // The commit names us as the writer; never name a device
                     // that is on the bus.
                     let own = addr_for_bus_id(self.bus_id());
@@ -1426,6 +1433,19 @@ mod tests {
             } if cmd_field_name == "Charger"
         ));
         // Nothing went out: the refusal happens before the value write.
+        assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
+    }
+
+    /// Index 0xFF has no commit register after it: index + 1 would wrap to
+    /// field 0, so a boolean write there is refused before anything is sent.
+    #[test]
+    fn a_boolean_write_to_the_last_index_is_refused() {
+        let (engine, bus) = connect(Device::new(), test_config());
+        let f = field_id::monitoring(0xFF);
+        seed_schema(&engine, vec![field(f, "Last", VisualizationType::CheckBox)]);
+
+        let err = engine.write(ADDR, f, WriteValue::Bool(true)).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)), "{err:?}");
         assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
     }
 

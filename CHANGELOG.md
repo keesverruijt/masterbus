@@ -34,6 +34,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `field_id::monitoring`/`configuration`.
 
 ### Added
+- **Beta releases.** `make release VERSION=0.6.0-beta.1` (or `-rc.N`)
+  makes a pre-release: its GitHub release is marked as one, so the
+  one-line installers, which take the latest release, keep installing the
+  last full one. A beta is installed by naming its version.
 - **`masterbus-dump --discovery-timeout <ms>`** sets how long discovery
   waits for each reply (default 150 ms), to see whether a slow device
   answers given more time. (#6)

@@ -133,9 +133,9 @@ tools:
 # version strings and one CHANGELOG line, so it can't break a tree that was
 # already green.
 release:
-	@test -n "$(VERSION)" || { echo "usage: make release VERSION=X.Y.Z (or X.Y.Z-beta.N)"; exit 1; }
-	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$' \
-	  || { echo "VERSION must be semver X.Y.Z or X.Y.Z-beta.N (got '$(VERSION)')"; exit 1; }
+	@test -n "$(VERSION)" || { echo "usage: make release VERSION=X.Y.Z (or X.Y.Z-beta.N, X.Y.Z-rc.N)"; exit 1; }
+	@echo "$(VERSION)" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(beta|rc)\.[1-9][0-9]*)?$$' \
+	  || { echo "VERSION must be X.Y.Z, X.Y.Z-beta.N or X.Y.Z-rc.N (got '$(VERSION)')"; exit 1; }
 	@test "$(VERSION)" != "$(OLDVERSION)" \
 	  || { echo "already at $(VERSION)"; exit 1; }
 	@git diff --quiet && git diff --cached --quiet \
