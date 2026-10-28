@@ -1360,16 +1360,12 @@ impl App {
     /// charger does not need `electrical.solar.solar-chg.` typed again, else
     /// just `electrical.`.
     fn path_prefix(&self) -> String {
-        let node = self
-            .mapping
-            .as_ref()
-            .zip(self.cur_serial.as_ref())
-            .and_then(|(s, serial)| s.map.devices.get(serial))
-            .and_then(|d| d.fields.values().find_map(|f| signalk::node_of(&f.path)));
-        match node {
-            Some(n) => format!("{n}."),
-            None => "electrical.".into(),
-        }
+        publish::path_prefix(
+            self.mapping
+                .as_ref()
+                .zip(self.cur_serial.as_ref())
+                .and_then(|(s, serial)| s.map.devices.get(serial)),
+        )
     }
 
     /// Remove the selected field's mapping.
