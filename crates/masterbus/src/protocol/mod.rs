@@ -5,20 +5,20 @@
 
 mod decode;
 mod encode;
+pub mod tab;
 
 pub use decode::{decode_value, frame_from_raw, parse_frame, waiter_key_for_frame};
 pub use encode::{
-    LOGIN_OPCODE, addr_for_bus_id, btm1_meta_option_req_raw, btm1_meta_req_raw,
-    btm3_meta_option_req_raw, btm3_meta_req_raw, btm3_read_raw, btm3_write_raw, bus_id_for_addr,
-    commit_value, encode_commit, encode_login_read, encode_login_write, encode_logout,
-    encode_set_boolean, encode_set_float, encode_set_list, fw_req_raw, group_count_req_raw,
-    heartbeat_raw, monitoring_req_raw, prop_str_id_req_raw, schema_field_count_req_class_raw,
-    schema_field_count_req_raw, schema_field_id_req_class_raw, schema_field_id_req_raw,
-    schema_group_name_req_class_raw, schema_group_name_req_raw, string_chunk_req_raw,
-    string_chunk_write_raw,
+    LOGIN_OPCODE, addr_for_bus_id, bus_id_for_addr, commit_value, encode_commit, encode_login_read,
+    encode_login_write, encode_logout, encode_set_boolean, encode_set_float, encode_set_list,
+    fw_req_raw, group_count_req_raw, group_field_id_req_raw, group_req_raw, heartbeat_raw,
+    prop_str_id_req_raw, property_option_req_raw, property_req_raw, string_chunk_req_raw,
+    string_chunk_write_raw, value_read_raw, value_write_raw,
 };
 
-/// CAN class bytes (bits 28:24 of the 29-bit id).
+/// CAN class bytes (bits 28:24 of the 29-bit id). The classes of the four
+/// tabs' values, properties and groups are in [`tab`]; the names here are
+/// those classes' uses on the Monitoring tab, kept for the frame log.
 pub mod can_class {
     /// Device status broadcast — periodic self-announcement (liveness).
     pub const DEVICE_BROADCAST: u8 = 0x04;
@@ -28,41 +28,39 @@ pub mod can_class {
     pub const PROPERTY_INFO: u8 = 0x06;
     /// Property/count request to a device.
     pub const PROPERTY_REQ: u8 = 0x07;
-    /// Btm1 monitoring/metadata data pushed from a device.
+    /// Monitoring value (real address) or Monitoring property answer
+    /// (address bit 23).
     pub const MONITORING_DATA: u8 = 0x08;
-    /// Schema response (Monitoring channel) from a device.
+    /// Monitoring group answer (real address) or Alarm property answer
+    /// (bit 23).
     pub const SCHEMA_DATA: u8 = 0x09;
-    /// Schema response — Alarms-tab schema channel (paired with [`SCHEMA_REQ_ALARM`]).
+    /// Alarm group answer (real address) or History property answer (bit 23).
     pub const SCHEMA_DATA_ALARM: u8 = 0x0A;
-    /// Dual-purpose class:
-    /// - On the device's real address: schema response for the
-    ///   History/Service-events tab (paired with [`SCHEMA_REQ_HISTORY`]).
-    /// - On `addr | 0x800000`: headerless **Btm3** live-value carrier
-    ///   `[fid_lo, fid_hi, b0..b3]` — both unsolicited pushes and
-    ///   write-acks land here.
+    /// History group answer (real address) or Configuration value (bit 23).
     pub const SCHEMA_DATA_HISTORY: u8 = 0x0B;
-    /// Btm3 metadata response on the real address (paired with
-    /// [`BTM3_META_REQ`]). Same payload layout as a Btm1 metadata response.
+    /// Configuration property answer (real address) or Configuration group
+    /// answer (bit 23).
     pub const BTM3_META_DATA: u8 = 0x0C;
-    /// Write/no-value acknowledgement from a device (`[field, tab]`).
+    /// Monitoring value "not available", which is also a write's answer
+    /// (real address), or Monitoring property "not available" (bit 23).
     pub const WRITE_ACK: u8 = 0x10;
-    /// Compact / "not available" schema response (4-byte). Sent when a
-    /// schema query targets a tab+gid that exists only via a sibling channel
-    /// (e.g. Config gids 7-9 on a CombiMaster respond with this on class 0x19).
+    /// Monitoring group "not available" (real address) or Alarm property
+    /// "not available" (bit 23).
     pub const SCHEMA_DATA_NA: u8 = 0x11;
-    /// Btm1 monitoring / metadata request to a device. Also seen as a
-    /// device push when 6 bytes long (a value carrier).
+    /// Monitoring value read or write (real address) or Monitoring property
+    /// request (bit 23).
     pub const MONITORING_REQ: u8 = 0x18;
-    /// Schema request — Monitoring tab.
+    /// Monitoring group request (real address) or Alarm property request
+    /// (bit 23).
     pub const SCHEMA_REQ: u8 = 0x19;
-    /// Schema request — Alarms tab.
+    /// Alarm group request (real address) or History property request
+    /// (bit 23).
     pub const SCHEMA_REQ_ALARM: u8 = 0x1A;
-    /// Schema request — History / Service-events tab (TBD: may overlap with
-    /// the Btm3 write class on `addr | 0x800000`; see protocol notes).
+    /// History group request (real address) or Configuration value read or
+    /// write (bit 23).
     pub const SCHEMA_REQ_HISTORY: u8 = 0x1B;
-    /// Btm3 metadata request: same opcode set as [`MONITORING_REQ`] but
-    /// addressed to the device's real address. The device replies on
-    /// [`BTM3_META_DATA`].
+    /// Configuration property request (real address) or Configuration group
+    /// request (bit 23).
     pub const BTM3_META_REQ: u8 = 0x1C;
 }
 
@@ -70,14 +68,28 @@ pub mod can_class {
 /// is always 0 (a nonzero tab returns a class-`0x10` "no value").
 pub const TAB_DEFAULT: u8 = 0x00;
 
-/// Per-menu group-count selectors for the `[0x07] [0x08, selector]` query.
+/// `[0x08, selector]` selectors (PROTOCOL.md §4.3): per tab, the number of
+/// values and of groups, as MasterAdjust names them (`Prod_GeneralToStr`).
 pub mod menu {
-    /// Monitoring groups.
-    pub const MONITORING: u8 = 0x02;
-    /// Configuration / installer groups.
-    pub const CONFIG: u8 = 0x03;
-    /// Service-level groups.
-    pub const SERVICE: u8 = 0x04;
+    /// `MonitoringValues`.
+    pub const MONITORING_VALUES: u8 = 0x01;
+    /// `MonitoringGroups`.
+    pub const MONITORING_GROUPS: u8 = 0x02;
+    /// `HistoryValues`.
+    pub const HISTORY_VALUES: u8 = 0x03;
+    /// `HistoryGroups`.
+    pub const HISTORY_GROUPS: u8 = 0x04;
+    /// `ConfigurationValues`.
+    pub const CONFIGURATION_VALUES: u8 = 0x05;
+    /// `ConfigurationGroups`. Changes with the access level.
+    pub const CONFIGURATION_GROUPS: u8 = 0x06;
+    /// `AlarmsValues`.
+    pub const ALARM_VALUES: u8 = 0x07;
+    /// `AlarmsGroups`.
+    pub const ALARM_GROUPS: u8 = 0x08;
+    /// `EventGeneratingGroup`: the Configuration group that holds the
+    /// device's events.
+    pub const EVENT_GROUP: u8 = 0x3E;
     /// The number of eventable outputs, which MasterAdjust calls
     /// `Eventables` (PROTOCOL.md §4.3). Named `TOTAL` from an early reading
     /// as a total group count; kept under that name for compatibility.
@@ -128,10 +140,9 @@ pub mod meta_op {
     pub const OPTION: u8 = 0x26;
 }
 
-/// Address flag bit set on the device address to request Btm1 per-field
-/// metadata (and to identify Btm3 value pushes). Wire-level only; not part
-/// of the public field-id space.
-pub(crate) const BTM1_META_ADDR_FLAG: u32 = 0x80_0000;
+/// Address bit 23, which half of a tab's message types use (see [`tab`]).
+/// Wire-level only; not part of the public field-id space.
+pub(crate) const BTM1_META_ADDR_FLAG: u32 = tab::HIGH;
 
 /// How a field is presented/edited, decoded from [`meta_op::VIZ`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -59,70 +59,72 @@ impl AccessLevel {
     }
 }
 
-/// A menu / tab on the device. The first three live in the global gid space
-/// addressed via class `0x19` schema requests and `[0x08, selector]` counts.
-/// `Alarm` and `History` use parallel schema channels (`0x1A` / `0x1B`) with
-/// their own gid namespaces (each starting at 0).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// One of a device's four tabs (PROTOCOL.md §2.1). Every device has all
+/// four; each has its own groups, field properties and values, on CAN classes
+/// of its own (see [`crate::protocol::tab`]), and numbers its fields from 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Menu {
-    /// User-visible monitoring (selector 0x02, schema channel 0x19).
+    /// Live readings and controls.
     Monitoring,
-    /// Configuration / installer (selector 0x03, schema channel 0x19).
-    Configuration,
-    /// Service (selector 0x04, schema channel 0x19).
-    Service,
-    /// Alarms tab (schema channel 0x1A, separate gid namespace).
+    /// Alarm states.
     Alarm,
-    /// History / Service-events tab (schema channel 0x1B, separate gid namespace).
+    /// Counters and logged values.
     History,
-    /// Any other selector value.
-    Other(u8),
+    /// Settings, including the device's events.
+    Configuration,
 }
 
 impl Menu {
-    /// The wire selector byte for this menu's group-count query (`[0x08, sel]`).
-    /// [`Menu::Alarm`] and [`Menu::History`] don't fit this query pattern —
-    /// their group counts are discovered by probe-and-stop on their own
-    /// schema channel; callers should branch on the menu before relying on
-    /// this byte.
-    pub fn selector(self) -> u8 {
+    /// The four tabs, in MasterAdjust's order.
+    pub const ALL: [Menu; 4] = [
+        Menu::Monitoring,
+        Menu::Alarm,
+        Menu::History,
+        Menu::Configuration,
+    ];
+
+    /// The `[0x08, sel]` selector for this tab's number of groups
+    /// (PROTOCOL.md §4.3).
+    pub fn groups_selector(self) -> u8 {
+        use crate::protocol::menu;
         match self {
-            Menu::Monitoring => 0x02,
-            Menu::Configuration => 0x03,
-            Menu::Service => 0x04,
-            // Hypothesised: `[0x08, 0x08]` is the Alarm-group count on devices
-            // that have one — matches the 2 Alarm groups on the CombiMaster and
-            // the 0 on the Magic-class Nav Chg. Treat as TBD until cross-device
-            // confirmation; falls back to probe-and-stop in any case.
-            Menu::Alarm => 0x08,
-            // No known selector for History; rely on probe-and-stop.
-            Menu::History => 0x00,
-            Menu::Other(s) => s,
+            Menu::Monitoring => menu::MONITORING_GROUPS,
+            Menu::Alarm => menu::ALARM_GROUPS,
+            Menu::History => menu::HISTORY_GROUPS,
+            Menu::Configuration => menu::CONFIGURATION_GROUPS,
         }
     }
 
-    /// CAN class of the schema-request channel that enumerates this menu's
-    /// groups. Pairs with the matching response class
-    /// (`SCHEMA_DATA*` = class - 0x10).
-    pub fn schema_request_class(self) -> u8 {
-        use crate::protocol::can_class;
+    /// The `[0x08, sel]` selector for this tab's number of values.
+    pub fn values_selector(self) -> u8 {
+        use crate::protocol::menu;
         match self {
-            Menu::Monitoring | Menu::Configuration | Menu::Service | Menu::Other(_) => {
-                can_class::SCHEMA_REQ
-            }
-            Menu::Alarm => can_class::SCHEMA_REQ_ALARM,
-            Menu::History => can_class::SCHEMA_REQ_HISTORY,
+            Menu::Monitoring => menu::MONITORING_VALUES,
+            Menu::Alarm => menu::ALARM_VALUES,
+            Menu::History => menu::HISTORY_VALUES,
+            Menu::Configuration => menu::CONFIGURATION_VALUES,
         }
     }
 
-    /// Map a wire selector byte to a [`Menu`] (only well-defined for the
-    /// global-gid menus Monitoring / Configuration / Service).
-    pub fn from_selector(s: u8) -> Menu {
-        match s {
-            0x02 => Menu::Monitoring,
-            0x03 => Menu::Configuration,
-            0x04 => Menu::Service,
-            other => Menu::Other(other),
+    /// The tab's number in a [`FieldId`] (bits 8 and 9). Monitoring and
+    /// Configuration keep the numbers of the two "channels" earlier
+    /// versions had, so stored field ids stay valid.
+    const fn code(self) -> u16 {
+        match self {
+            Menu::Monitoring => 0,
+            Menu::Configuration => 1,
+            Menu::Alarm => 2,
+            Menu::History => 3,
+        }
+    }
+
+    /// Short lower-case name, as used in waiter keys and file names.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Menu::Monitoring => "monitoring",
+            Menu::Alarm => "alarm",
+            Menu::History => "history",
+            Menu::Configuration => "configuration",
         }
     }
 }
@@ -133,24 +135,10 @@ impl Menu {
 /// so collection keys and literal addresses (`0x188EA2`) stay ergonomic.
 pub type DeviceId = u32;
 
-/// Which on-wire metadata channel a field lives on. The two channels share
-/// the byte-sized wire field-index space but expose **different fields per
-/// index** (different names, different live values). See PROTOCOL.md §6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Channel {
-    /// Btm1 — the legacy MasterBus protocol (named after the BTM battery
-    /// monitor family). Per-field metadata `0x18 → 0x08` on `addr | 0x800000`;
-    /// values + writes on the real address.
-    Btm1,
-    /// Btm3 — MasterBus revision 3 (BTM-III). Per-field metadata
-    /// `0x1C → 0x0C` on the real address; headerless values + writes on
-    /// `addr | 0x800000` via classes `0x1B`/`0x0B`.
-    Btm3,
-}
-
-/// Channel-aware field id. Bits `0..8` are the on-wire 8-bit field index
-/// within the channel; bit 8 selects the channel (`0` = Btm1, `1` = Btm3);
-/// bits `9..16` are reserved for future channels and must currently be `0`.
+/// Tab-aware field id. Bits `0..8` are the field's index within its tab,
+/// bits `8..10` the tab ([`Menu`]): `0x0nn` Monitoring, `0x1nn`
+/// Configuration, `0x2nn` Alarm, `0x3nn` History. A field index is sent as
+/// 16 bits, but every device seen so far numbers its fields below 256.
 ///
 /// `FieldId` is a `u16` typedef rather than a newtype to keep collection
 /// keys (`HashMap<FieldId, _>`) and serde encodings boring.
@@ -158,33 +146,35 @@ pub type FieldId = u16;
 
 /// Helpers for composing and inspecting [`FieldId`]s.
 pub mod field_id {
-    use super::{Channel, FieldId};
+    use super::{FieldId, Menu};
 
-    /// Bit that distinguishes the channel. Clear = Btm1; set = Btm3.
-    pub const CHANNEL_BIT: FieldId = 0x0100;
-
-    /// Compose a `FieldId` for a Btm1 wire index.
-    pub const fn btm1(wire: u8) -> FieldId {
-        wire as FieldId
+    /// The field id of index `index` on `menu`'s tab.
+    pub const fn new(menu: Menu, index: u8) -> FieldId {
+        (menu.code() << 8) | index as FieldId
     }
 
-    /// Compose a `FieldId` for a Btm3 wire index.
-    pub const fn btm3(wire: u8) -> FieldId {
-        (wire as FieldId) | CHANNEL_BIT
+    /// A Monitoring field.
+    pub const fn monitoring(index: u8) -> FieldId {
+        new(Menu::Monitoring, index)
     }
 
-    /// The channel this field id refers to.
-    pub const fn channel(id: FieldId) -> Channel {
-        if id & CHANNEL_BIT != 0 {
-            Channel::Btm3
-        } else {
-            Channel::Btm1
+    /// A Configuration field.
+    pub const fn configuration(index: u8) -> FieldId {
+        new(Menu::Configuration, index)
+    }
+
+    /// The tab this field id is on.
+    pub const fn menu(id: FieldId) -> Menu {
+        match (id >> 8) & 0x3 {
+            0 => Menu::Monitoring,
+            1 => Menu::Configuration,
+            2 => Menu::Alarm,
+            _ => Menu::History,
         }
     }
 
-    /// The 8-bit wire field index within its channel (the byte that goes
-    /// out in the request payload). Bits above 8 are masked off.
-    pub const fn wire_index(id: FieldId) -> u8 {
+    /// The field's index within its tab, as sent on the wire.
+    pub const fn index(id: FieldId) -> u8 {
         (id & 0xFF) as u8
     }
 }
@@ -192,8 +182,7 @@ pub mod field_id {
 /// One field within a group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldInfo {
-    /// Channel-aware field id (channel in bit 8, wire index in bits 0..8).
-    /// See [`field_id`] for accessors.
+    /// Tab-aware field id. See [`field_id`] for accessors.
     pub index: FieldId,
     /// Field name.
     pub name: String,

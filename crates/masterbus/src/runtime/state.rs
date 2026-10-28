@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn a_value_round_trips_and_can_be_marked_outdated() {
         let s = State::new();
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         assert!(s.get_value(A, f).is_none());
 
         s.put_value(A, f, Value::Float(12.5));
@@ -526,10 +526,10 @@ mod tests {
     #[test]
     fn marking_an_unknown_value_outdated_is_a_no_op() {
         let s = State::new();
-        s.mark_outdated(A, field_id::btm1(0x17));
-        s.put_value(A, field_id::btm1(0x17), Value::Float(1.0));
-        s.mark_outdated(A, field_id::btm1(0x99));
-        assert!(!s.get_value(A, field_id::btm1(0x17)).unwrap().outdated);
+        s.mark_outdated(A, field_id::monitoring(0x17));
+        s.put_value(A, field_id::monitoring(0x17), Value::Float(1.0));
+        s.mark_outdated(A, field_id::monitoring(0x99));
+        assert!(!s.get_value(A, field_id::monitoring(0x17)).unwrap().outdated);
     }
 
     #[test]
@@ -569,7 +569,7 @@ mod tests {
             vec![group(
                 0,
                 Menu::Monitoring,
-                vec![field(field_id::btm1(1), "V")],
+                vec![field(field_id::monitoring(1), "V")],
             )],
         );
         s.put_menu(
@@ -627,8 +627,8 @@ mod tests {
     #[test]
     fn field_info_looks_in_the_schema_and_the_flat_probe_list() {
         let s = State::new();
-        let btm1 = field_id::btm1(0x17);
-        let btm3 = field_id::btm3(0x30);
+        let btm1 = field_id::monitoring(0x17);
+        let btm3 = field_id::configuration(0x30);
 
         s.put_identity(A, identity("Combi"));
         s.put_menu(
@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(s.field_info(A, btm3).unwrap().name, "ShutDown");
         assert!(s.has_field(A, btm1));
         assert!(s.has_field(A, btm3));
-        assert!(!s.has_field(A, field_id::btm1(0x30)));
+        assert!(!s.has_field(A, field_id::monitoring(0x30)));
         assert!(!s.has_field(B, btm1));
     }
 
@@ -652,7 +652,7 @@ mod tests {
         assert!(!s.has_all_fields(A));
         assert!(s.all_fields(A).is_none());
 
-        s.put_all_fields(A, vec![field(field_id::btm3(0x30), "ShutDown")]);
+        s.put_all_fields(A, vec![field(field_id::configuration(0x30), "ShutDown")]);
         assert!(s.has_all_fields(A));
         assert_eq!(s.all_fields(A).unwrap().len(), 1);
     }
@@ -663,14 +663,14 @@ mod tests {
     #[test]
     fn forget_schema_drops_discovery_but_keeps_the_identity_and_values() {
         let s = State::new();
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         s.put_identity(A, identity("Combi"));
         s.put_menu(
             A,
             Menu::Monitoring,
             vec![group(0, Menu::Monitoring, vec![])],
         );
-        s.put_all_fields(A, vec![field(field_id::btm3(0x30), "ShutDown")]);
+        s.put_all_fields(A, vec![field(field_id::configuration(0x30), "ShutDown")]);
         s.put_value(A, f, Value::Float(12.5));
 
         s.forget_schema(A);

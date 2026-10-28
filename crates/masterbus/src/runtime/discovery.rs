@@ -12,13 +12,13 @@ use super::Config;
 use super::framelog::frame_log;
 use super::waiter::Waiter;
 use crate::model::{
-    AccessLevel, Channel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu, field_id,
+    AccessLevel, DeviceId, DeviceIdentity, FieldId, FieldInfo, GroupInfo, Menu, field_id,
 };
+use crate::protocol::tab::{group_field_key, group_key, option_key, property_key};
 use crate::protocol::{
-    VisualizationType, btm1_meta_option_req_raw, btm1_meta_req_raw, btm3_meta_option_req_raw,
-    btm3_meta_req_raw, can_class, fw_req_raw, group_count_req_raw, prop_str_id_req_raw,
-    schema_field_count_req_class_raw, schema_field_id_req_class_raw,
-    schema_group_name_req_class_raw, string_chunk_req_raw, viz_from_wire,
+    VisualizationType, fw_req_raw, group_count_req_raw, group_field_id_req_raw, group_req_raw,
+    prop_str_id_req_raw, property_option_req_raw, property_req_raw, string_chunk_req_raw,
+    viz_from_wire,
 };
 use crate::transport::TransportTx;
 
@@ -28,11 +28,6 @@ const OPTIONAL_RETRIES: usize = 1;
 /// the blocking ops resolve. Its response, if any, has already arrived with the
 /// batch, so this only needs to cover jitter — not a full discovery timeout.
 const BEST_EFFORT_META_WAIT: Duration = Duration::from_millis(4);
-
-/// Wire-frame encoder for a metadata request: `(addr, opcode, field_id) → frame`.
-type MetaEncode = fn(DeviceId, u8, u16) -> (u32, Vec<u8>);
-/// Wire-frame encoder for an option-string request: `(addr, field, opt) → frame`.
-type MetaOptionEncode = fn(DeviceId, u8, u8) -> (u32, Vec<u8>);
 
 /// Where discovery sends its requests: the scheduler, which also gets a turn
 /// before each one.
@@ -272,14 +267,12 @@ impl Disc<'_> {
             .map(|r| u16::from_le_bytes([r[2], r[3]]))
     }
 
-    /// Fetch several per-field metadata ops in one pipelined round-trip on
-    /// the given channel. Returns op → raw response payload.
+    /// Fetch several per-field properties in one pipelined round-trip on
+    /// the field's tab. Returns op → raw response payload.
     ///
-    /// The two channels speak the same opcode set (see [`crate::protocol::meta_op`])
-    /// but expose **independent field namespaces** — a Btm1 field id `0x17` is
-    /// a different field than a Btm3 field id `0x17`. The caller therefore
-    /// passes a channel-tagged [`FieldId`]; this function picks the right
-    /// encoder + waiter-key family internally.
+    /// The tabs share one opcode set (see [`crate::protocol::meta_op`]) but
+    /// number their fields separately: Monitoring field `0x17` is another
+    /// field than Configuration field `0x17`. The tab is in `fid`.
     ///
     /// Absent metadata (silent or a `0x10` "no value") resolves within one
     /// shared timeout window — that batching is the main discovery speed-up.
@@ -298,18 +291,15 @@ impl Disc<'_> {
         ops: &[u8],
         best_effort: &[u8],
     ) -> HashMap<u8, Vec<u8>> {
-        let wire = field_id::wire_index(fid);
-        let (prefix, encode): (&str, MetaEncode) = match field_id::channel(fid) {
-            Channel::Btm1 => ("btm1_meta", btm1_meta_req_raw),
-            Channel::Btm3 => ("btm3_meta", btm3_meta_req_raw),
-        };
-        let key = |op: u8| format!("{}:{:06X}:{:02X}:{}", prefix, addr, op, wire);
+        let menu = field_id::menu(fid);
+        let index = field_id::index(fid);
+        let key = |op: u8| property_key(menu, addr, op, index);
         self.bus.between();
         for &op in ops.iter().chain(best_effort) {
             self.waiter.register(&key(op));
         }
         for &op in ops.iter().chain(best_effort) {
-            let frame = encode(addr, op, wire as u16);
+            let frame = property_req_raw(menu, addr, op, index);
             frame_log("Tx", frame.0, &frame.1);
             let _ = self.bus.tx().send(frame.0, &frame.1);
         }
@@ -342,13 +332,9 @@ impl Disc<'_> {
     /// loop, which was paying ~1 timeout per missing index and was tuned too
     /// tightly to bridge the EasyView's `0x42`-index gap between header fields
     /// and the Switch / Message blocks.
-    fn probe_existence(&mut self, addr: DeviceId, channel: Channel, max: u16) -> Vec<u8> {
+    fn probe_existence(&mut self, addr: DeviceId, menu: Menu, max: u16) -> Vec<u8> {
         use crate::protocol::meta_op as op;
-        let (prefix, encode): (&str, MetaEncode) = match channel {
-            Channel::Btm1 => ("btm1_meta", btm1_meta_req_raw),
-            Channel::Btm3 => ("btm3_meta", btm3_meta_req_raw),
-        };
-        let key = |wire: u16| format!("{}:{:06X}:{:02X}:{}", prefix, addr, op::VIZ, wire);
+        let key = |wire: u16| property_key(menu, addr, op::VIZ, wire as u8);
 
         let mut existing = Vec::new();
         let mut wire: u16 = 0;
@@ -359,7 +345,7 @@ impl Disc<'_> {
                 self.waiter.register(&key(w));
             }
             for w in wire..end {
-                let frame = encode(addr, op::VIZ, w);
+                let frame = property_req_raw(menu, addr, op::VIZ, w as u8);
                 frame_log("Tx", frame.0, &frame.1);
                 let _ = self.bus.tx().send(frame.0, &frame.1);
                 // Respect the bus budget so the kernel TX queue can drain at
@@ -384,22 +370,20 @@ impl Disc<'_> {
         existing
     }
 
-    /// Per-channel option-string query. Used during list/enum field discovery
-    /// to resolve each option's label string id, one per option `0..n`. Same
-    /// channel dispatch as [`Self::meta_batch`]. Each option is asked once; a
+    /// Option-label query. Used during list/enum field discovery to resolve
+    /// each option's label string id, one per option `0..n`, on the field's
+    /// tab. Each option is asked once; a
     /// reply that comes after it was given up is collected after the others,
     /// in its place. (#6)
     fn option_labels(&mut self, addr: DeviceId, fid: FieldId, n: u8) -> Vec<Option<u16>> {
-        let wire = field_id::wire_index(fid);
-        let (prefix, encode): (&str, MetaOptionEncode) = match field_id::channel(fid) {
-            Channel::Btm1 => ("btm1_meta", btm1_meta_option_req_raw),
-            Channel::Btm3 => ("btm3_meta", btm3_meta_option_req_raw),
-        };
+        let menu = field_id::menu(fid);
+        let index = field_id::index(fid);
         let mut replies = Vec::with_capacity(n as usize);
         let mut late = Vec::new();
         for opt in 0..n {
-            let key = format!("{}:{:06X}:26:{}:{}", prefix, addr, wire, opt);
-            let r = self.req_keeping(&key, encode(addr, wire, opt), OPTIONAL_RETRIES);
+            let key = option_key(menu, addr, index, opt);
+            let frame = property_option_req_raw(menu, addr, index, opt);
+            let r = self.req_keeping(&key, frame, OPTIONAL_RETRIES);
             if r.is_none() {
                 late.push((replies.len(), key));
             }
@@ -512,55 +496,13 @@ pub(super) fn resolve_catalog(
     None
 }
 
-/// The menus enumerated for a "full" discovery. Monitoring / Configuration /
-/// Service share one global gid space (0..mon+cfg+svc). Alarm and History use
-/// their own gid namespaces (each starting at 0) on parallel schema channels.
-pub(super) const MENUS: [Menu; 5] = [
-    Menu::Monitoring,
-    Menu::Configuration,
-    Menu::Service,
-    Menu::Alarm,
-    Menu::History,
-];
+/// The tabs enumerated for a "full" discovery.
+pub(super) const MENUS: [Menu; 4] = Menu::ALL;
 
-/// Maximum gid we'll probe-and-stop on for menus without a known count
-/// selector (Alarm without confirmed `sel_08`, History always).
-const PROBE_GID_MAX: u8 = 16;
-
-/// Waiter-key prefix for the schema response that pairs with a given request
-/// class — must agree with the routing in `protocol::decode::waiter_key_for_frame`.
-fn schema_waiter_prefix(class: u8) -> &'static str {
-    match class {
-        can_class::SCHEMA_REQ_ALARM => "schema_alarm",
-        can_class::SCHEMA_REQ_HISTORY => "schema_history",
-        _ => "schema", // SCHEMA_REQ and any future variants land in the default key family
-    }
-}
-
-/// Base global group id of `menu` and the count of groups in `menu` itself.
-/// For Monitoring/Configuration/Service the gid is global (offset by the prior
-/// menus); for Alarm/History the gid starts at 0 in the menu's own namespace
-/// and the offset returned here is 0. `None` if a count the range depends on
-/// went unanswered: a guessed offset would enumerate another menu's groups.
-fn menu_range(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<(u32, u32)> {
-    Some(match menu {
-        Menu::Monitoring => (0, disc.group_count(addr, 0x02)?),
-        Menu::Configuration => {
-            let mon = disc.group_count(addr, 0x02)?;
-            (mon, disc.group_count(addr, 0x03)?)
-        }
-        Menu::Service => {
-            let mon = disc.group_count(addr, 0x02)?;
-            let cfg = disc.group_count(addr, 0x03)?;
-            (mon + cfg, disc.group_count(addr, 0x04)?)
-        }
-        // Alarm/History gid namespaces are independent and don't always
-        // expose their count via `[0x08, sel]`. `selector()` returns the
-        // hypothesised selector (0x08 for Alarm); when zero or unreliable
-        // we fall back to probe-and-stop inside `enumerate_menu`.
-        Menu::Alarm | Menu::History => (0, 0),
-        Menu::Other(_) => (0, 0),
-    })
+/// The number of groups on `menu`'s tab; `None` if the device didn't answer,
+/// which is not a count of zero (#31). Each tab numbers its groups from 0.
+fn group_total(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<u32> {
+    disc.group_count(addr, menu.groups_selector())
 }
 
 /// Discover just one menu's groups: per-device disk cache, else enumerate live.
@@ -626,96 +568,39 @@ pub(super) fn discover_menu(
     Some(g)
 }
 
-/// Whether a menu could have come from a sound enumeration. Files written
-/// before a lost group count could be told from zero can be wrong in two
-/// ways: an empty Monitoring menu (no device seen so far lacks Monitoring
-/// groups), and a Configuration or Service menu enumerated from group id 0,
-/// which is Monitoring's first group, so that it repeats the Monitoring
-/// groups and runs past the device's last one.
+/// Whether a cached menu could have come from a sound enumeration. No
+/// device seen so far lacks Monitoring groups, so an empty Monitoring menu
+/// is a lost group count from before #31.
 fn plausible_menu(menu: Menu, groups: &[GroupInfo]) -> bool {
-    match menu {
-        Menu::Monitoring => !groups.is_empty(),
-        Menu::Configuration | Menu::Service => {
-            !groups.iter().any(|g| g.id == 0) && !has_repeats(groups)
-        }
-        _ => true,
-    }
-}
-
-/// Whether a group lists the same fields as an earlier one. A field belongs
-/// to one group, so this is a device answering a group id past its last
-/// group with the last group again.
-fn has_repeats(groups: &[GroupInfo]) -> bool {
-    groups
-        .iter()
-        .enumerate()
-        .any(|(i, g)| groups[..i].iter().any(|e| repeats(e, g)))
-}
-
-fn repeats(earlier: &GroupInfo, g: &GroupInfo) -> bool {
-    !g.fields.is_empty()
-        && earlier.name == g.name
-        && earlier.fields.len() == g.fields.len()
-        && earlier
-            .fields
-            .iter()
-            .zip(&g.fields)
-            .all(|(a, b)| a.index == b.index)
+    menu != Menu::Monitoring || !groups.is_empty()
 }
 
 /// A menu's groups, and whether every group's field count was answered.
 fn enumerate_menu(disc: &mut Disc, addr: DeviceId, menu: Menu) -> Option<(Vec<GroupInfo>, bool)> {
-    let (offset, count) = menu_range(disc, addr, menu)?;
+    let count = group_total(disc, addr, menu)?;
     let mut groups = Vec::new();
     let mut complete = true;
-    if count > 0 {
-        // Some devices report more groups than they have and answer an id
-        // past their last group with that group again (a Mass Combi Ultra
-        // counts 42 Configuration groups and has 6). Such a group is the
-        // same as the one before it, which no real group is: a field
-        // belongs to one group. The group before the menu's first is looked
-        // at too, so a menu that is all repeats comes out empty.
-        let mut prev = match offset {
-            0 => None,
-            o => group_shape(disc, addr, (o - 1) as u8, menu),
+    // A device that answers a group id past its last group with that group
+    // again would list a field twice; a field belongs to one group, so such
+    // a group ends the menu.
+    let mut prev: Option<GroupShape> = None;
+    for gid in 0..count.min(256) {
+        let gid = gid as u8;
+        let Some(shape) = group_shape(disc, addr, gid, menu) else {
+            continue;
         };
-        for i in 0..count {
-            let gid = (offset + i) as u8;
-            let Some(shape) = group_shape(disc, addr, gid, menu) else {
-                continue;
-            };
-            if prev.as_ref().is_some_and(|p| shape.repeats(p)) {
-                log::debug!(
-                    target: "masterbus::discovery",
-                    "0x{addr:06X} {menu:?}: group {gid} repeats the one before it; \
-                     the menu ends at {} of {count} groups",
-                    groups.len(),
-                );
-                break;
-            }
-            complete &= shape.counted;
-            groups.push(finish_group(disc, addr, gid, menu, shape.clone()));
-            prev = Some(shape);
+        if prev.as_ref().is_some_and(|p| shape.repeats(p)) {
+            log::debug!(
+                target: "masterbus::discovery",
+                "0x{addr:06X} {menu:?}: group {gid} repeats the one before it; \
+                 the menu ends at {} of {count} groups",
+                groups.len(),
+            );
+            break;
         }
-    } else if matches!(menu, Menu::Alarm | Menu::History) {
-        // Probe-and-stop on the menu's own schema channel — stop after two
-        // consecutive misses or when we hit PROBE_GID_MAX.
-        let mut misses = 0;
-        for gid in 0..PROBE_GID_MAX {
-            match group_shape(disc, addr, gid, menu) {
-                Some(shape) => {
-                    misses = 0;
-                    complete &= shape.counted;
-                    groups.push(finish_group(disc, addr, gid, menu, shape));
-                }
-                None => {
-                    misses += 1;
-                    if misses >= 2 {
-                        break;
-                    }
-                }
-            }
-        }
+        complete &= shape.counted;
+        groups.push(finish_group(disc, addr, gid, menu, shape.clone()));
+        prev = Some(shape);
     }
     Some((groups, complete))
 }
@@ -741,19 +626,20 @@ impl GroupShape {
 const MAX_GROUP_FIELDS: u32 = 256;
 
 fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<GroupShape> {
-    let class = menu.schema_request_class();
-    let key_prefix = schema_waiter_prefix(class);
     let name_sid = {
-        let key = format!("{}:{:06X}:28:{}", key_prefix, addr, g);
-        disc.req_std(&key, schema_group_name_req_class_raw(class, addr, g))
+        let key = group_key(menu, addr, 0x28, g);
+        disc.req_std(&key, group_req_raw(menu, addr, 0x28, g))
             .filter(|r| r.len() >= 6)
             .map(|r| u16::from_le_bytes([r[4], r[5]]))
     };
+    // A "not available" answer is short: the group has no fields.
     let mut ask_count = || {
-        let key = format!("{}:{:06X}:07:{}", key_prefix, addr, g);
-        disc.req_patient(&key, schema_field_count_req_class_raw(class, addr, g))
-            .filter(|r| r.len() >= 8)
-            .map(|r| f32::from_le_bytes([r[4], r[5], r[6], r[7]]) as u32)
+        let key = group_key(menu, addr, 0x07, g);
+        disc.req_patient(&key, group_req_raw(menu, addr, 0x07, g))
+            .map(|r| match r.get(4..8) {
+                Some(b) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u32,
+                None => 0,
+            })
     };
     // A field index is one byte, so a group can't have more than 256 fields.
     // A ChargeMaster Plus reports 54,650 for some groups (#6): ask again, and
@@ -777,11 +663,6 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
         );
         return None;
     }
-    // For Alarm/History, "no name and no fields" likely means the gid is
-    // unallocated — the probe-and-stop loop above relies on this to terminate.
-    if matches!(menu, Menu::Alarm | Menu::History) && name_sid.is_none() && field_count == 0 {
-        return None;
-    }
     if !counted {
         log::info!(
             target: "masterbus::discovery",
@@ -789,18 +670,16 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
         );
     }
 
-    // Field ids returned by the schema query are 8-bit wire indices on the
-    // Btm1 channel; widen to channel-tagged `FieldId` with the Btm1 bit clear.
     // A slow device can answer after all attempts were given up (#6); such
     // an index is collected after the others, so the group comes out the
     // same whichever replies were late.
     let mut replies: Vec<Option<Vec<u8>>> = Vec::new();
     let mut late: Vec<(usize, String)> = Vec::new();
     for idx in 0..field_count {
-        let key = format!("{}:{:06X}:03:{}:{}", key_prefix, addr, g, idx as u8);
+        let key = group_field_key(menu, addr, g, idx as u8);
         let r = disc.req_keeping(
             &key,
-            schema_field_id_req_class_raw(class, addr, g, idx as u8),
+            group_field_id_req_raw(menu, addr, g, idx as u8),
             disc.cfg.discovery_retries,
         );
         if r.is_none() {
@@ -816,7 +695,17 @@ fn group_shape(disc: &mut Disc, addr: DeviceId, g: u8, menu: Menu) -> Option<Gro
     }
     let mut field_ids: Vec<FieldId> = Vec::new();
     for r in replies.into_iter().flatten().filter(|r| r.len() >= 6) {
-        let fid = field_id::btm1(r[4]);
+        // A field index is sent as 16 bits; a field id holds 8 (see
+        // [`FieldId`]). No device seen so far numbers a field past 255.
+        let index = u16::from_le_bytes([r[4], r[5]]);
+        let Ok(index) = u8::try_from(index) else {
+            log::info!(
+                target: "masterbus::discovery",
+                "0x{addr:06X} {menu:?} group {g}: field index {index} is past 255; left out",
+            );
+            continue;
+        };
+        let fid = field_id::new(menu, index);
         if !field_ids.contains(&fid) {
             field_ids.push(fid);
         }
@@ -855,17 +744,10 @@ fn finish_group(
     }
 }
 
-/// Probe every reachable field across **both** metadata channels (Btm1 +
-/// Btm3), dropping indices that don't respond. Returns one `FieldInfo` per
-/// reachable index per channel — channels are distinguished by bit 8 of the
-/// id, so callers can store the combined result in one `HashMap<FieldId, _>`.
-///
-/// This is the only way to enumerate Configuration items on devices whose
-/// `0x08 0x03` group count lies (e.g. the Magic-class Nav Chg, which reports
-/// zero config groups despite ~25 Btm3 settings). The grouping MasterAdjust
-/// shows comes from hard-coded per-device-family layout
-/// (`TDevice_MacMagic` etc. inside `MasterAdjust.exe`); the wire protocol
-/// only exposes a flat per-channel field-index space.
+/// Probe every index of the Monitoring and Configuration tabs, dropping
+/// indices that don't respond. Returns one `FieldInfo` per field found; the
+/// tab is in each field id, so callers can store the result in one
+/// `HashMap<FieldId, _>`. This finds fields no group lists (`--probe`).
 pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<FieldInfo> {
     // Two-phase: first an existence sweep (one VIZ query per wire index,
     // pipelined in chunks) over the full 8-bit space, then a full metadata
@@ -873,8 +755,8 @@ pub(super) fn enumerate_all_fields(disc: &mut Disc, addr: DeviceId) -> Vec<Field
     // was too narrow to bridge multi-index gaps (the EasyView 5 has a
     // ~0x42-index hole between Btm3 header fields and the Switch block).
     let mut out = Vec::with_capacity(64);
-    probe_channel(disc, addr, Channel::Btm1, &mut out);
-    probe_channel(disc, addr, Channel::Btm3, &mut out);
+    probe_channel(disc, addr, Menu::Monitoring, &mut out);
+    probe_channel(disc, addr, Menu::Configuration, &mut out);
     out
 }
 
@@ -897,7 +779,7 @@ pub(super) fn eventable_outputs(disc: &mut Disc, addr: DeviceId) -> Vec<FieldId>
         match disc.group_count(addr, EVENTABLE_0 + k) {
             // Outputs are Monitoring fields, on the Btm1 channel. Index 0xFF
             // is left out: its commit register, index + 1, does not exist.
-            Some(index) if index < 0xFF => out.push(field_id::btm1(index as u8)),
+            Some(index) if index < 0xFF => out.push(field_id::monitoring(index as u8)),
             _ => break,
         }
     }
@@ -913,15 +795,12 @@ pub(super) fn eventable_outputs(disc: &mut Disc, addr: DeviceId) -> Vec<FieldId>
 /// Phase 2: full metadata batch ([`enumerate_field`], which itself pipelines
 /// 5 opcodes per field) only for the indices that responded in phase 1. No
 /// miss-streak — gaps are free.
-fn probe_channel(disc: &mut Disc, addr: DeviceId, channel: Channel, out: &mut Vec<FieldInfo>) {
-    let wires = disc.probe_existence(addr, channel, 256);
+fn probe_channel(disc: &mut Disc, addr: DeviceId, menu: Menu, out: &mut Vec<FieldInfo>) {
+    let wires = disc.probe_existence(addr, menu, 256);
     for wire in wires {
-        let fid = match channel {
-            Channel::Btm1 => field_id::btm1(wire),
-            Channel::Btm3 => field_id::btm3(wire),
-        };
-        // The flat probe is Btm3 config space; eventable outputs live on the
-        // Btm1 Monitoring tab, so don't pay the 0x0D query here.
+        let fid = field_id::new(menu, wire);
+        // Eventable outputs are listed by `eventable_outputs`, so the flat
+        // probe doesn't pay the 0x0D query.
         if let Some(f) = enumerate_field(disc, addr, fid, false) {
             out.push(f);
         }
@@ -1072,7 +951,9 @@ pub(super) fn enumerate_field(
 /// in a way that older versions can't read.
 /// - v1: original (`FieldInfo.index` was `i32`).
 /// - v2: `FieldInfo.index` became `u16` (`FieldId` with channel bit).
-const CACHE_SCHEMA: u8 = 2;
+/// - v3: the four tabs (#6); Configuration was read from the wrong groups
+///   before, and the Service menu is gone.
+const CACHE_SCHEMA: u8 = 3;
 
 fn cache_file(
     dir: &Path,
@@ -1086,7 +967,7 @@ fn cache_file(
         serial,
         firmware,
         level.level_byte(),
-        menu.selector(),
+        menu.groups_selector(),
         CACHE_SCHEMA,
     );
     let safe: String = key
@@ -1363,6 +1244,7 @@ mod enumeration_tests {
     use crate::protocol::can_class;
     use crate::runtime::Engine;
     use crate::runtime::fakebus::{ADDR, Device, FakeBus};
+    use crate::value::Value;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1395,8 +1277,8 @@ mod enumeration_tests {
         Device::new()
             .with_identity("44010250", "1234567", "Combi")
             .with_group(Menu::Monitoring, 0, "DC", &[0x17, 0x18])
-            .with_field(field_id::btm1(0x17), "Voltage", "V", VIZ_FLOAT, false)
-            .with_list_field(field_id::btm1(0x18), "State", &["Off", "On"])
+            .with_field(field_id::monitoring(0x17), "Voltage", "V", VIZ_FLOAT, false)
+            .with_list_field(field_id::monitoring(0x18), "State", &["Off", "On"])
     }
 
     /// A scratch directory that cleans up after itself.
@@ -1440,7 +1322,7 @@ mod enumeration_tests {
         assert_eq!(g.fields.len(), 2);
 
         let voltage = &g.fields[0];
-        assert_eq!(voltage.index, field_id::btm1(0x17));
+        assert_eq!(voltage.index, field_id::monitoring(0x17));
         assert_eq!(voltage.name, "Voltage");
         assert_eq!(voltage.unit, "V");
         assert_eq!(voltage.viz_type, Viz::Float);
@@ -1460,7 +1342,7 @@ mod enumeration_tests {
     fn a_group_counting_past_256_fields_is_skipped() {
         let device = combi()
             .with_group(Menu::Monitoring, 1, "AC", &[0x20])
-            .with_field(field_id::btm1(0x20), "Current", "A", VIZ_FLOAT, false)
+            .with_field(field_id::monitoring(0x20), "Current", "A", VIZ_FLOAT, false)
             .with_claimed_field_count(Menu::Monitoring, 0, 54650.0);
         let (engine, bus) = connect(device, test_config());
         engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
@@ -1636,52 +1518,104 @@ mod enumeration_tests {
         assert_eq!(engine.state.schema(ADDR).unwrap().groups[0].fields.len(), 2);
     }
 
-    /// Monitoring, Configuration and Service share one global gid space: a
-    /// menu's groups start after every prior menu's. Getting the offset wrong
-    /// enumerates someone else's groups.
+    /// Each tab counts its groups with its own selector and numbers them
+    /// from 0, on its own classes. Configuration is not Monitoring's
+    /// groups past its count, as earlier versions read it (#6).
     #[test]
-    fn the_three_global_menus_share_one_offset_gid_space() {
+    fn each_tab_numbers_its_groups_from_0() {
         let device = Device::new()
             .with_identity("44010250", "1234567", "Combi")
-            .with_group(Menu::Monitoring, 0, "DC", &[])
+            .with_group(Menu::Monitoring, 0, "DC", &[0x01])
             .with_group(Menu::Monitoring, 1, "AC", &[])
-            .with_group(Menu::Configuration, 2, "General", &[])
-            .with_group(Menu::Service, 3, "Service", &[]);
-        let (engine, _bus) = connect(device, test_config());
+            .with_group(Menu::Configuration, 0, "General", &[0x01])
+            .with_group(Menu::Alarm, 0, "Alarms", &[0x01])
+            .with_group(Menu::History, 0, "Counters", &[0x01])
+            .with_field(field_id::monitoring(0x01), "Voltage", "V", VIZ_FLOAT, false)
+            .with_field(
+                field_id::configuration(0x01),
+                "Language",
+                "",
+                VIZ_FLOAT,
+                true,
+            )
+            .with_field(
+                field_id::new(Menu::Alarm, 0x01),
+                "Low voltage",
+                "",
+                VIZ_FLOAT,
+                false,
+            )
+            .with_field(
+                field_id::new(Menu::History, 0x01),
+                "Run time",
+                "h",
+                VIZ_FLOAT,
+                false,
+            );
+        let (engine, bus) = connect(device, test_config());
 
-        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
-        engine.ensure_menu(ADDR, Menu::Service).unwrap();
+        for menu in Menu::ALL {
+            engine.ensure_menu(ADDR, menu).unwrap();
+        }
         let schema = engine.state.schema(ADDR).unwrap();
-
-        let config: Vec<_> = schema.menu_groups(Menu::Configuration).collect();
-        assert_eq!(config.len(), 1);
-        assert_eq!((config[0].id, config[0].name.as_str()), (2, "General"));
-
-        let service: Vec<_> = schema.menu_groups(Menu::Service).collect();
-        assert_eq!(service.len(), 1);
-        assert_eq!((service[0].id, service[0].name.as_str()), (3, "Service"));
+        type Tab = Vec<(i32, String, Vec<(FieldId, String)>)>;
+        let tab = |menu| -> Tab {
+            schema
+                .menu_groups(menu)
+                .map(|g| {
+                    let fields = g.fields.iter().map(|f| (f.index, f.name.clone())).collect();
+                    (g.id, g.name.clone(), fields)
+                })
+                .collect()
+        };
+        assert_eq!(tab(Menu::Monitoring).len(), 2);
+        assert_eq!(
+            tab(Menu::Configuration),
+            vec![(0, "General".into(), vec![(0x101, "Language".into())])]
+        );
+        assert_eq!(
+            tab(Menu::Alarm),
+            vec![(0, "Alarms".into(), vec![(0x201, "Low voltage".into())])]
+        );
+        assert_eq!(
+            tab(Menu::History),
+            vec![(0, "Counters".into(), vec![(0x301, "Run time".into())])]
+        );
+        // Monitoring's group requests never went past its own two groups.
+        assert!(
+            bus.sent_class(can_class::SCHEMA_REQ)
+                .iter()
+                .filter(|(id, _)| id & 0x80_0000 == 0)
+                .all(|(_, d)| d[1] < 2)
+        );
     }
 
-    /// Alarm and History have their own gid namespaces and no reliable count
-    /// query, so they're probed from 0 until two consecutive gids answer
-    /// nothing.
+    /// An Alarm and a History value are read on their tabs' own classes.
     #[test]
-    fn the_alarm_namespace_is_probed_until_two_misses() {
-        let device = Device::new()
+    fn alarm_and_history_values_are_read_on_their_tabs() {
+        let alarm = field_id::new(Menu::Alarm, 0x01);
+        let history = field_id::new(Menu::History, 0x06);
+        let mut device = Device::new()
             .with_identity("44010250", "1234567", "Combi")
-            .with_group(Menu::Alarm, 0, "Alarms", &[])
-            .with_group(Menu::Alarm, 1, "Warnings", &[])
-            // gid 2 and 3 are unallocated — the probe stops here...
-            .with_group(Menu::Alarm, 4, "Never reached", &[]);
-        let (engine, _bus) = connect(device, test_config());
+            .with_group(Menu::Alarm, 0, "Alarms", &[0x01])
+            .with_group(Menu::History, 0, "Counters", &[0x06])
+            .with_field(alarm, "Low voltage", "", VIZ_FLOAT, false)
+            .with_field(history, "Run time", "h", VIZ_FLOAT, false);
+        device.tab_values.insert(alarm, 1.0f32.to_le_bytes());
+        device.tab_values.insert(history, 123.5f32.to_le_bytes());
+        let (engine, bus) = connect(device, test_config());
 
-        engine.ensure_menu(ADDR, Menu::Alarm).unwrap();
-        let schema = engine.state.schema(ADDR).unwrap();
-        let names: Vec<&str> = schema
-            .menu_groups(Menu::Alarm)
-            .map(|g| g.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["Alarms", "Warnings"]);
+        assert_eq!(
+            engine.read(ADDR, alarm, Duration::ZERO).unwrap(),
+            Value::Float(1.0)
+        );
+        assert_eq!(
+            engine.read(ADDR, history, Duration::ZERO).unwrap(),
+            Value::Float(123.5)
+        );
+        let sent = bus.sent();
+        assert!(sent.contains(&(0x03_188EA2, vec![0x01, 0x00])));
+        assert!(sent.contains(&(0x1D_988EA2, vec![0x06, 0x00])));
     }
 
     /// A device with no Alarm tab at all answers nothing and is not an error.
@@ -1710,9 +1644,9 @@ mod enumeration_tests {
         let device = Device::new()
             .with_identity("44010250", "1234567", "Combi")
             .with_group(Menu::Monitoring, 0, "Relays", &[0x10])
-            .with_group(Menu::Configuration, 1, "General", &[0x11])
-            .with_eventable_field(field_id::btm1(0x10), "Relay 1")
-            .with_eventable_field(field_id::btm1(0x11), "Hidden");
+            .with_group(Menu::Configuration, 0, "General", &[0x11])
+            .with_eventable_field(field_id::monitoring(0x10), "Relay 1")
+            .with_eventable_field(field_id::configuration(0x11), "Hidden");
         let (engine, _bus) = connect(device, test_config());
 
         engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
@@ -1721,14 +1655,14 @@ mod enumeration_tests {
         assert!(
             engine
                 .state
-                .field_info(ADDR, field_id::btm1(0x10))
+                .field_info(ADDR, field_id::monitoring(0x10))
                 .unwrap()
                 .eventable
         );
         assert!(
             !engine
                 .state
-                .field_info(ADDR, field_id::btm1(0x11))
+                .field_info(ADDR, field_id::configuration(0x11))
                 .unwrap()
                 .eventable
         );
@@ -1777,8 +1711,20 @@ mod enumeration_tests {
     fn the_flat_probe_covers_both_channels() {
         let device = Device::new()
             .with_identity("44010250", "1234567", "Nav Chg")
-            .with_field(field_id::btm1(0x05), "Btm1 field", "V", VIZ_FLOAT, false)
-            .with_field(field_id::btm3(0x05), "Btm3 field", "A", VIZ_FLOAT, true);
+            .with_field(
+                field_id::monitoring(0x05),
+                "Btm1 field",
+                "V",
+                VIZ_FLOAT,
+                false,
+            )
+            .with_field(
+                field_id::configuration(0x05),
+                "Btm3 field",
+                "A",
+                VIZ_FLOAT,
+                true,
+            );
         let (engine, _bus) = connect(device, test_config());
 
         engine.ensure_all_fields(ADDR).unwrap();
@@ -1788,12 +1734,15 @@ mod enumeration_tests {
         assert_eq!(
             engine
                 .state
-                .field_info(ADDR, field_id::btm1(0x05))
+                .field_info(ADDR, field_id::monitoring(0x05))
                 .unwrap()
                 .name,
             "Btm1 field"
         );
-        let btm3 = engine.state.field_info(ADDR, field_id::btm3(0x05)).unwrap();
+        let btm3 = engine
+            .state
+            .field_info(ADDR, field_id::configuration(0x05))
+            .unwrap();
         assert_eq!(btm3.name, "Btm3 field");
         assert!(btm3.writeable);
     }
@@ -1804,8 +1753,8 @@ mod enumeration_tests {
     fn a_wide_hole_does_not_end_the_flat_probe() {
         let device = Device::new()
             .with_identity("77010310", "7654321", "EasyView")
-            .with_field(field_id::btm3(0x00), "First", "", VIZ_FLOAT, false)
-            .with_field(field_id::btm3(0xF0), "Last", "", VIZ_FLOAT, false);
+            .with_field(field_id::configuration(0x00), "First", "", VIZ_FLOAT, false)
+            .with_field(field_id::configuration(0xF0), "Last", "", VIZ_FLOAT, false);
         let (engine, _bus) = connect(device, test_config());
 
         engine.ensure_all_fields(ADDR).unwrap();
@@ -1825,7 +1774,7 @@ mod enumeration_tests {
     fn an_absurd_option_count_is_not_walked() {
         let mut device = Device::new().with_identity("44010250", "1234567", "Combi");
         device.meta.insert(
-            field_id::btm1(0x17),
+            field_id::monitoring(0x17),
             crate::runtime::fakebus::FakeField {
                 name_sid: 0,
                 unit_sid: 0,
@@ -1840,7 +1789,10 @@ mod enumeration_tests {
         let (engine, _bus) = connect(device, test_config());
 
         engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
-        let f = engine.state.field_info(ADDR, field_id::btm1(0x17)).unwrap();
+        let f = engine
+            .state
+            .field_info(ADDR, field_id::monitoring(0x17))
+            .unwrap();
         assert_eq!(f.max, 5000.0);
         assert!(f.options.is_empty());
     }
@@ -1933,9 +1885,15 @@ mod enumeration_tests {
     #[test]
     fn a_group_the_device_repeats_is_kept_once() {
         let device = combi()
+            .with_group(Menu::Configuration, 0, "Solar", &[0x20])
             .with_group(Menu::Configuration, 1, "Solar", &[0x20])
-            .with_group(Menu::Configuration, 2, "Solar", &[0x20])
-            .with_field(field_id::btm1(0x20), "Power", "W", VIZ_FLOAT, false);
+            .with_field(
+                field_id::configuration(0x20),
+                "Power",
+                "W",
+                VIZ_FLOAT,
+                false,
+            );
         let (engine, _bus) = connect(device, test_config());
         engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
         let schema = engine.state.schema(ADDR).unwrap();
@@ -1945,7 +1903,7 @@ mod enumeration_tests {
             .filter(|g| g.menu == Menu::Configuration)
             .map(|g| g.id)
             .collect();
-        assert_eq!(config, vec![1]);
+        assert_eq!(config, vec![0]);
     }
 
     /// A field no menu lists (shown only at a higher access level) can be
@@ -1953,11 +1911,17 @@ mod enumeration_tests {
     #[test]
     fn a_field_no_menu_lists_can_be_asked_for_and_read() {
         let device = combi()
-            .with_field(field_id::btm1(0x49), "Cell counter", "", VIZ_FLOAT, false)
+            .with_field(
+                field_id::monitoring(0x49),
+                "Cell counter",
+                "",
+                VIZ_FLOAT,
+                false,
+            )
             .with_btm1(0x49, 3.0);
         let (engine, _bus) = connect(device, test_config());
         engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
-        let f = field_id::btm1(0x49);
+        let f = field_id::monitoring(0x49);
         assert!(engine.state.field_info(ADDR, f).is_none());
         let info = engine.field_info(ADDR, f).unwrap().unwrap();
         assert_eq!(info.name, "Cell counter");
@@ -1967,67 +1931,10 @@ mod enumeration_tests {
         );
         assert!(
             engine
-                .field_info(ADDR, field_id::btm1(0x7E))
+                .field_info(ADDR, field_id::monitoring(0x7E))
                 .unwrap()
                 .is_none()
         );
-    }
-
-    /// A menu whose groups only repeat the one before the menu (a Mass
-    /// Combi Ultra counts Service groups it doesn't have, and answers them
-    /// with its last Configuration group) comes out empty.
-    #[test]
-    fn a_menu_of_repeats_is_empty() {
-        let device = combi()
-            .with_group(Menu::Configuration, 1, "Solar", &[0x20])
-            .with_group(Menu::Service, 2, "Solar", &[0x20])
-            .with_group(Menu::Service, 3, "Solar", &[0x20])
-            .with_field(field_id::btm1(0x20), "Power", "W", VIZ_FLOAT, false);
-        let (engine, _bus) = connect(device, test_config());
-        engine.ensure_menu(ADDR, Menu::Service).unwrap();
-        let schema = engine.state.schema(ADDR).unwrap();
-        assert!(!schema.groups.iter().any(|g| g.menu == Menu::Service));
-    }
-
-    /// A Configuration menu in the cache that starts at group 0, as an
-    /// earlier version could write after a lost Monitoring count, is treated
-    /// as a miss. (#31)
-    #[test]
-    fn a_cached_configuration_menu_from_group_0_is_enumerated_again() {
-        let dir = TempDir::new();
-        let config = Config {
-            cache_path: Some(dir.path.clone()),
-            ..test_config()
-        };
-        let device = combi()
-            .with_group(Menu::Configuration, 1, "Solar", &[0x20])
-            .with_field(field_id::btm1(0x20), "Power", "W", VIZ_FLOAT, false);
-        let (engine, bus) = connect(device, config);
-        engine.ensure_menu(ADDR, Menu::Monitoring).unwrap();
-        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
-        let file = |sel: &str| {
-            std::fs::read_dir(&dir.path)
-                .unwrap()
-                .map(|e| e.unwrap().path())
-                .find(|p| p.to_string_lossy().contains(&format!("-{sel}-v")))
-                .unwrap()
-        };
-        let monitoring = std::fs::read(file("02")).unwrap();
-        std::fs::write(file("03"), &monitoring).unwrap();
-        let enumerated = bus.sent_class(can_class::SCHEMA_REQ).len();
-
-        engine.state.forget_schema(ADDR);
-        engine.ensure_menu(ADDR, Menu::Configuration).unwrap();
-
-        assert!(bus.sent_class(can_class::SCHEMA_REQ).len() > enumerated);
-        let schema = engine.state.schema(ADDR).unwrap();
-        let names: Vec<_> = schema
-            .groups
-            .iter()
-            .filter(|g| g.menu == Menu::Configuration)
-            .map(|g| g.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["Solar"]);
     }
 
     /// Writability flips per access level, so each level keys its own file —
@@ -2101,7 +2008,7 @@ mod enumeration_tests {
             name: "DC".into(),
             menu: Menu::Monitoring,
             fields: vec![FieldInfo {
-                index: field_id::btm3(0x30),
+                index: field_id::configuration(0x30),
                 name: "ShutDown".into(),
                 unit: "V".into(),
                 viz_type: VisualizationType::Float,

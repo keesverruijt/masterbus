@@ -31,10 +31,12 @@ incompatible. A client should refuse a version it does not know.
 
 - A **device** is addressed by its **serial number**, the mapping file's key.
   A device that has not reported a serial cannot be mapped or addressed.
-- A **field** is addressed by its channel-aware id as three hex digits with a
-  `0x` prefix, `0x000`..`0x1FF`, the same encoding the TUI and
-  `masterbus-set-field` use.
-- A **menu** is `monitoring`, `configuration` or `service`.
+- A **field** is addressed by its id as three hex digits with a `0x`
+  prefix, `0x000`..`0x3FF`, the same encoding the TUI and
+  `masterbus-set-field` use. The first digit is the tab: 0 Monitoring,
+  1 Configuration, 2 Alarm, 3 History.
+- A **menu** is one of the device's tabs: `monitoring`, `alarm`,
+  `history` or `configuration`.
 
 ## Endpoints
 
@@ -133,7 +135,7 @@ of every menu discovered on it (Monitoring at least).
 
 ### `GET /api/devices/{serial}`
 
-One device, same shape. With `?menu=configuration` (or `service`) that menu
+One device, same shape. With `?menu=configuration` (or `alarm`, `history`) that menu
 is discovered first if it has not been, and its fields are merged in. A cold
 discovery can take a few seconds. `404` for an unknown serial, `400` for an
 unknown menu, `502` if the device would not enumerate.

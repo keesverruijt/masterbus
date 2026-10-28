@@ -51,7 +51,7 @@ pub struct DeviceRec {
 /// One field, reduced to what mapping needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldRec {
-    /// Channel-aware field id.
+    /// Tab-aware field id.
     pub id: FieldId,
     /// Name, as the installer left it.
     pub name: String,
@@ -143,24 +143,12 @@ impl DeviceRec {
 
 /// The name of a menu as the API spells it.
 pub fn menu_name(menu: Menu) -> &'static str {
-    match menu {
-        Menu::Monitoring => "monitoring",
-        Menu::Configuration => "configuration",
-        Menu::Service => "service",
-        Menu::Alarm => "alarm",
-        Menu::History => "history",
-        Menu::Other(_) => "other",
-    }
+    menu.tag()
 }
 
 /// A menu by its API name.
 pub fn menu_by_name(name: &str) -> Option<Menu> {
-    Some(match name {
-        "monitoring" => Menu::Monitoring,
-        "configuration" => Menu::Configuration,
-        "service" => Menu::Service,
-        _ => return None,
-    })
+    Menu::ALL.into_iter().find(|m| m.tag() == name)
 }
 
 /// Everything needed to turn one field's updates into a Signal K value.
@@ -828,7 +816,7 @@ pub(crate) mod tests {
                     options: vec![],
                 },
                 masterbus::FieldInfo {
-                    index: 0x040,
+                    index: 0x140,
                     name: "Charger".into(),
                     unit: String::new(),
                     viz_type: masterbus::VisualizationType::CheckBox,
@@ -844,19 +832,19 @@ pub(crate) mod tests {
         d.merge_groups(Menu::Configuration, groups);
         assert_eq!(d.menus, vec![Menu::Monitoring, Menu::Configuration]);
         assert_eq!(d.field(0x001).unwrap().name, "Voltage");
-        let f = d.field(0x040).unwrap();
+        let f = d.field(0x140).unwrap();
         assert!(f.writable);
         assert_eq!(f.menu, Menu::Configuration);
         assert_eq!(f.group, "Setup");
-        assert!(d.field_ids().contains(&0x040));
+        assert!(d.field_ids().contains(&0x140));
     }
 
     #[test]
     fn menu_names_round_trip() {
-        for m in [Menu::Monitoring, Menu::Configuration, Menu::Service] {
+        for m in Menu::ALL {
             assert_eq!(menu_by_name(menu_name(m)), Some(m));
         }
-        assert_eq!(menu_by_name("alarm"), None);
+        assert_eq!(menu_by_name("service"), None);
     }
 
     #[test]

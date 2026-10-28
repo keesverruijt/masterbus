@@ -1,8 +1,8 @@
 //! An in-process fake MasterBus device, for the runtime tests.
 //!
 //! [`Device`] is a small state machine that answers the request classes the
-//! scheduler emits — property/login (`0x07`), Btm1 values (`0x18`), Btm3
-//! values (`0x1B` on the shadow address) — and announces itself the way a
+//! scheduler emits — property/login (`0x07`), and each tab's values,
+//! properties and groups (see [`crate::protocol::tab`]) — and announces itself the way a
 //! real device does. [`FakeBus::start`] wires one to the [`Transport`] trait
 //! and runs it on its own thread, so a test drives the *real* reader and
 //! scheduler threads over a loopback bus and can assert both on what went out
@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 
 use crate::error::Result;
-use crate::model::{AccessLevel, Channel, FieldId, Menu, field_id};
+use crate::model::{AccessLevel, FieldId, Menu, field_id};
+use crate::protocol::tab::{self, Kind};
 use crate::protocol::{BTM1_META_ADDR_FLAG, can_class, meta_op};
 use crate::transport::{Transport, TransportRx, TransportTx};
 
@@ -69,7 +70,7 @@ pub struct FakeField {
 pub struct FakeGroup {
     /// String id of the group name.
     pub name_sid: u16,
-    /// Btm1 wire indices of the group's fields, in display order.
+    /// Indices of the group's fields on its tab, in display order.
     pub fields: Vec<u8>,
     /// A field count to report instead of `fields.len()`. Field-id queries
     /// past the real fields then answer them again, in order: the
@@ -96,8 +97,10 @@ pub struct Device {
     pub codes: HashMap<u8, f32>,
     /// Btm1 field values, by wire index.
     pub btm1: HashMap<u8, [u8; 4]>,
-    /// Btm3 field values, by wire index.
+    /// Configuration field values, by index.
     pub btm3: HashMap<u8, [u8; 4]>,
+    /// Alarm and History field values, by field id.
+    pub tab_values: HashMap<FieldId, [u8; 4]>,
     /// String table (opcode `0x30` chunk reads and writes).
     pub strings: HashMap<u16, String>,
     /// Property string ids: 1 = article, 2 = serial, 3 = name, 4 = revision.
@@ -139,10 +142,9 @@ pub struct Device {
     /// The ChargeMaster Plus of #6 answers some requests after all three
     /// attempts were given up.
     pub slow: Vec<(u8, Vec<u8>, Duration)>,
-    /// Groups, keyed by (schema request class, gid). Alarm and History have
-    /// their own gid namespaces, which is why the class is part of the key.
-    pub groups: HashMap<(u8, u8), FakeGroup>,
-    /// Per-field metadata, keyed by channel-tagged field id. An index that is
+    /// Groups, keyed by (tab, gid). Each tab numbers its groups from 0.
+    pub groups: HashMap<(Menu, u8), FakeGroup>,
+    /// Per-field metadata, keyed by tab-aware field id. An index that is
     /// absent here answers nothing at all — an unallocated slot.
     pub meta: HashMap<FieldId, FakeField>,
     /// Next string id handed out by the `with_*` builders.
@@ -166,6 +168,7 @@ impl Device {
             codes: HashMap::new(),
             btm1: HashMap::new(),
             btm3: HashMap::new(),
+            tab_values: HashMap::new(),
             strings: HashMap::new(),
             prop_sids: HashMap::new(),
             fw_parts: [(0, 1), (0, 0)],
@@ -197,13 +200,12 @@ impl Device {
         sid
     }
 
-    /// Add a group to a menu's schema channel. For the three global-gid menus
-    /// the group count reported by `[0x08, selector]` is kept in step, so the
-    /// gids a test passes are the global ones discovery will ask for.
+    /// Add a group to a tab. The tab's group count, as `[0x08, selector]`
+    /// reports it, is kept in step; gids start at 0 on each tab.
     pub fn with_group(mut self, menu: Menu, gid: u8, name: &str, fields: &[u8]) -> Device {
         let name_sid = self.intern(name);
         self.groups.insert(
-            (menu.schema_request_class(), gid),
+            (menu, gid),
             FakeGroup {
                 name_sid,
                 fields: fields.to_vec(),
@@ -211,9 +213,7 @@ impl Device {
                 count_answers: None,
             },
         );
-        if matches!(menu, Menu::Monitoring | Menu::Configuration | Menu::Service) {
-            *self.group_counts.entry(menu.selector()).or_insert(0) += 1;
-        }
+        *self.group_counts.entry(menu.groups_selector()).or_insert(0) += 1;
         self
     }
 
@@ -235,7 +235,7 @@ impl Device {
 
     /// Make group `gid` of `menu` report `count` fields, whatever it has.
     pub fn with_claimed_field_count(mut self, menu: Menu, gid: u8, count: f32) -> Device {
-        if let Some(g) = self.groups.get_mut(&(menu.schema_request_class(), gid)) {
+        if let Some(g) = self.groups.get_mut(&(menu, gid)) {
             g.claimed_count = Some(count);
         }
         self
@@ -243,7 +243,7 @@ impl Device {
 
     /// Answer `n` field-count queries for this group, then stay silent.
     pub fn with_field_count_answers(mut self, menu: Menu, gid: u8, n: u32) -> Device {
-        if let Some(g) = self.groups.get_mut(&(menu.schema_request_class(), gid)) {
+        if let Some(g) = self.groups.get_mut(&(menu, gid)) {
             g.count_answers = Some(n);
         }
         self
@@ -372,38 +372,31 @@ impl Device {
         if addr & !BTM1_META_ADDR_FLAG != self.addr {
             return Vec::new();
         }
-        let shadow = addr & BTM1_META_ADDR_FLAG != 0;
-        match (class, shadow) {
-            (can_class::PROPERTY_REQ, false) => self.property(data),
-            (can_class::MONITORING_REQ, false) => self.btm1_value(data),
-            // Btm1 per-field metadata lives on the shadow address; the reply
-            // comes back on class 0x08 at that same address.
-            (can_class::MONITORING_REQ, true) => {
-                let reply = id(can_class::MONITORING_DATA, addr);
-                self.metadata(Channel::Btm1, data, reply)
-            }
-            // Btm3 metadata is class 0x1C on the real address, answered on 0x0C.
-            (can_class::BTM3_META_REQ, false) => {
-                let reply = id(can_class::BTM3_META_DATA, addr);
-                self.metadata(Channel::Btm3, data, reply)
-            }
-            (can_class::SCHEMA_REQ_HISTORY, true) => self.btm3_value(data),
-            // The three schema channels. Class 0x1B doubles as the Btm3 value
-            // carrier, which is why only the real-address form lands here.
-            (
-                can_class::SCHEMA_REQ | can_class::SCHEMA_REQ_ALARM | can_class::SCHEMA_REQ_HISTORY,
-                false,
-            ) => self.schema(class, data),
-            _ => Vec::new(),
+        if class == can_class::PROPERTY_REQ && addr & BTM1_META_ADDR_FLAG == 0 {
+            return self.property(data);
         }
+        for menu in Menu::ALL {
+            for kind in [Kind::Data, Kind::Property, Kind::Group] {
+                let e = tab::exchange(menu, kind);
+                if !e.req.is(class, addr) {
+                    continue;
+                }
+                let reply = e.info.can_id(self.addr);
+                return match (menu, kind) {
+                    (Menu::Monitoring, Kind::Data) => self.btm1_value(data),
+                    (_, Kind::Data) => self.tab_value(menu, data, reply),
+                    (_, Kind::Property) => self.metadata(menu, data, reply),
+                    (_, Kind::Group) => self.schema(menu, data, reply),
+                };
+            }
+        }
+        Vec::new()
     }
 
-    /// The three schema channels: group name, field count, field id. An
-    /// unregistered gid answers nothing, which is how probe-and-stop on the
-    /// Alarm and History namespaces terminates.
-    fn schema(&mut self, class: u8, data: &[u8]) -> Vec<Frame> {
-        let reply = id(class - 0x10, self.addr);
-        let group = |d: &Device, gid: u8| d.groups.get(&(class, gid)).cloned();
+    /// A tab's groups: group name, field count, field id. An unregistered
+    /// gid answers nothing.
+    fn schema(&mut self, menu: Menu, data: &[u8], reply: u32) -> Vec<Frame> {
+        let group = |d: &Device, gid: u8| d.groups.get(&(menu, gid)).cloned();
         match data {
             [0x28, gid, _] => match group(self, *gid) {
                 Some(g) => {
@@ -412,7 +405,7 @@ impl Device {
                 }
                 None => Vec::new(),
             },
-            [0x07, gid, _] => match self.groups.get_mut(&(class, *gid)) {
+            [0x07, gid, _] => match self.groups.get_mut(&(menu, *gid)) {
                 Some(g) if g.count_answers != Some(0) => {
                     if let Some(n) = &mut g.count_answers {
                         *n -= 1;
@@ -440,15 +433,12 @@ impl Device {
         }
     }
 
-    /// Per-field metadata, one opcode per request. Both channels speak the
-    /// same opcode set over independent field-index namespaces; an index with
-    /// no metadata stays silent, which is what the existence probe reads as
-    /// "no field here".
-    fn metadata(&mut self, channel: Channel, data: &[u8], reply: u32) -> Vec<Frame> {
-        let tag = |wire: u8| match channel {
-            Channel::Btm1 => field_id::btm1(wire),
-            Channel::Btm3 => field_id::btm3(wire),
-        };
+    /// Per-field metadata, one opcode per request. The tabs share one opcode
+    /// set and number their fields separately; an index with no metadata
+    /// stays silent, which is what the existence probe reads as "no field
+    /// here".
+    fn metadata(&mut self, menu: Menu, data: &[u8], reply: u32) -> Vec<Frame> {
+        let tag = |wire: u8| field_id::new(menu, wire);
         // Option query: `[0x26, wire, 0x00, opt]`.
         if let [meta_op::OPTION, wire, _, opt] = data {
             let sid = self
@@ -643,26 +633,30 @@ impl Device {
         }
     }
 
-    /// Class `0x1B` on the shadow address: a headerless read or write. Both
-    /// are answered on class `0x0B` at the same address — a read with the
-    /// current value, a write with the value just stored (the ack).
-    fn btm3_value(&mut self, data: &[u8]) -> Vec<Frame> {
-        let carrier = id(
-            can_class::SCHEMA_DATA_HISTORY,
-            self.addr | BTM1_META_ADDR_FLAG,
-        );
+    /// A value read or write on the Alarm, History or Configuration tab.
+    /// Both are answered on the tab's value class — a read with the current
+    /// value, a write with the value just stored (the ack).
+    fn tab_value(&mut self, menu: Menu, data: &[u8], carrier: u32) -> Vec<Frame> {
+        let fid = |lo: u8| field_id::new(menu, lo);
         match data {
             [lo, hi] => {
                 if self.mute.contains(lo) {
                     return Vec::new();
                 }
-                let v = self.btm3.get(lo).copied().unwrap_or_default();
+                let v = match menu {
+                    Menu::Configuration => self.btm3.get(lo),
+                    _ => self.tab_values.get(&fid(*lo)),
+                };
                 let mut d = vec![*lo, *hi];
-                d.extend_from_slice(&v);
+                d.extend_from_slice(&v.copied().unwrap_or_default());
                 vec![(carrier, d)]
             }
             [lo, hi, v0, v1, v2, v3] => {
-                self.btm3.insert(*lo, [*v0, *v1, *v2, *v3]);
+                let v = [*v0, *v1, *v2, *v3];
+                match menu {
+                    Menu::Configuration => self.btm3.insert(*lo, v),
+                    _ => self.tab_values.insert(fid(*lo), v),
+                };
                 vec![(carrier, vec![*lo, *hi, *v0, *v1, *v2, *v3])]
             }
             _ => Vec::new(),

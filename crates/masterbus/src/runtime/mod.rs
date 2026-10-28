@@ -102,7 +102,7 @@ impl Default for Config {
 pub struct ValueUpdate {
     /// Device id.
     pub device: DeviceId,
-    /// Channel-aware field id.
+    /// Tab-aware field id.
     pub field: FieldId,
     /// The new value.
     pub value: Value,
@@ -337,17 +337,18 @@ impl Engine {
         self.call(|reply| Command::DiscoverMenu { addr, menu, reply })?
     }
 
-    /// Ensure a specific field is discovered. For Btm1 fields this falls back
-    /// to a full per-menu discovery; for Btm3 fields it falls back to the flat
-    /// `all_fields` probe (Btm3 fields don't live in `schema.groups`).
+    /// Ensure a specific field is discovered: its tab's groups, and for a
+    /// Configuration field no group lists, the flat probe of that tab.
     pub fn ensure_field(&self, addr: DeviceId, field: FieldId) -> Result<()> {
         if self.state.has_field(addr, field) {
             return Ok(());
         }
-        match crate::model::field_id::channel(field) {
-            crate::model::Channel::Btm1 => self.call(|reply| Command::Discover { addr, reply })?,
-            crate::model::Channel::Btm3 => self.ensure_all_fields(addr),
+        let menu = crate::model::field_id::menu(field);
+        self.ensure_menu(addr, menu)?;
+        if menu == crate::model::Menu::Configuration && !self.state.has_field(addr, field) {
+            return self.ensure_all_fields(addr);
         }
+        Ok(())
     }
 
     /// Ensure the flat field enumeration (selector `0x01` probe of every index)

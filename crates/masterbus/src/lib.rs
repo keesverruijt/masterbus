@@ -92,9 +92,10 @@
 //!
 //! - **Identity** (name / article / serial / firmware) is the cheap half of
 //!   discovery and is fetched on demand — e.g. [`Device::name`].
-//! - **Schema** is discovered **lazily per menu** ([`Menu::Monitoring`],
-//!   [`Menu::Configuration`], [`Menu::Service`]): [`Device::tab`] discovers just
-//!   that menu, while [`Device::groups`]/[`Device::schema`] discover all of them.
+//! - **Schema** is discovered **lazily per tab** ([`Menu::Monitoring`],
+//!   [`Menu::Alarm`], [`Menu::History`], [`Menu::Configuration`]):
+//!   [`Device::tab`] discovers just that tab, while
+//!   [`Device::groups`]/[`Device::schema`] discover all four.
 //! - An optional on-disk cache ([`Config::cache_path`]) persists each device's
 //!   schema across runs (keyed per device, by serial), so a long-running daemon
 //!   discovers a device once and loads it from cache thereafter. Schemas are
@@ -141,7 +142,7 @@ pub mod value;
 pub use api::{Device, Field, Group, MAX_EDITABLE_TEXT_BYTES, MasterBus, Subscription};
 pub use error::{Error, Result};
 pub use model::{
-    AccessLevel, Channel, DeviceId, DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo,
+    AccessLevel, DeviceId, DeviceIdentity, DeviceSchema, DeviceStatus, FieldId, FieldInfo,
     GroupInfo, Menu, field_id,
 };
 pub use protocol::VisualizationType;
