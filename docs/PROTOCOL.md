@@ -432,7 +432,12 @@ three answers at once while the next request is out (#6). The crate keeps
 listening for a field id it gave up on and collects it after the group's
 other indices, and asks once more for metadata missing when its window
 closes. A device that leaves out one metadata op for a field that answers
-the others is not asked again for that op after two such misses.
+the others is not asked again for that op after two such misses. Group
+field counts, option labels (`0x26`) and string chunks (`0x30`, §4.4) come
+late the same way: a later chunk of a name can arrive after its request was
+given up, which left "Outp" for "Output 2". The crate waits one more
+timeout for a count or a chunk, since the next request depends on it, and
+collects late option labels after the field's other options.
 
 **Class `0x11` compact / NA response.** On the CombiMaster reference bus,
 schema queries for Configuration-tab group ids consistently came back on
