@@ -38,7 +38,7 @@ toolchain.
 
 Run `masterbus-tui` to see what's on your bus. It's a terminal
 application that lists every device, lets you drill into its menus
-(Summary, Monitoring, Configuration, Service, Settings), and shows live
+(Summary, Monitoring, Alarms, History, Configuration), and shows live
 values. Writable fields can be edited inline.
 
     masterbus-tui
@@ -174,8 +174,9 @@ For shell-script / one-off writes there's also a dedicated CLI:
 - `<device_id>` is the hex address from the TUI's title bar, e.g.
   `188EA2`.
 - `<field_id>` is the three-digit hex shown next to each editable row in
-  the TUI, e.g. `0x013` for a Btm1 field, `0x10E` for a Btm3 one (bit 8
-  selects the channel).
+  the TUI, e.g. `0x013` for a Monitoring field, `0x10E` for a
+  Configuration one. The first digit is the tab: 0 Monitoring,
+  1 Configuration, 2 Alarms, 3 History.
 - `<value>` is parsed against the field's type:
     - **boolean**: `true` / `false` / `on` / `off` / `1` / `0`
     - **number**: any decimal number

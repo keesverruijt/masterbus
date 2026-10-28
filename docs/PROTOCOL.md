@@ -33,8 +33,8 @@ Frames must be transmitted/received as **extended** frames, not standard.
 product class and bits 17:0 a number derived from its serial; bit 23 always
 clear (§3a). The firmware itself splits the id as a 6-bit frame type
 (bits 28:23) and a 23-bit address, so `can_class` here is the frame type
-shifted right by one; the Btm1 metadata channel's `addr | 0x800000` (§6) is
-the odd frame type.
+shifted right by one; a frame to or from `addr | 0x800000` (§2.1) is the
+odd frame type.
 
 ### 1.2 Linux SocketCAN `can_frame` (16 bytes)
 
@@ -59,28 +59,60 @@ Class is bits 28:24 of the CAN ID. Observed classes:
 |-------|-------------------|-----|-----------------------------------------------------------|
 | 0x04  | DEVICE_BROADCAST  | ←   | Periodic 8-byte device self-announcement                  |
 | 0x05  | BUS_POLL          | ←   | Bus-master heartbeat (0-byte frame from node `0x500001`)  |
-| 0x06  | PROPERTY_INFO     | ←   | Property / group-count response from a device             |
-| 0x07  | PROPERTY_REQ      | →   | Property / group-count request to a device                |
-| 0x08  | MONITORING_DATA   | ←   | Monitoring value pushed from a device (also Btm1 metadata response) |
-| 0x09  | SCHEMA_DATA       | ←   | Schema response from a device (full 8-byte form)          |
-| 0x10  | WRITE_ACK / NA    | ←   | Write acknowledgement; Btm1 metadata "no value" response  |
-| 0x11  | SCHEMA_DATA_NA    | ←   | Compact / NA schema response (4-byte form, see §5)        |
-| 0x18  | MONITORING_REQ    | →   | Monitoring request to a device (also Btm1 metadata request) |
-| 0x19  | SCHEMA_REQ        | →   | Schema request to a device                                |
-| 0x1A  | SCHEMA_REQ_ALT_A  | →   | Alternate schema request (variant — semantics unconfirmed)|
-| 0x1B  | SCHEMA_REQ_ALT_B  | →   | Alternate schema request (variant — semantics unconfirmed)|
-| 0x1C  | BTM3_META_REQ     | →   | Btm3 per-field metadata request (see §6)                  |
+| 0x06  | PROPERTY_INFO     | ←   | Property / count response from a device (§4)             |
+| 0x07  | PROPERTY_REQ      | →   | Property / count request to a device (§4)                 |
+| 0x02, 0x03, 0x08–0x0D, 0x10–0x15, 0x18–0x1D | | ↔ | The four tabs' values, properties and groups (§2.1) |
 
 `→` = controller→device (request), `←` = device→controller (response/push).
 
-Classes `0x1A` / `0x1B` / `0x1C` are observed in captures of MasterAdjust
-querying group-level metadata on devices whose `0x19` schema returns empty
-or is silent (see §4.3 caveat and FINDINGS). Their full opcode space hasn't
-been reversed; treat them as TBD and refer to live capture before relying
-on a specific interpretation.
-
 There is **no correlation token** in responses. Requests and responses are
 matched by `(device_addr, class, payload-key)` — see §8.
+
+### 2.1 The four tabs
+
+Every device has the same four tabs, as MasterAdjust shows them:
+**Monitoring**, **Alarm**, **History** and **Configuration**. Each tab has
+its own groups (§5), its own per-field properties (§6) and its own values
+(§7), and numbers its fields from 0: Monitoring field `0x17` and
+Configuration field `0x17` are two different fields. Each of those three
+kinds of message has a request, an answer and a "not available" answer,
+each on a CAN class of its own, sent to or from either the device's real
+address or the address with bit 23 set (`addr | 0x800000`, "high" below).
+
+| Tab           | Values: req → answer / NA      | Properties: req → answer / NA | Groups: req → answer / NA |
+|---------------|--------------------------------|-------------------------------|---------------------------|
+| Monitoring    | `18` → `08` / `10` (real)      | `18` → `08` / `10` (high)     | `19` → `09` / `11` (real) |
+| Alarm         | `03` → `02` (real) / `02` (high) | `19` → `09` / `11` (high)   | `1A` → `0A` / `12` (real) |
+| History       | `1D` → `0D` / `15` (high)      | `1A` → `0A` / `12` (high)     | `1B` → `0B` / `13` (real) |
+| Configuration | `1B` → `0B` / `13` (high)      | `1C` → `0C` / `14` (real)     | `1C` → `0C` / `14` (high) |
+
+No two answers share a class and address half, so an answer names its tab
+and kind. The table is MasterAdjust's (`mvMasterbusCanPacketTypes.pas`;
+functions `0048f678`–`0048fd98`), where a message type is
+`class << 1 | bit 23`. A MasterAdjust trace of a ChargeMaster Plus (#6) uses
+every cell of it.
+
+Each tab's number of groups and of values is a selector (§4.3):
+
+| Tab           | Groups        | Values        |
+|---------------|---------------|---------------|
+| Monitoring    | `[0x08, 0x02]`| `[0x08, 0x01]`|
+| Alarm         | `[0x08, 0x08]`| `[0x08, 0x07]`|
+| History       | `[0x08, 0x04]`| `[0x08, 0x03]`|
+| Configuration | `[0x08, 0x06]`| `[0x08, 0x05]`|
+
+MasterAdjust creates all four tabs for every device, with no check of the
+device's family, and reads each from its own groups. Earlier versions of
+the crate and of this document knew only the Monitoring tab's classes and
+the Configuration tab's properties and values (calling them the "Btm1" and
+"Btm3" channels, after Delphi units that turned out to be the serial BTM
+battery-monitor drivers). They counted Configuration groups with
+`[0x08, 0x03]`, which is the number of History values, and read them as
+Monitoring groups past Monitoring's own count; on a ChargeMaster Plus that
+gave groups such as "DSP Debug" and a group counting 54,650 fields, which
+MasterAdjust never shows. They also had a "Service" menu, counted with
+`[0x08, 0x04]`, which is the number of History groups; no device has a
+Service tab.
 
 ---
 
@@ -220,36 +252,25 @@ class `0x06` with `u16LE(lo, hi)`. Selectors that matter:
 
 | SEL    | Meaning                                                                  |
 |--------|--------------------------------------------------------------------------|
-| `0x01` | **Total field-index range** — `N` such that the device's addressable field indices are `0..N`. The basis for the flat probe in §4.6. |
-| `0x02` | Number of **Monitoring** groups (selector for the schema offset, §5).    |
-| `0x03` | Number of **Configuration** groups. **Unreliable** on some devices — see caveat below. |
-| `0x04` | Number of **Service** groups.                                            |
+| `0x01` | `MonitoringValues`: the number of Monitoring values. |
+| `0x02` | `MonitoringGroups`: the number of Monitoring groups (§2.1). |
+| `0x03` | `HistoryValues`. |
+| `0x04` | `HistoryGroups`. |
+| `0x05` | `ConfigurationValues`. |
+| `0x06` | `ConfigurationGroups`. Changes with the access level: a ChargeMaster Plus answers 11 at End User and 12 at Installer. |
+| `0x07` | `AlarmsValues`. |
+| `0x08` | `AlarmsGroups`. |
 | `0x0D` | Named `MasterBusVoltage` in MasterAdjust (`FUN_00490b20`); a DSD answers `0x2C`, so the unit is not known. |
-| `0x3E` | `EventGeneratingGroup` in MasterAdjust: the Configuration group that holds the device's events. |
+| `0x3E` | `EventGeneratingGroup` in MasterAdjust: the Configuration group that holds the device's events (`0x0A` on a ChargeMaster Plus, whose group `0x0A` lists its events). |
 | `0x3F` | **Number of eventable outputs** (`Eventables` in MasterAdjust, which accepts at most 32). An ISO GI Trafo with one output (`Reset`) answers `1`. A device with none refuses it like `0x40 + K` below. Earlier versions of this document called it a total tab count, which it is not. |
 | `0x40 + K` | Field index of the device's `K`-th **eventable output** (§9a), for `K` below the `0x3F` count. Past the last, a DSD answers the selector alone (`[0x08, SEL]`, DLC 2) from `addr \| 0x800000`. |
 
-> **`[0x08, 0x03]` is unreliable** on Magic-class devices (and likely
-> others). The Mac/Magic family — e.g. the **INT Nav Chg** at `0x3A3B4B`
-> in the reference bus — returns `0` for `[0x08, 0x03]` and `[0x08, 0x04]`
-> despite exposing ~25 configurable fields. The vendor's MasterAdjust
-> application papers over this with hard-coded layout knowledge built
-> into per-device-family Delphi classes (`TDevice_MacMagic`,
-> `TDevice_HFcombi`, `TDevice_Mass2And3`, …) recovered from
-> `MasterAdjust.exe`; the section names ("Main", "Stabilize voltage",
-> "Dimmer", "Charger", …) and field grouping come from those classes,
-> not from the wire. See FINDINGS §3e for the capture that proved this.
->
-> For a transport-only client, **don't trust `0x03` as ground truth**;
-> use the flat probe (§4.6) and accept losing the per-section grouping.
-
-Other selectors observed in MasterAdjust traces (`0x05`, `0x06`, `0x07`,
-`0x08`, `0x12`, `0x13`, `0x1B`–`0x1F`, `0x23`, `0x3E`) return values whose
-exact meaning hasn't been pinned down across devices. On the INT Nav Chg
-`[0x08, 0x06]` returns `5`, which happens to match the number of
-Configuration sections in the MasterAdjust UI, but the same selector on
-the CombiMaster returns `14`, so it isn't a generic "section count" —
-treat it as TBD.
+The names are MasterAdjust's (`Prod_GeneralToStr`, `00490b20`), as are the
+others it knows: `0x19` UserLevel (§4.5), `0x3F` Eventables and `0x60`
+MasterIndex. Earlier versions of this document read `0x03` as the number
+of Configuration groups and `0x04` as Service groups; see §2.1. Other
+selectors observed in MasterAdjust traces (`0x0A`–`0x0E`, `0x11`–`0x13`,
+`0x1B`–`0x1F`, `0x23`) return values whose meaning hasn't been pinned down.
 
 ### 4.4 String-table chunk — `[0x30, id_lo, id_hi, seq]`
 
@@ -362,38 +383,16 @@ power cycles has not been characterised. MasterAdjust polls `08 19` on
 every enrolled device periodically (~once per minute in the reference
 capture) so it can resync its UI to actual device state.
 
-### 4.6 Flat field-index probe (group-count fallback)
+### 4.6 Flat field-index probe
 
-Because `[0x08, 0x03]` lies on some devices (§4.3), the only universally
-reliable way to enumerate a device's settings is to probe the **full
-field-index space** directly via Btm1 metadata (§6), bypassing groups
-entirely.
-
-Algorithm:
-
-1. Read `[0x08, 0x01]` to get `N` — the device's total field-index count.
-2. For each `field_idx ∈ 0..N`, send the pipelined metadata batch
-   (`NAME / VIZ / MAX / UNIT / WRITEABLE`) to the Btm1 metadata address (§6).
-3. Drop indices that produce no response in any opcode of the batch —
-   those are holes in the index space and not addressable fields.
-4. What remains is every reachable field, **without group structure**.
-
-This is what `Device::all_fields()` does in the crate. Tradeoffs vs.
-the group-based discovery in §5:
-
-- **Pro:** Recovers fields on devices whose `0x08, 0x03` count is `0`
-  (e.g. Magic-class). On the INT Nav Chg this returns the ~25 fields
-  MasterAdjust shows; the `0x19` schema path returns nothing.
-- **Pro:** Works without per-device-family knowledge — no hard-coded
-  `TDevice_*` analogue is needed.
-- **Con:** No section labels. MasterAdjust's "Serial interface / Main /
-  Stabilize / Dimmer / Charger" headings come from a hard-coded layout
-  inside `MasterAdjust.exe` (one Delphi class per device family); the
-  bus itself never exposes them. Recovering those headings means RE'ing
-  the Delphi classes and porting them into the client.
-- **Con:** Linear cost in `N` metadata batches (~150 ms each at our
-  per-attempt timeout). The Nav Chg's `N = 64` takes a few seconds on a
-  cold cache; subsequent visits are free.
+A client can also probe a tab's whole field-index space: send the
+visualization-type property (§6) for every index `0..256` and keep the
+indices that answer. This finds fields no group lists, without their group.
+MasterAdjust doesn't do it; the crate does it only when asked
+(`Device::all_fields()`, `masterbus-dump --probe`), on the Monitoring and
+Configuration tabs. Earlier versions relied on it for the Configuration
+tab of devices whose `[0x08, 0x03]` was 0; `[0x08, 0x03]` is not a group
+count (§2.1), and those devices list their settings in Configuration groups.
 
 A login (§4.5) invalidates the flat-probe cache the same way it
 invalidates the group cache: writability bits change per level and stale
@@ -401,23 +400,27 @@ attributes would lie to the caller.
 
 ---
 
-## 5. Schema queries (class 0x19 request → 0x09 / 0x11 response)
+## 5. Groups
 
-Per-group structure. Requests are class `0x19` to `device_addr`. Responses
-arrive on either class `0x09` (the rich form, 8 bytes) or class `0x11`
-(compact / NA, 4 bytes). Result fields live at `bytes[4:..]` of the
-class-`0x09` response.
+Each tab's groups, numbered from 0 up to the tab's group count (§2.1), on
+the tab's group classes. On the Monitoring tab that is class `0x19` to the
+real address, answered on class `0x09`; the "not available" answer (class
+`0x11` for Monitoring) carries only the request header. Result fields live
+at `bytes[4:..]` of the answer.
 
-| Purpose         | Request payload              | Class-0x09 response value              |
+| Purpose         | Request payload              | Answer value                           |
 |-----------------|------------------------------|----------------------------------------|
 | Group name id   | `[0x28, group_id, 0x00]`     | `u16LE` at bytes[4:6] (string id)      |
 | Field count     | `[0x07, group_id, 0x00]`     | `f32LE` at bytes[4:8] (count)          |
 | Field id        | `[0x03, group_id, 0x00, idx]`| `u16LE` at bytes[4:6] (field id)       |
 
 The field-id response echoes `idx` in `bytes[3]` (used for matching, §8).
+The field id is the field's index on the group's tab.
 
 **An impossible field count.** A ChargeMaster Plus answered the field-count
-query for some Configuration groups with 54,650, consistently (#6). Field-id
+query for some Monitoring group ids past its Monitoring count with 54,650,
+consistently (#6); earlier versions read those as Configuration groups
+(§2.1). Field-id
 queries past its real fields answered those same fields again, so the count
 is not a list of that many distinct fields. The field index in the request is
 one byte, so a client can address at most 256 fields per group; that is a
@@ -439,59 +442,24 @@ given up, which left "Outp" for "Output 2". The crate waits one more
 timeout for a count or a chunk, since the next request depends on it, and
 collects late option labels after the field's other options.
 
-**Class `0x11` compact / NA response.** On the CombiMaster reference bus,
-schema queries for Configuration-tab group ids consistently came back on
-class `0x11` with a 4-byte payload `[opcode, group_id, sub, value]`,
-e.g. `Up 11 188EA2 [4] 07 07 00 03`. The `value` byte was inconsistent
-across retries of the same query (e.g. `03`, `01`, `01` for three
-back-to-back probes of gid 7's field count), which is more consistent
-with a "not-available / try-again" status than a real value. The crate
-currently ignores `0x11` and treats the request as silent; treat the
-byte at `[3]` as TBD until further captures clarify whether it carries
-useful data.
-
-**Group-as-field requests (class `0x1C`).** MasterAdjust separately
-queries metadata-style opcodes (`0x02 VIZ`, `0x07 MAX`, `0x09 FACTORY`,
-`0x0B WRITEABLE`, `0x0C GRAY`, `0x28 NAME`) on **group ids** via class
-`0x1C` with payload `[opcode, gid, 0x00]`. Responses come back on class
-`0x11` with the 4-byte compact form. This appears to be how MasterAdjust
-treats a Configuration group as a single field-like row when its layout
-table tells it to (see §4.3 caveat). Semantics still TBD; not used by
-the crate.
+**"Not available" answers.** On the CombiMaster reference bus, group
+queries past the Monitoring count came back on class `0x11`, Monitoring's
+group "not available" answer, with a 4-byte payload `[opcode, group_id,
+sub, value]`, e.g. `Up 11 188EA2 [4] 07 07 00 03`. Earlier versions asked
+those as Configuration groups (§2.1). The crate takes such an answer to a
+field count as a count of 0.
 
 ---
 
-## 6. Per-field metadata
+## 6. Per-field properties
 
-There are **two parallel metadata channels** named after the vendor's Delphi
-units that handle them (`Btm1.pas` and `Btm3.pas` in MasterAdjust). Same
-per-field opcode set on both; only the CAN class and the addressing differ.
-Both expose the same conceptual data — name / viz / min / max / step /
-factory default / writeable / unit / option strings — but on **separate
-field-index namespaces**: index `0x17` on Btm1 is a different field than
-index `0x17` on Btm3, with different name and value (see FINDINGS §3f).
-
-**Btm1 metadata** (the legacy / standard channel):
-
-```
-btm1_meta_addr = (device_addr | 0x800000) & 0x00FF_FFFF
-```
-
-Request: class `0x18` to `btm1_meta_addr`, payload `[opcode, field_lo, field_hi]`.
-Response: class `0x08` from `btm1_meta_addr` (the high bit `0x800000` is
-what distinguishes a Btm1 metadata response from a real monitoring push).
-
-**Btm3 metadata** (newer revision; required by Magic-class devices like the
-INT Nav Chg, also supported by HFcombi devices in addition to Btm1):
-
-Request: class `0x1C` to the device's **real** address, payload
-`[opcode, field_lo, field_hi]`. Response: class `0x0C` from the real
-address (the channel uses no address-flag bit; class disambiguates).
-
-Btm3 values arrive on a separate path: passive class `0x0B` pushes
-addressed to `addr | 0x800000` with a headerless `[fid_lo, fid_hi, b0..b3]`
-payload; writes go out on class `0x1B` to the same address with the same
-payload format.
+Each field's name, unit, range and so on, asked on its tab's property
+classes (§2.1), one opcode per request. Request payload
+`[opcode, field_lo, field_hi]`; the answer echoes it and carries the value
+at `bytes[4:..]`. On the Monitoring tab that is class `0x18` to
+`addr | 0x800000`, answered on class `0x08` from the same address (the
+high bit is what tells it from a Monitoring value); on the Configuration
+tab, class `0x1C` to the real address, answered on class `0x0C`.
 
 Each field attribute has its own opcode. The full attribute set (the vendor's
 `pit*` "property-item-type" enum, recovered by decompiling MasterAdjust.exe —
@@ -526,30 +494,39 @@ Each field attribute has its own opcode. The full attribute set (the vendor's
   the others (`0x03/0x06/0x08/0x09/0x0B/0x0C/0x0D/0x29/0x2A`) are from the
   MasterAdjust decompile and should be confirmed live when used.
 
-String ids returned by metadata queries are fetched with the same chunk
-mechanism as §4.4 (to the real `device_addr`, not the Btm1 metadata address).
+String ids returned by property queries are fetched with the same chunk
+mechanism as §4.4, on class `0x07` to the real `device_addr`.
 
 ---
 
-## 7. Monitoring data (class 0x18 request → 0x08 response)
+## 7. Values
 
 ### 7.1 Read a field value
 
-Request: class `0x18` to `device_addr`, payload `[field_index, tab_index]`.
-Response: class `0x08`, payload `[field_index, tab_index, b0, b1, b2, b3]` — a
-4-byte value whose interpretation depends on the field's visualization type.
-
-Tab indices: `0 = Monitoring`, `1 = Alarm`, `2 = History`, `3 = Configuration`.
+Request: the tab's value class (§2.1), payload `[idx_lo, idx_hi]`. Answer:
+`[idx_lo, idx_hi, b0, b1, b2, b3]` — a 4-byte value whose interpretation
+depends on the field's visualization type. On the Monitoring tab that is
+class `0x18` to the real address, answered on class `0x08`; on the
+Configuration tab, class `0x1B` to `addr | 0x800000`, answered on class
+`0x0B` from that address. A device sends a value only when asked, unless
+another master is polling it. Earlier versions of this document called the
+second byte a tab index; it is the index's high byte, 0 on every device seen
+so far, and a nonzero one gets the "not available" answer.
 
 ### 7.2 Write a value
 
-Writes use the **same class `0x18`** as a read, but carry the field's full
-**4-byte value** after `[field_index, tab_index]`. Every settable field — numeric,
+Writes use the **same class** as a read, but carry the field's full
+**4-byte value** after the index. Every settable field — numeric,
 boolean, or list — is written as the same 4-byte representation it is read back as:
 
 ```
-[field_index, tab_index, b0, b1, b2, b3]
+[idx_lo, idx_hi, b0, b1, b2, b3]
 ```
+
+Writes are seen on the wire for the Monitoring and Configuration tabs. A
+Configuration write is answered with the new value; a Monitoring write
+draws no answer, so the crate confirms it by reading it back. No write to
+an Alarm or History field has been seen; the crate does not send one.
 
 | Field type | 4-byte value                                     |
 |------------|--------------------------------------------------|
@@ -598,20 +575,20 @@ drop-down) need no commit write. Never name a BusID a device on the bus has.
 ## 8. Request/response matching keys
 
 Because responses carry no token, each in-flight request is keyed and matched
-against incoming frames:
+against incoming frames. `{tab}` is `monitoring`, `alarm`, `history` or
+`configuration`, read from the answer's class and address half (§2.1);
+`{addr}` is the real address.
 
 | Exchange                | Key                                            |
 |-------------------------|------------------------------------------------|
-| Monitoring value (0x08) | `(device_addr, tab_index, field_index)`        |
+| Value                   | `val:{addr}:{field_id}`, the field id holding the tab |
 | Property (0x06)         | `p:{addr}:{data[0]}:{data[1]}`; the 2-byte refusal of `[0x08, 0x40 + K]` from `addr \| 0x800000` matches the real address |
 | String chunk (0x06,0x30)| `str:{addr}:{str_id}:{seq}` (seq from data[3]) |
-| Schema (0x09)           | `schema:{addr}:{op}:{group}` (+`:{idx}` for 0x03 field-id, idx in data[3]) |
-| Btm1 metadata (0x08, hi bit) | `btm1_meta:{real_addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
-| Btm3 metadata (0x0C)    | `btm3_meta:{addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
+| Group                   | `group:{tab}:{addr}:{op}:{group}` (+`:{idx}` for 0x03 field-id, idx in data[3]) |
+| Field property          | `prop:{tab}:{addr}:{op}:{field}` (+`:{opt}` for 0x26, opt in data[3]) |
 
-Regular monitoring pushes (class 0x08, no `0x800000` bit) are routed to the
-value table; Btm1 metadata responses (class 0x08 with the `0x800000` address
-bit) are routed to the metadata waiter.
+A "not available" answer is matched like the answer it stands for, so the
+request resolves at once instead of timing out.
 
 ---
 
@@ -775,18 +752,8 @@ sibling `Event N target`.
 2. Firmware: `[0x82,0]`, `[0x82,1]` (§4.1).
 3. Property string ids: `[0x09,1..4]` → fetch each string (§4.2, §4.4);
    derive revision from serial[4] if n=4 is unanswered.
-4. Monitoring group count: `[0x08,0x02]` (§4.3).
+4. For each tab (§2.1): its group count (§4.3).
 5. For each group: name id, field count, field ids (§5); fetch the group name.
-6. For each field: metadata name/viz/max/unit (§6); fetch name & unit strings;
-   fetch option strings for list types.
+6. For each field: properties name/viz/max/unit (§6) on the field's tab;
+   fetch name & unit strings; fetch option strings for list types.
 7. (Optional) pre-poll each field's value (§7.1).
-
-For Configuration / Service (or any time `[0x08, 0x03]` returns `0`
-despite the device clearly being configurable), skip steps 4–6 above for
-that menu and fall back to the **flat field-index probe** (§4.6):
-
-4'. Total field count: `[0x08, 0x01]` → `N`.
-5'. For each `field_idx ∈ 0..N`: pipelined metadata batch (§6); drop
-    indices with no response in any opcode.
-6'. Render the survivors as a flat list — no group structure is available
-    from the bus for these devices.

@@ -6,12 +6,47 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Devices are read the way MasterAdjust reads them: four tabs,
+  Monitoring, Alarms, History and Configuration.** Each tab has its own
+  groups, field properties and values. Until now only Monitoring was read
+  correctly. Configuration was read from the wrong groups: on a
+  ChargeMaster Plus that gave groups such as "DSP Debug" and a group of
+  54,650 fields, while its real settings (language, charge settings, its
+  events) were missing. The Alarms and History tabs are new. There was
+  also a "Service" menu, which no device has; it is gone. Found with
+  @Peter-Petrik's MasterAdjust trace and the decompiled MasterAdjust. (#6)
+  - Every menu in the cache is read from the bus again once.
+  - The TUI's tabs are Summary, Monitoring, Alarms, History and
+    Configuration. The separate Settings tab is gone: its fields are on
+    the Configuration tab, in their groups.
+  - Field ids keep their form. Monitoring fields are `0x0nn` and
+    Configuration fields `0x1nn`, as before, so a mapping keeps working.
+    Alarm fields are `0x2nn` and History fields `0x3nn`; those can be
+    read but not written.
+  - A mapped field that only the old Configuration menu listed is a
+    Monitoring field; it is now found on its own.
+  - `masterbus-dump`: `--menus` takes `alarm` and `history`, not
+    `service`, and the default is `monitoring,configuration`. A field's
+    `channel` is now `tab` (format 2).
+  - In the library, `Menu` is the four tabs and `Channel` is gone:
+    `field_id::menu` gives a field's tab, and `field_id::btm1`/`btm3` are
+    `field_id::monitoring`/`configuration`.
+
 ### Added
+- **Beta releases.** `make release VERSION=0.6.0-beta.1` (or `-rc.N`)
+  makes a pre-release: its GitHub release is marked as one, so the
+  one-line installers, which take the latest release, keep installing the
+  last full one. A beta is installed by naming its version.
 - **`masterbus-dump --discovery-timeout <ms>`** sets how long discovery
   waits for each reply (default 150 ms), to see whether a slow device
   answers given more time. (#6)
 
 ### Fixed
+- **A switch at Monitoring field `0xFF` is no longer written.** Switching
+  an output writes a commit to the field after it, which for `0xFF` would
+  have been field 0. Such a write is now refused; no device has been seen
+  with a switch there.
 - **A slow device's late replies are kept in more places.** 0.5.2 kept a
   field id that came in after its request was given up. A group's field
   count, an option label and the later parts of a name are now kept too,

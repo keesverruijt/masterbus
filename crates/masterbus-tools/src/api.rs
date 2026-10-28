@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use masterbus::{
-    AccessLevel, DeviceId, Error, FieldId, FieldInfo, GroupInfo, MasterBus, Menu, Value,
+    AccessLevel, DeviceId, Error, FieldId, FieldInfo, GroupInfo, MasterBus, Menu, Value, field_id,
 };
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
@@ -187,37 +187,48 @@ impl Shared {
     }
 
     /// A mapping that names a field a device record has not discovered yet
-    /// is most likely pointing at a Configuration setting (a PUT target).
-    /// Discover that menu once per device, so the entry can be honoured
-    /// rather than reported as "no such field". Bus access happens outside
-    /// the lock; a device that will not enumerate is logged and left alone.
+    /// is most likely on another tab than Monitoring (a Configuration
+    /// setting as a PUT target, say). Discover each such tab once per
+    /// device, so the entry can be honoured rather than reported as "no
+    /// such field"; a field no group lists is then asked for on its own.
+    /// Bus access happens outside the lock; a device that will not
+    /// enumerate is logged and left alone.
     pub fn ensure_menus(&self, mapping: &Mapping) {
-        let wanted: Vec<(DeviceId, String, String)> = self
+        let wanted: Vec<(DeviceId, String, String, Vec<Menu>)> = self
             .devices
             .lock()
             .unwrap()
             .iter()
-            .filter(|d| {
-                !d.menus.contains(&Menu::Configuration)
-                    && !publish::unknown_fields(d, mapping).is_empty()
+            .map(|d| {
+                let mut menus: Vec<Menu> = publish::unknown_fields(d, mapping)
+                    .into_iter()
+                    .map(field_id::menu)
+                    .filter(|m| !d.menus.contains(m))
+                    .collect();
+                menus.sort();
+                menus.dedup();
+                (d.id, d.name.clone(), d.serial.clone(), menus)
             })
-            .map(|d| (d.id, d.name.clone(), d.serial.clone()))
+            .filter(|(.., menus)| !menus.is_empty())
             .collect();
-        for (id, name, serial) in wanted {
-            match self.bus.discover_menu(id, Menu::Configuration) {
-                Ok(groups) => {
-                    eprintln!(
-                        "masterbus-signalk: {name} ({serial}): mapping names a field outside \
-                         Monitoring; discovered its Configuration menu"
-                    );
-                    let mut devices = self.devices.lock().unwrap();
-                    if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
-                        d.merge_groups(Menu::Configuration, groups);
+        for (id, name, serial, menus) in wanted {
+            for menu in menus {
+                let tab = menu_name(menu);
+                match self.bus.discover_menu(id, menu) {
+                    Ok(groups) => {
+                        eprintln!(
+                            "masterbus-signalk: {name} ({serial}): mapping names a field on \
+                             the {tab} tab; discovered it"
+                        );
+                        let mut devices = self.devices.lock().unwrap();
+                        if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                            d.merge_groups(menu, groups);
+                        }
                     }
+                    Err(e) => eprintln!(
+                        "masterbus-signalk: {name} ({serial}): could not discover the {tab} tab: {e}"
+                    ),
                 }
-                Err(e) => eprintln!(
-                    "masterbus-signalk: {name} ({serial}): could not discover Configuration: {e}"
-                ),
             }
         }
         self.ensure_fields(mapping);
@@ -1456,7 +1467,7 @@ mod tests {
                 name: "Inverter".into(),
                 menu: Menu::Configuration,
                 fields: vec![masterbus::FieldInfo {
-                    index: 0x013,
+                    index: 0x113,
                     name: "Inverter".into(),
                     unit: String::new(),
                     viz_type: masterbus::VisualizationType::CheckBox,
@@ -1477,7 +1488,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["id"] == "0x013")
+            .find(|f| f["id"] == "0x113")
             .unwrap();
         assert_eq!(f["writable"], true);
         assert_eq!(f["group"], "Inverter");
@@ -1489,8 +1500,9 @@ mod tests {
         );
         assert_eq!(*state.discoveries.lock().unwrap(), 1);
         // A menu the bus cannot deliver is a bus error; a made-up one a client error.
-        assert_eq!(get(&shared, "/api/devices/MLI-1?menu=service").status, 502);
+        assert_eq!(get(&shared, "/api/devices/MLI-1?menu=history").status, 502);
         assert_eq!(get(&shared, "/api/devices/MLI-1?menu=banana").status, 400);
+        assert_eq!(get(&shared, "/api/devices/MLI-1?menu=service").status, 400);
     }
 
     #[test]
@@ -1541,7 +1553,7 @@ mod tests {
                 name: "Relay".into(),
                 menu: Menu::Configuration,
                 fields: vec![masterbus::FieldInfo {
-                    index: 0x040,
+                    index: 0x140,
                     name: "Relay".into(),
                     unit: String::new(),
                     viz_type: masterbus::VisualizationType::CheckBox,
@@ -1558,7 +1570,7 @@ mod tests {
         let mut m = Mapping::new();
         let mut dm = DeviceMapping::default();
         dm.fields.insert(
-            field_key(0x040),
+            field_key(0x140),
             FieldMapping {
                 path: "electrical.switches.relay.state".into(),
                 put: true,

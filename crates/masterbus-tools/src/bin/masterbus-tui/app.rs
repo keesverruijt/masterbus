@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crossbeam_channel::{Receiver, TryRecvError, bounded};
 use masterbus::{
     AccessLevel, DeviceIdentity, DeviceStatus, FieldId, FieldInfo, GroupInfo, MasterBus, Menu,
-    Subscription, Value, VisualizationType, field_id,
+    Subscription, Value, VisualizationType,
 };
 use masterbus_tools::mapping::{
     CopyTarget, FieldMapping, Mapping, NotifyState, copy_to_targets, field_key, parse_field_key,
@@ -20,42 +20,25 @@ use masterbus_tools::{publish, seed, signalk};
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// The tabs the UI exposes inside a device, in display order. Position 0 is
-/// always the Summary tab (device identity); the rest are the data tabs.
-///
-/// **Btm1 channel** (legacy MasterBus) exposes its groups via
-/// Monitoring / Configuration / Service; some devices (e.g. the Magic-class
-/// Nav Chg) report empty group lists on Btm1, so those tabs may be sparse
-/// or empty depending on the device.
-///
-/// **Btm3 channel** (newer MasterBus revision) has no Btm1-style group
-/// structure on the wire — it lives in a flat per-channel field-index
-/// space, surfaced as the **Settings** tab.
-///
-/// Alarms / History tabs are intentionally absent here; the Menu variants
-/// in core still exist so they can be restored once the Btm3 sub-channel
-/// structure (class `0x1A` / `0x1B` on real address) is properly understood.
+/// always the Summary tab (device identity); the rest are the device's four
+/// tabs, in MasterAdjust's order (PROTOCOL.md §2.1). A device that has no
+/// groups on a tab shows it empty.
 pub const TABS: [TabKind; 5] = [
     TabKind::Summary,
     TabKind::Menu(Menu::Monitoring),
+    TabKind::Menu(Menu::Alarm),
+    TabKind::Menu(Menu::History),
     TabKind::Menu(Menu::Configuration),
-    TabKind::Menu(Menu::Service),
-    TabKind::Settings,
 ];
 
 /// Which inside-a-device tab is showing. [`TabKind::Summary`] is used only
-/// as the right-pane preview / first-landing tab; [`TabKind::Settings`] is
-/// the Btm3-flat tab built from `Device::all_fields()` filtered to fields
-/// with the Btm3 channel bit set.
+/// as the right-pane preview / first-landing tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabKind {
     /// Device identity + access level.
     Summary,
-    /// One of the Btm1 wire menus. Btm1 groups are enumerated via
-    /// `Device::tab(menu)`.
+    /// One of the device's tabs, its groups from `Device::tab_info(menu)`.
     Menu(Menu),
-    /// Flat list of every Btm3 field on the device. Built from
-    /// `Device::all_fields()` filtered by `field_id::channel == Btm3`.
-    Settings,
 }
 
 /// Device id → name, shared with the background name-backfill thread.
@@ -167,8 +150,6 @@ pub struct App {
     pub cur_tab: TabKind,
     /// Menus already discovered for `cur_device`.
     pub loaded_menus: HashSet<Menu>,
-    /// Whether the flat field probe (`all_fields`) is loaded for `cur_device`.
-    pub settings_loaded: bool,
     pub rows: Vec<Row>,
     pub row_sel: usize,
     pub values: HashMap<FieldId, Value>,
@@ -228,7 +209,6 @@ impl App {
             cur_access_level: None,
             cur_tab: TabKind::Summary,
             loaded_menus: HashSet::new(),
-            settings_loaded: false,
             rows: Vec::new(),
             row_sel: 0,
             values: HashMap::new(),
@@ -297,7 +277,6 @@ impl App {
         };
         self.cur_device = Some(id);
         self.loaded_menus.clear();
-        self.settings_loaded = false;
         self.sub = None;
         self.rows.clear();
         self.values.clear();
@@ -359,16 +338,6 @@ impl App {
                     self.start_menu_discovery(id, menu);
                 }
             }
-            TabKind::Settings => {
-                if self.settings_loaded {
-                    let fields = self.bus.device(id).all_fields().unwrap_or_default();
-                    self.show_settings(id, fields);
-                } else {
-                    self.rows.clear();
-                    self.row_sel = 0;
-                    self.start_settings_discovery(id);
-                }
-            }
         }
     }
 
@@ -386,43 +355,6 @@ impl App {
         self.pending = Some(Pending {
             id,
             tab: TabKind::Menu(menu),
-            name,
-            started: Instant::now(),
-            rx,
-        });
-    }
-
-    /// Spawn a worker to probe the device's full field-index space and
-    /// keep only the Btm3 fields for the Settings tab.
-    fn start_settings_discovery(&mut self, id: u32) {
-        let name = self.device_label(id);
-        self.status = format!("probing Btm3 fields of {}…", name);
-        let (tx, rx) = bounded(1);
-        let bus = self.bus.clone();
-        std::thread::spawn(move || {
-            if let Ok(all) = bus.device(id).all_fields() {
-                // Filter to Btm3 only; Btm1 fields show up under the
-                // Monitoring / Configuration / Service tabs (with their
-                // proper Btm1 group structure where available).
-                let fields: Vec<FieldInfo> = all
-                    .into_iter()
-                    .filter(|f| field_id::channel(f.index) == masterbus::Channel::Btm3)
-                    .collect();
-                // Reuse the GroupInfo carrier with a single synthetic group so
-                // the existing `poll_pending` / `show_*` plumbing stays
-                // uniform.
-                let one = GroupInfo {
-                    id: -1,
-                    name: String::new(),
-                    menu: Menu::Other(0x01),
-                    fields,
-                };
-                let _ = tx.send(vec![one]);
-            }
-        });
-        self.pending = Some(Pending {
-            id,
-            tab: TabKind::Settings,
             name,
             started: Instant::now(),
             rx,
@@ -455,17 +387,6 @@ impl App {
                     TabKind::Menu(menu) => {
                         self.loaded_menus.insert(menu);
                         self.show_groups(id, menu, groups);
-                    }
-                    TabKind::Settings => {
-                        self.settings_loaded = true;
-                        // The worker packs the flat result into a single
-                        // synthetic group; pull the fields back out.
-                        let fields = groups
-                            .into_iter()
-                            .next()
-                            .map(|g| g.fields)
-                            .unwrap_or_default();
-                        self.show_settings(id, fields);
                     }
                     TabKind::Summary => {} // never spawned
                 }
@@ -507,30 +428,6 @@ impl App {
         self.status = format!("{} / {}", self.device_label(id), menu_label(menu));
     }
 
-    fn show_settings(&mut self, id: u32, fields: Vec<FieldInfo>) {
-        self.rows.clear();
-        for f in &fields {
-            self.rows.push(Row::Field(f.clone()));
-        }
-        self.values.clear();
-        // Subscribe to every Btm3 field so values stream in (mostly via
-        // passive `0x0B` pushes on the wire). Use the standard live-poll
-        // interval; the engine will rate-limit redundant work.
-        let ids: Vec<FieldId> = fields.iter().map(|f| f.index).collect();
-        self.sub = if ids.is_empty() {
-            None
-        } else {
-            Some(self.bus.subscribe(id, ids, POLL_INTERVAL, false))
-        };
-        self.row_sel = 0;
-        self.select_first_field();
-        self.status = format!(
-            "{} / Settings ({} Btm3 fields)",
-            self.device_label(id),
-            fields.len()
-        );
-    }
-
     fn build_rows(&mut self, groups: &[GroupInfo]) {
         self.rows.clear();
         for g in groups {
@@ -547,7 +444,6 @@ impl App {
         self.pending = None;
         self.rows.clear();
         self.loaded_menus.clear();
-        self.settings_loaded = false;
         self.cur_tab = TabKind::Summary;
         self.cur_info = None;
         self.cur_access_level = None;
@@ -963,7 +859,6 @@ impl App {
                 if self.cur_device == Some(device) {
                     self.cur_access_level = Some(reported);
                     self.loaded_menus.clear();
-                    self.settings_loaded = false;
                     self.values.clear();
                     self.sub = None;
                     match self.cur_tab {
@@ -989,10 +884,8 @@ pub fn menu_label(menu: Menu) -> String {
     match menu {
         Menu::Monitoring => "Monitoring".into(),
         Menu::Configuration => "Configuration".into(),
-        Menu::Service => "Service".into(),
         Menu::Alarm => "Alarms".into(),
         Menu::History => "History".into(),
-        Menu::Other(s) => format!("Menu {s:#04x}"),
     }
 }
 
@@ -1001,7 +894,6 @@ pub fn tab_label(tab: TabKind) -> String {
     match tab {
         TabKind::Summary => "Summary".into(),
         TabKind::Menu(m) => menu_label(m),
-        TabKind::Settings => "Settings".into(),
     }
 }
 
@@ -2141,8 +2033,8 @@ mod mapping_tests {
 #[cfg(test)]
 pub(crate) mod app_tests {
     use super::*;
-    use masterbus::Config;
     use masterbus::transport::{Transport, TransportRx, TransportTx};
+    use masterbus::{Config, field_id};
     use std::collections::HashMap as Map;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2400,13 +2292,13 @@ pub(crate) mod app_tests {
         app.rows = vec![
             Row::Group("DC".into()),
             Row::Field(field(
-                field_id::btm1(0x17),
+                field_id::monitoring(0x17),
                 "Voltage",
                 VisualizationType::Float,
                 true,
             )),
             Row::Field(field(
-                field_id::btm1(0x18),
+                field_id::monitoring(0x18),
                 "Current",
                 VisualizationType::Float,
                 false,
@@ -2486,14 +2378,12 @@ pub(crate) mod app_tests {
 
         app.rows.push(Row::Group("stale".into()));
         app.loaded_menus.insert(Menu::Monitoring);
-        app.settings_loaded = true;
 
         app.back_to_devices();
         assert!(app.focus == Focus::Devices);
         assert!(app.cur_device.is_none());
         assert!(app.rows.is_empty());
         assert!(app.loaded_menus.is_empty());
-        assert!(!app.settings_loaded);
         assert!(app.cur_info.is_none());
     }
 
@@ -2548,8 +2438,8 @@ pub(crate) mod app_tests {
         let (_tx, rx) = bounded(1);
         app.pending = Some(Pending {
             id: ADDR,
-            tab: TabKind::Settings,
-            name: "Settings".into(),
+            tab: TabKind::Menu(Menu::Configuration),
+            name: "Configuration".into(),
             started: Instant::now(),
             rx,
         });
@@ -2567,14 +2457,14 @@ pub(crate) mod app_tests {
         let (_tx, rx) = bounded(1);
         app.pending = Some(Pending {
             id: ADDR,
-            tab: TabKind::Settings,
-            name: "Settings".into(),
+            tab: TabKind::Menu(Menu::Configuration),
+            name: "Configuration".into(),
             started: Instant::now(),
             rx,
         });
         let (name, tab, _secs) = app.pending_info().unwrap();
-        assert_eq!(name, "Settings");
-        assert!(tab == TabKind::Settings);
+        assert_eq!(name, "Configuration");
+        assert!(tab == TabKind::Menu(Menu::Configuration));
 
         app.cancel_pending();
         assert!(!app.discovering());
@@ -2610,7 +2500,7 @@ pub(crate) mod app_tests {
             indices,
             FIELDS
                 .iter()
-                .map(|(w, ..)| field_id::btm1(*w))
+                .map(|(w, ..)| field_id::monitoring(*w))
                 .collect::<Vec<_>>()
         );
         assert!(app.loaded_menus.contains(&Menu::Monitoring));
@@ -2635,17 +2525,16 @@ pub(crate) mod app_tests {
         assert_eq!(app.rows.len(), rows);
     }
 
-    /// The Settings tab is the Btm3 flat probe; a Btm1-only device has
-    /// nothing to show there, which is not an error.
+    /// A tab with no groups on the device is empty, which is not an error.
     #[test]
-    fn the_settings_tab_is_empty_on_a_btm1_only_device() {
+    fn a_tab_the_device_has_no_groups_on_is_empty() {
         let (mut app, _bus) = app();
         app.open_device();
-        app.prev_tab(); // Summary → the last tab, Settings
-        assert!(app.cur_tab == TabKind::Settings);
+        app.prev_tab(); // Summary → the last tab, Configuration
+        assert!(app.cur_tab == TabKind::Menu(Menu::Configuration));
         settle(&mut app);
 
-        assert!(app.settings_loaded);
+        assert!(app.loaded_menus.contains(&Menu::Configuration));
         assert!(app.rows.is_empty());
     }
 
@@ -2659,14 +2548,14 @@ pub(crate) mod app_tests {
         app.rows = vec![
             Row::Group("DC".into()),
             Row::Field(field(
-                field_id::btm1(0x17),
+                field_id::monitoring(0x17),
                 "Voltage",
                 VisualizationType::Float,
                 true,
             )),
             Row::Group("AC".into()),
             Row::Field(field(
-                field_id::btm1(0x19),
+                field_id::monitoring(0x19),
                 "Frequency",
                 VisualizationType::Float,
                 true,
@@ -2722,7 +2611,8 @@ pub(crate) mod app_tests {
     fn a_numeric_edit_pre_fills_filters_and_commits() {
         let (mut app, bus) = app();
         seed_rows(&mut app);
-        app.values.insert(field_id::btm1(0x17), Value::Float(12.5));
+        app.values
+            .insert(field_id::monitoring(0x17), Value::Float(12.5));
 
         app.begin_edit();
         let Some(Editor {
@@ -2793,14 +2683,14 @@ pub(crate) mod app_tests {
         let (mut app, bus) = app();
         app.cur_device = Some(ADDR);
         app.rows = vec![Row::Field(field(
-            field_id::btm1(0x13),
+            field_id::monitoring(0x13),
             "Inverter",
             VisualizationType::CheckBox,
             true,
         ))];
         app.row_sel = 0;
         app.values
-            .insert(field_id::btm1(0x13), Value::Boolean(false));
+            .insert(field_id::monitoring(0x13), Value::Boolean(false));
 
         app.begin_edit();
         assert!(!app.editing(), "a checkbox writes immediately");
@@ -2813,7 +2703,7 @@ pub(crate) mod app_tests {
         let (mut app, bus) = app();
         app.cur_device = Some(ADDR);
         let mut f = field(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             "Mode",
             VisualizationType::DropDown,
             true,
@@ -2822,7 +2712,7 @@ pub(crate) mod app_tests {
         app.rows = vec![Row::Field(f)];
         app.row_sel = 0;
         app.values.insert(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             Value::List {
                 index: 1,
                 options: vec![],
@@ -2871,7 +2761,7 @@ pub(crate) mod app_tests {
         let (mut app, _bus) = app();
         app.cur_device = Some(ADDR);
         let mut f = field(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             "Mode",
             VisualizationType::DropDown,
             true,
@@ -2880,7 +2770,7 @@ pub(crate) mod app_tests {
         app.rows = vec![Row::Field(f)];
         app.row_sel = 0;
         app.values.insert(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             Value::List {
                 index: 99,
                 options: vec![],
@@ -2905,14 +2795,14 @@ pub(crate) mod app_tests {
         let (mut app, _bus) = app();
         app.cur_device = Some(ADDR);
         app.rows = vec![Row::Field(field(
-            field_id::btm1(0x01),
+            field_id::monitoring(0x01),
             "Device name",
             VisualizationType::Text,
             true,
         ))];
         app.row_sel = 0;
         app.values.insert(
-            field_id::btm1(0x01),
+            field_id::monitoring(0x01),
             Value::Text {
                 sid: 1,
                 text: "Combi".into(),
@@ -2949,7 +2839,7 @@ pub(crate) mod app_tests {
         let (mut app, _bus) = app();
         app.cur_device = Some(ADDR);
         app.rows = vec![Row::Field(field(
-            field_id::btm1(0x01),
+            field_id::monitoring(0x01),
             "Device name",
             VisualizationType::Text,
             true,
@@ -2979,7 +2869,7 @@ pub(crate) mod app_tests {
         let (mut app, _bus) = app();
         app.cur_device = Some(ADDR);
         let mut f = field(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             "Mode",
             VisualizationType::DropDown,
             true,
@@ -2988,7 +2878,7 @@ pub(crate) mod app_tests {
         app.rows = vec![Row::Field(f)];
         app.row_sel = 0;
         app.values.insert(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             Value::List {
                 index: 2,
                 options: vec![],

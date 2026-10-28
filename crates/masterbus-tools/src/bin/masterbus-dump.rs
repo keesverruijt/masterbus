@@ -10,8 +10,8 @@
 //! masterbus-dump [options] [output.json]
 //!
 //!   -o, --output <file>   write here instead of stdout
-//!       --menus <list>    monitoring,configuration,service,alarm,history | all
-//!                         (default: monitoring,configuration,service)
+//!       --menus <list>    monitoring,configuration,alarm,history | all
+//!                         (default: monitoring,configuration)
 //!       --values <mode>   none | monitoring | all   (default: monitoring)
 //!       --device <hex>    only this device address (repeatable, e.g. 286CA9)
 //!       --probe           also flat-probe the field-index space per device
@@ -35,7 +35,7 @@
 //!
 //! Device names, group names and field names are all installer-editable strings
 //! held in the device's EEPROM — a charger's "Output 1" is routinely renamed to
-//! "Eng.batt". The numbers are not: `field.id` (channel + wire index) and
+//! "Eng.batt". The numbers are not: `field.id` (tab + index) and
 //! `group.id` are fixed by the firmware. Mapping tables should key on those and
 //! treat the names as documentation.
 
@@ -45,17 +45,18 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use masterbus::{
-    AccessLevel, Channel, Config, DeviceId, DeviceStatus, FieldId, FieldInfo, MasterBus, Menu,
-    Value, VisualizationType, field_id,
+    AccessLevel, Config, DeviceId, DeviceStatus, FieldId, FieldInfo, MasterBus, Menu, Value,
+    VisualizationType, field_id,
 };
 use masterbus_tools::mapping::Mapping;
 use serde::Serialize;
 
 /// Version of the JSON document shape, so a consumer can tell dumps apart.
-const FORMAT: u32 = 1;
+/// 2: a field's `channel` became `tab`, and the `service` menu is gone.
+const FORMAT: u32 = 2;
 
 /// Menus dumped when `--menus` is not given.
-const DEFAULT_MENUS: &[Menu] = &[Menu::Monitoring, Menu::Configuration, Menu::Service];
+const DEFAULT_MENUS: &[Menu] = &[Menu::Monitoring, Menu::Configuration];
 
 /// Which menus' fields get their live value read.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -102,8 +103,8 @@ const USAGE: &str = "\
 Usage: masterbus-dump [options] [output.json]
 
   -o, --output <file>   write here instead of stdout
-      --menus <list>    monitoring,configuration,service,alarm,history | all
-                        (default: monitoring,configuration,service)
+      --menus <list>    monitoring,configuration,alarm,history | all
+                        (default: monitoring,configuration)
       --values <mode>   none | monitoring | all   (default: monitoring)
       --device <hex>    only this device address (repeatable, e.g. 286CA9)
       --probe           also flat-probe the field-index space per device (slow)
@@ -118,7 +119,6 @@ fn parse_menu(s: &str) -> Option<Menu> {
     match s.trim().to_ascii_lowercase().as_str() {
         "monitoring" | "mon" => Some(Menu::Monitoring),
         "configuration" | "config" | "cfg" => Some(Menu::Configuration),
-        "service" | "svc" => Some(Menu::Service),
         "alarm" | "alarms" => Some(Menu::Alarm),
         "history" | "hist" => Some(Menu::History),
         _ => None,
@@ -127,14 +127,7 @@ fn parse_menu(s: &str) -> Option<Menu> {
 
 /// Lowercase tag for a menu, used as the JSON `menu` value.
 fn menu_tag(m: Menu) -> String {
-    match m {
-        Menu::Monitoring => "monitoring".into(),
-        Menu::Configuration => "configuration".into(),
-        Menu::Service => "service".into(),
-        Menu::Alarm => "alarm".into(),
-        Menu::History => "history".into(),
-        Menu::Other(s) => format!("other({s})"),
-    }
+    m.tag().into()
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -173,13 +166,7 @@ fn parse_args_from(argv: impl IntoIterator<Item = String>) -> Result<Args, Strin
                 let v = it.next().ok_or("--menus needs a value")?;
                 let mut menus = Vec::new();
                 if v.trim().eq_ignore_ascii_case("all") {
-                    menus.extend_from_slice(&[
-                        Menu::Monitoring,
-                        Menu::Configuration,
-                        Menu::Service,
-                        Menu::Alarm,
-                        Menu::History,
-                    ]);
+                    menus.extend_from_slice(&Menu::ALL);
                 } else {
                     for part in v.split(',').filter(|p| !p.trim().is_empty()) {
                         menus.push(parse_menu(part).ok_or(format!("unknown menu {part:?}"))?);
@@ -317,13 +304,13 @@ struct GroupDump {
 /// One field, with its metadata and optionally its value.
 #[derive(Serialize)]
 struct FieldDump {
-    /// Channel-aware field id as `0x000`..`0x1FF` — the same text the TUI shows
+    /// Tab-aware field id as `0x000`..`0x3FF` — the same text the TUI shows
     /// and `masterbus-set-field` takes. **This is the stable key for mapping.**
     id: String,
     /// The same id as a number.
     index: FieldId,
-    /// Which wire channel the id lives on.
-    channel: Channel,
+    /// The tab the id is on.
+    tab: String,
     /// Field name. Installer-editable; documentation, not a key.
     name: String,
     /// Unit as the device reports it (may be empty).
@@ -391,7 +378,7 @@ fn field_dump(f: &FieldInfo) -> FieldDump {
     FieldDump {
         id: format!("0x{:03X}", f.index),
         index: f.index,
-        channel: field_id::channel(f.index),
+        tab: menu_tag(field_id::menu(f.index)),
         name: f.name.clone(),
         unit: f.unit.clone(),
         viz_type: f.viz_type,
@@ -659,7 +646,7 @@ mod tests {
     #[test]
     fn field_id_text_matches_the_tui_and_cli_encoding() {
         let f = FieldInfo {
-            index: field_id::btm3(0x0C),
+            index: field_id::configuration(0x0C),
             name: "Charge current".into(),
             unit: "A".into(),
             viz_type: VisualizationType::Float,
@@ -672,7 +659,7 @@ mod tests {
         };
         let d = field_dump(&f);
         assert_eq!(d.id, "0x10C");
-        assert_eq!(d.channel, Channel::Btm3);
+        assert_eq!(d.tab, "configuration");
     }
 
     #[test]
@@ -687,7 +674,7 @@ mod tests {
     #[test]
     fn document_shape_is_stable() {
         let f = FieldInfo {
-            index: field_id::btm1(0x06),
+            index: field_id::monitoring(0x06),
             name: "Output 3".into(),
             unit: "V".into(),
             viz_type: VisualizationType::Float,
@@ -737,7 +724,7 @@ mod tests {
         let field = &j["devices"][0]["groups"][0]["fields"][0];
         assert_eq!(field["id"], "0x006");
         assert_eq!(field["index"], 6);
-        assert_eq!(field["channel"], "Btm1");
+        assert_eq!(field["tab"], "monitoring");
         assert_eq!(field["unit"], "V");
         assert_eq!(field["value"]["Float"], 13.29);
         assert_eq!(field["value_text"], "13.29");
@@ -774,7 +761,7 @@ mod tests {
     #[test]
     fn a_mapped_field_carries_its_signalk_path() {
         let f = FieldInfo {
-            index: field_id::btm1(0x00E),
+            index: field_id::monitoring(0x00E),
             name: "Battery voltage".into(),
             unit: "V".into(),
             viz_type: VisualizationType::Float,
@@ -795,13 +782,7 @@ mod tests {
 
     #[test]
     fn menu_tags_round_trip_through_the_parser() {
-        for m in [
-            Menu::Monitoring,
-            Menu::Configuration,
-            Menu::Service,
-            Menu::Alarm,
-            Menu::History,
-        ] {
+        for m in Menu::ALL {
             assert_eq!(parse_menu(&menu_tag(m)), Some(m));
         }
     }
@@ -874,14 +855,14 @@ mod arg_tests {
 
     #[test]
     fn menus_accept_a_list_of_aliases_or_all() {
-        let a = parse(&["--menus", "mon,cfg,svc"]).unwrap();
+        let a = parse(&["--menus", "mon,cfg,hist"]).unwrap();
         assert_eq!(
             a.menus,
-            vec![Menu::Monitoring, Menu::Configuration, Menu::Service]
+            vec![Menu::Monitoring, Menu::Configuration, Menu::History]
         );
 
         let a = parse(&["--menus", "all"]).unwrap();
-        assert_eq!(a.menus.len(), 5);
+        assert_eq!(a.menus.len(), 4);
         assert!(a.menus.contains(&Menu::Alarm));
         assert!(a.menus.contains(&Menu::History));
 
@@ -951,8 +932,6 @@ mod arg_tests {
             ("configuration", Menu::Configuration),
             ("config", Menu::Configuration),
             ("cfg", Menu::Configuration),
-            ("service", Menu::Service),
-            ("svc", Menu::Service),
             ("alarm", Menu::Alarm),
             ("alarms", Menu::Alarm),
             ("history", Menu::History),
@@ -961,18 +940,16 @@ mod arg_tests {
             assert_eq!(parse_menu(s), Some(want), "{s}");
         }
         assert_eq!(parse_menu("settings"), None);
+        assert_eq!(parse_menu("service"), None);
     }
 
-    /// The JSON `menu` tag is the stable name a consumer keys on, including
-    /// for a selector this build has no name for.
+    /// The JSON `menu` tag is the stable name a consumer keys on.
     #[test]
     fn every_menu_has_a_json_tag() {
         assert_eq!(menu_tag(Menu::Monitoring), "monitoring");
         assert_eq!(menu_tag(Menu::Configuration), "configuration");
-        assert_eq!(menu_tag(Menu::Service), "service");
         assert_eq!(menu_tag(Menu::Alarm), "alarm");
         assert_eq!(menu_tag(Menu::History), "history");
-        assert_eq!(menu_tag(Menu::Other(0x07)), "other(7)");
     }
 
     /// Which menus get their values read. The default reads only monitoring,

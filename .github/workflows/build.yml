@@ -135,3 +135,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.DIST }}.tar.gz
+          # A version with a suffix (v0.6.0-beta.1) is a pre-release, so
+          # install.sh's releases/latest keeps pointing at the last release.
+          prerelease: ${{ contains(github.ref_name, '-') }}

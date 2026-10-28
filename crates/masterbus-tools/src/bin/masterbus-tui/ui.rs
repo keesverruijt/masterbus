@@ -1380,9 +1380,15 @@ mod format_tests {
     /// takes on the command line, with the channel in bit 8.
     #[test]
     fn field_id_tags_carry_the_channel_bit() {
-        assert_eq!(field_id_tag(masterbus::field_id::btm1(0x17)), "0x017");
-        assert_eq!(field_id_tag(masterbus::field_id::btm3(0x17)), "0x117");
-        assert_eq!(field_id_tag(masterbus::field_id::btm3(0xFF)), "0x1FF");
+        assert_eq!(field_id_tag(masterbus::field_id::monitoring(0x17)), "0x017");
+        assert_eq!(
+            field_id_tag(masterbus::field_id::configuration(0x17)),
+            "0x117"
+        );
+        assert_eq!(
+            field_id_tag(masterbus::field_id::configuration(0xFF)),
+            "0x1FF"
+        );
     }
 }
 
@@ -1430,20 +1436,21 @@ mod render_tests {
         app.rows = vec![
             Row::Group("DC".into()),
             Row::Field(field(
-                field_id::btm1(0x17),
+                field_id::monitoring(0x17),
                 "Voltage",
                 VisualizationType::Float,
                 true,
             )),
             Row::Field(field(
-                field_id::btm1(0x18),
+                field_id::monitoring(0x18),
                 "Current",
                 VisualizationType::Float,
                 false,
             )),
         ];
         app.row_sel = 1;
-        app.values.insert(field_id::btm1(0x17), Value::Float(26.35));
+        app.values
+            .insert(field_id::monitoring(0x17), Value::Float(26.35));
     }
 
     #[test]
@@ -1504,7 +1511,7 @@ mod render_tests {
 
     fn path_editor(buf: &str) -> crate::app::PathEditor {
         crate::app::PathEditor {
-            field: field_id::btm1(0x17),
+            field: field_id::monitoring(0x17),
             field_name: "Voltage".into(),
             unit: "V".into(),
             options: Vec::new(),
@@ -1602,7 +1609,7 @@ mod render_tests {
         let (mut app, _bus) = app();
         with_rows(&mut app);
         app.editor = Some(Editor {
-            field: field_id::btm1(0x17),
+            field: field_id::monitoring(0x17),
             name: "Voltage".into(),
             kind: EditKind::Number("13.2".into()),
         });
@@ -1616,7 +1623,7 @@ mod render_tests {
         let (mut app, _bus) = app();
         with_rows(&mut app);
         app.editor = Some(Editor {
-            field: field_id::btm1(0x05),
+            field: field_id::monitoring(0x05),
             name: "Mode".into(),
             kind: EditKind::Choice {
                 options: vec!["Off".into(), "On".into(), "Auto".into()],
@@ -1694,7 +1701,7 @@ mod render_tests {
         let (mut app, _bus) = app();
         with_rows(&mut app);
         app.editor = Some(Editor {
-            field: field_id::btm1(0x17),
+            field: field_id::monitoring(0x17),
             name: "Voltage".into(),
             kind: EditKind::Number("13.2".into()),
         });

@@ -19,21 +19,16 @@ use super::state::State;
 use super::waiter::Waiter;
 use super::{Command, Config, SubSpec, ValueUpdate};
 use crate::error::{Error, Result};
-use crate::model::{AccessLevel, Channel, DeviceId, FieldId, field_id};
+use crate::model::{AccessLevel, DeviceId, FieldId, field_id};
 use crate::model::{DeviceIdentity, DeviceStatus, Menu};
 use crate::protocol::{
-    TAB_DEFAULT, VisualizationType, addr_for_bus_id, btm3_read_raw, btm3_write_raw, decode_value,
-    encode_commit, encode_login_read, encode_login_write, encode_logout, encode_set_boolean,
-    encode_set_float, encode_set_list, heartbeat_raw, monitoring_req_raw, string_chunk_write_raw,
+    VisualizationType, addr_for_bus_id, decode_value, encode_commit, encode_login_read,
+    encode_login_write, encode_logout, encode_set_boolean, encode_set_float, encode_set_list,
+    heartbeat_raw, string_chunk_write_raw, value_read_raw, value_write_raw,
 };
 use crate::transport::TransportTx;
 use crate::value::{Value, WriteValue};
 
-/// How long to wait for an on-demand value response. Btm1 actively requests
-/// the value and gets a fast echo on the same class. Btm3 is passive — the
-/// next device-side push or write-ack delivers, and pushes are observed at
-/// ~2 s intervals on the reference bus, so a single read after discovery
-/// can wait that long.
 /// How many extra read-backs a write gets when the first one does not show
 /// the written value, and how long to wait between them. About a second in
 /// all: the CombiMaster's relays flip within a few hundred milliseconds.
@@ -54,8 +49,12 @@ fn write_took_effect(written: &WriteValue, observed: &Value) -> bool {
     }
 }
 
-const VALUE_READ_TIMEOUT_BTM1: Duration = Duration::from_millis(500);
-const VALUE_READ_TIMEOUT_BTM3: Duration = Duration::from_millis(2500);
+/// How long to wait for an on-demand value response. A Monitoring value
+/// comes back within tens of milliseconds. The other tabs are given longer:
+/// a Configuration read on the reference bus was sometimes answered only by
+/// the device's next push, about 2 s later.
+const VALUE_READ_TIMEOUT_MONITORING: Duration = Duration::from_millis(500);
+const VALUE_READ_TIMEOUT_OTHER_TABS: Duration = Duration::from_millis(2500);
 
 /// Every read that times out costs a timeout. A field that misses this many
 /// value reads in a row is probed once per `Config::quiet_probe` instead of
@@ -439,10 +438,12 @@ impl Sched {
         if let Some(f) = self.state.field_info(addr, field) {
             return Ok(f.viz_type);
         }
-        // Field still unknown: trigger the right discovery for its channel.
-        match field_id::channel(field) {
-            Channel::Btm1 => self.do_discover_all(addr),
-            Channel::Btm3 => self.do_discover_all_fields(addr),
+        // Field still unknown: discover its tab, and for a Configuration
+        // field no group lists, the flat probe.
+        let menu = field_id::menu(field);
+        self.do_discover_menu(addr, menu);
+        if menu == Menu::Configuration && self.state.field_info(addr, field).is_none() {
+            self.do_discover_all_fields(addr);
         }
         self.state
             .field_info(addr, field)
@@ -455,23 +456,13 @@ impl Sched {
     fn send_read(&mut self, addr: DeviceId, field: FieldId) -> (String, Instant) {
         let key = value_key(addr, field);
         self.waiter.register(&key);
-        // Both channels require an active read request. Btm3 value pushes are
-        // NOT autonomous — the device only emits a class-`0x0B` frame in
-        // response to an explicit class-`0x1B` read; on a quiet bus (no other
-        // master polling) we'd never see anything otherwise.
-        let timeout = match field_id::channel(field) {
-            Channel::Btm1 => {
-                self.send(monitoring_req_raw(
-                    addr,
-                    field_id::wire_index(field),
-                    TAB_DEFAULT,
-                ));
-                VALUE_READ_TIMEOUT_BTM1
-            }
-            Channel::Btm3 => {
-                self.send(btm3_read_raw(addr, field_id::wire_index(field)));
-                VALUE_READ_TIMEOUT_BTM3
-            }
+        // Every tab needs an active read: a device sends a value only when
+        // asked, unless another master is polling it.
+        let menu = field_id::menu(field);
+        self.send(value_read_raw(menu, addr, field_id::index(field)));
+        let timeout = match menu {
+            Menu::Monitoring => VALUE_READ_TIMEOUT_MONITORING,
+            _ => VALUE_READ_TIMEOUT_OTHER_TABS,
         };
         (key, Instant::now() + timeout)
     }
@@ -633,7 +624,7 @@ impl Sched {
         let key = format!("p:{:06X}:08:19", addr);
         // The login response shares timing with a Btm1 value-read echo —
         // both arrive in the tens of ms.
-        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_BTM1) {
+        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_MONITORING) {
             Some(data) if data.len() >= 3 => AccessLevel::from_byte(data[2]).ok_or_else(|| {
                 Error::Protocol(format!("unknown access level byte 0x{:02X}", data[2]))
             }),
@@ -726,9 +717,9 @@ impl Sched {
             self.state.put_value(addr, field, v.clone());
             return Ok(v);
         }
-        let wire = field_id::wire_index(field);
-        match field_id::channel(field) {
-            Channel::Btm1 => {
+        let wire = field_id::index(field);
+        match field_id::menu(field) {
+            Menu::Monitoring => {
                 // Relay-style boolean controls (e.g. the CombiMaster inverter
                 // / charger) only act when the value write is followed by a
                 // fixed "commit" token to the adjacent hidden command
@@ -738,6 +729,13 @@ impl Sched {
                 // hidden. If a *named* user-facing field is in the way,
                 // refuse the write rather than silently failing to actuate.
                 if matches!(value, WriteValue::Bool(_)) {
+                    // The commit register is at index + 1, which index 0xFF
+                    // has none of: it would wrap to field 0.
+                    if wire == u8::MAX {
+                        return Err(Error::Protocol(format!(
+                            "field 0x{field:03X} has no commit register after it"
+                        )));
+                    }
                     // The commit names us as the writer; never name a device
                     // that is on the bus.
                     let own = addr_for_bus_id(self.bus_id());
@@ -778,17 +776,16 @@ impl Sched {
                         "  emitting commit at fid 0x{cmd:04X} as {:08X}",
                         self.bus_id(),
                     );
-                    self.send(encode_commit(
-                        addr,
-                        field_id::wire_index(cmd),
-                        self.bus_id(),
-                    ));
+                    self.send(encode_commit(addr, field_id::index(cmd), self.bus_id()));
                 }
             }
-            Channel::Btm3 => {
-                // Every Btm3 write is a 4-byte f32, regardless of viz type:
-                // booleans go as 1.0 / 0.0, list picks go as the index as
-                // f32 (PROTOCOL.md §6, observed live in FINDINGS §3e).
+            // No write to an Alarm or History field has been seen; its
+            // format is presumed, so none is sent.
+            Menu::Alarm | Menu::History => return Err(Error::ReadOnly),
+            Menu::Configuration => {
+                // Every Configuration write is a 4-byte f32, regardless of
+                // viz type: booleans go as 1.0 / 0.0, list picks go as the
+                // index as f32 (PROTOCOL.md §6, observed live in FINDINGS §3e).
                 let v = match value {
                     WriteValue::Bool(true) => 1.0,
                     WriteValue::Bool(false) => 0.0,
@@ -796,13 +793,13 @@ impl Sched {
                     WriteValue::ListIndex(i) => i as f32,
                     WriteValue::Text { .. } => unreachable!("handled above"),
                 };
-                self.send(btm3_write_raw(addr, wire, v));
+                self.send(value_write_raw(Menu::Configuration, addr, wire, v));
             }
         }
         self.state.mark_outdated(addr, field);
-        // Confirm by observing the resulting value. On Btm1 the echo on class
-        // 0x08 lands within tens of ms; on Btm3 the ack on class 0x0B lands
-        // within ~10 ms. A relay-style control (the CombiMaster's inverter
+        // Confirm by observing the resulting value. A Monitoring write's echo
+        // on class 0x08 lands within tens of ms; a Configuration write's on
+        // class 0x0B within ~10 ms. A relay-style control (the CombiMaster's inverter
         // and charger) answers that first read with the *old* value and moves
         // a moment later, so when the read-back does not show what was
         // written, look again a few times before reporting it; a caller
@@ -867,7 +864,7 @@ impl Sched {
         let key = format!("str:{:06X}:{:04X}:{}", addr, str_id, seq);
         self.waiter.register(&key);
         self.send(string_chunk_write_raw(addr, str_id, seq, chars));
-        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_BTM1) {
+        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_MONITORING) {
             Some(_) => Ok(()),
             None => Err(Error::Timeout),
         }
@@ -1058,7 +1055,7 @@ mod tests {
         );
         let (btm1, btm3): (Vec<_>, Vec<_>) = fields
             .into_iter()
-            .partition(|f| field_id::channel(f.index) == Channel::Btm1);
+            .partition(|f| field_id::menu(f.index) == Menu::Monitoring);
         engine.state.put_menu(
             ADDR,
             Menu::Monitoring,
@@ -1082,7 +1079,7 @@ mod tests {
     fn an_on_demand_read_polls_the_device() {
         let device = Device::new().with_btm1(0x17, 12.5);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         assert_eq!(
@@ -1091,7 +1088,7 @@ mod tests {
         );
         assert_eq!(
             bus.sent_class(can_class::MONITORING_REQ),
-            vec![(0x18_188EA2, vec![0x17, TAB_DEFAULT])]
+            vec![(0x18_188EA2, vec![0x17, 0x00])]
         );
     }
 
@@ -1101,7 +1098,7 @@ mod tests {
     fn a_fresh_cached_value_is_served_without_touching_the_bus() {
         let device = Device::new().with_btm1(0x17, 12.5);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         engine.read(ADDR, f, Duration::ZERO).unwrap();
@@ -1129,7 +1126,7 @@ mod tests {
         let mut device = Device::new();
         device.mute.push(0x17);
         let (engine, _bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         assert!(matches!(
@@ -1144,7 +1141,7 @@ mod tests {
     #[test]
     fn an_undiscoverable_field_is_reported_unavailable() {
         let (engine, _bus) = connect(Device::new(), test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
 
         assert!(matches!(
             engine.read(ADDR, f, Duration::ZERO),
@@ -1158,7 +1155,7 @@ mod tests {
     fn a_btm3_read_uses_the_shadow_address() {
         let device = Device::new().with_btm3(0x30, 17.0);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm3(0x30);
+        let f = field_id::configuration(0x30);
         seed_schema(
             &engine,
             vec![field(f, "ShutDown", VisualizationType::Float)],
@@ -1180,7 +1177,7 @@ mod tests {
     fn a_float_write_lands_and_is_read_back() {
         let device = Device::new().with_btm1(0x30, 14.4);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x30);
+        let f = field_id::monitoring(0x30);
         seed_schema(
             &engine,
             vec![field(f, "Absorption", VisualizationType::Float)],
@@ -1201,7 +1198,7 @@ mod tests {
     #[test]
     fn a_boolean_write_is_followed_by_the_commit() {
         let (engine, bus) = connect(Device::new(), test_config());
-        let f = field_id::btm1(0x13);
+        let f = field_id::monitoring(0x13);
         seed_schema(
             &engine,
             vec![
@@ -1259,7 +1256,7 @@ mod tests {
     fn a_device_lists_its_eventable_outputs() {
         let device = Device::new().with_outputs(&[0x21, 0x23, 0x25, 0x27]);
         let (engine, bus) = connect(device, test_config());
-        let want: Vec<FieldId> = [0x21, 0x23, 0x25, 0x27].map(field_id::btm1).to_vec();
+        let want: Vec<FieldId> = [0x21, 0x23, 0x25, 0x27].map(field_id::monitoring).to_vec();
         assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
         assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
         assert_eq!(output_asks(&bus), vec![0x3F, 0x40, 0x41, 0x42, 0x43]);
@@ -1272,7 +1269,7 @@ mod tests {
         let mut device = Device::new().with_outputs(&[0x21, 0x23]);
         device.uncounted = true;
         let (engine, bus) = connect(device, test_config());
-        let want: Vec<FieldId> = [0x21, 0x23].map(field_id::btm1).to_vec();
+        let want: Vec<FieldId> = [0x21, 0x23].map(field_id::monitoring).to_vec();
         assert_eq!(engine.eventable_outputs(ADDR).unwrap(), want);
         let asks = output_asks(&bus);
         assert!(asks.iter().all(|&s| s == 0x3F || s >= 0x40));
@@ -1296,7 +1293,7 @@ mod tests {
     /// commit naming us, and only then does the output act.
     #[test]
     fn an_output_no_menu_shows_is_switched_with_the_commit() {
-        let stop = field_id::btm1(0x27);
+        let stop = field_id::monitoring(0x27);
         let device = Device::new()
             .with_outputs(&[0x21, 0x23, 0x25, 0x27])
             .with_field(stop, "Stop charge", "", 0x01, false);
@@ -1326,7 +1323,7 @@ mod tests {
         let device = Device::new().with_outputs(&[0x27]);
         let (engine, bus) = connect(device, test_config());
         let err = engine
-            .set_output(ADDR, field_id::btm1(0x27), true)
+            .set_output(ADDR, field_id::monitoring(0x27), true)
             .unwrap_err();
         assert!(matches!(err, Error::FieldNotAvailable(0x27)), "{err:?}");
         assert!(writes(&bus).is_empty());
@@ -1339,7 +1336,7 @@ mod tests {
         let device = Device::new().with_outputs(&[0x21, 0x23]);
         let (engine, bus) = connect(device, test_config());
         let err = engine
-            .set_output(ADDR, field_id::btm1(0x13), true)
+            .set_output(ADDR, field_id::monitoring(0x13), true)
             .unwrap_err();
         assert!(matches!(err, Error::NotAnOutput(0x13)), "{err:?}");
         assert!(writes(&bus).is_empty());
@@ -1352,7 +1349,7 @@ mod tests {
     fn a_slow_relay_is_read_again_until_the_write_shows() {
         let device = Device::new().with_settle_reads(2);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x15);
+        let f = field_id::monitoring(0x15);
         seed_schema(
             &engine,
             vec![
@@ -1381,7 +1378,7 @@ mod tests {
     fn a_write_that_never_shows_is_reported_as_observed() {
         let device = Device::new().with_settle_reads(100);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x15);
+        let f = field_id::monitoring(0x15);
         seed_schema(
             &engine,
             vec![
@@ -1417,7 +1414,7 @@ mod tests {
     #[test]
     fn a_boolean_write_is_refused_when_the_commit_slot_is_occupied() {
         let (engine, bus) = connect(Device::new(), test_config());
-        let f = field_id::btm1(0x13);
+        let f = field_id::monitoring(0x13);
         seed_schema(
             &engine,
             vec![
@@ -1436,6 +1433,19 @@ mod tests {
             } if cmd_field_name == "Charger"
         ));
         // Nothing went out: the refusal happens before the value write.
+        assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
+    }
+
+    /// Index 0xFF has no commit register after it: index + 1 would wrap to
+    /// field 0, so a boolean write there is refused before anything is sent.
+    #[test]
+    fn a_boolean_write_to_the_last_index_is_refused() {
+        let (engine, bus) = connect(Device::new(), test_config());
+        let f = field_id::monitoring(0xFF);
+        seed_schema(&engine, vec![field(f, "Last", VisualizationType::CheckBox)]);
+
+        let err = engine.write(ADDR, f, WriteValue::Bool(true)).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)), "{err:?}");
         assert!(bus.sent_class(can_class::MONITORING_REQ).is_empty());
     }
 
@@ -1458,7 +1468,7 @@ mod tests {
             assert!(Instant::now() < deadline, "the impostor was never heard");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let f = field_id::btm1(0x13);
+        let f = field_id::monitoring(0x13);
         seed_schema(
             &engine,
             vec![
@@ -1492,7 +1502,7 @@ mod tests {
     #[test]
     fn a_btm3_list_write_goes_out_as_a_float() {
         let (engine, bus) = connect(Device::new(), test_config());
-        let f = field_id::btm3(0x2C);
+        let f = field_id::configuration(0x2C);
         seed_schema(&engine, vec![field(f, "Mode", VisualizationType::DropDown)]);
 
         assert_eq!(
@@ -1540,7 +1550,7 @@ mod tests {
     #[test]
     fn a_text_field_write_caches_the_new_text() {
         let (engine, _bus) = connect(Device::new(), test_config());
-        let f = field_id::btm1(0x01);
+        let f = field_id::monitoring(0x01);
         seed_schema(
             &engine,
             vec![field(f, "Device name", VisualizationType::Text)],
@@ -1595,7 +1605,7 @@ mod tests {
         seed_schema(
             &engine,
             vec![field(
-                field_id::btm1(0x17),
+                field_id::monitoring(0x17),
                 "Voltage",
                 VisualizationType::Float,
             )],
@@ -1678,7 +1688,7 @@ mod tests {
     fn a_subscription_delivers_values_at_its_interval() {
         let device = Device::new().with_btm1(0x17, 12.5);
         let (engine, _bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
@@ -1696,7 +1706,7 @@ mod tests {
     fn change_only_delivers_only_on_change() {
         let device = Device::new().with_btm1(0x17, 12.5);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), true);
@@ -1719,7 +1729,7 @@ mod tests {
     fn unsubscribing_stops_the_updates() {
         let device = Device::new().with_btm1(0x17, 12.5);
         let (engine, _bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         let (id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
@@ -1752,7 +1762,7 @@ mod tests {
             ..test_config()
         };
         let (engine, bus) = connect(device, config);
-        let silent = [0x18, 0x19, 0x1A].map(field_id::btm1);
+        let silent = [0x18, 0x19, 0x1A].map(field_id::monitoring);
         seed_schema(
             &engine,
             silent
@@ -1788,7 +1798,7 @@ mod tests {
         let mut device = Device::new().with_btm1(0x17, 12.5).with_btm1(0x18, 1.0);
         device.mute.push(0x18);
         let (engine, bus) = connect(device, test_config());
-        let (good, silent) = (field_id::btm1(0x17), field_id::btm1(0x18));
+        let (good, silent) = (field_id::monitoring(0x17), field_id::monitoring(0x18));
         seed_schema(
             &engine,
             vec![
@@ -1816,7 +1826,7 @@ mod tests {
     fn a_device_off_the_bus_is_skipped_until_it_returns() {
         let device = Device::new().with_btm1(0x17, 12.5);
         let (engine, bus) = connect(device, test_config());
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
@@ -1855,7 +1865,7 @@ mod tests {
         }
         device.reply_delay = Duration::from_millis(40);
         let (engine, _bus) = connect(device, test_config());
-        let fields: Vec<FieldId> = wires.iter().map(|&w| field_id::btm1(w)).collect();
+        let fields: Vec<FieldId> = wires.iter().map(|&w| field_id::monitoring(w)).collect();
         seed_schema(
             &engine,
             fields
@@ -1882,7 +1892,7 @@ mod tests {
         let mut device = Device::new().with_btm1(0x10, 1.0).with_btm1(0x11, 2.0);
         device.mute.push(0x10);
         let (engine, _bus) = connect(device, test_config());
-        let (silent, answers) = (field_id::btm1(0x10), field_id::btm1(0x11));
+        let (silent, answers) = (field_id::monitoring(0x10), field_id::monitoring(0x11));
         seed_schema(
             &engine,
             vec![
@@ -1915,7 +1925,7 @@ mod tests {
             ..test_config()
         };
         let (engine, bus) = connect(device, config);
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
 
         let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
@@ -1957,7 +1967,7 @@ mod tests {
         };
         let (bus, transport) = FakeBus::start_many(vec![streaming, starting]);
         let engine = Engine::connect(transport, config).expect("connect");
-        let f = field_id::btm1(0x17);
+        let f = field_id::monitoring(0x17);
         seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
         let (_id, rx) = engine.subscribe(ADDR, vec![f], Duration::from_millis(10), false);
         rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1991,7 +2001,7 @@ mod tests {
         starting.addr = OTHER;
         let (bus, transport) = FakeBus::start_many(vec![streaming, starting]);
         let engine = Engine::connect(transport, test_config()).expect("connect");
-        let fields: Vec<FieldId> = wires.iter().map(|&w| field_id::btm1(w)).collect();
+        let fields: Vec<FieldId> = wires.iter().map(|&w| field_id::monitoring(w)).collect();
         seed_schema(
             &engine,
             fields

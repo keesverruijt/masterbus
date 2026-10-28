@@ -13,7 +13,8 @@ use super::framelog::frame_log;
 use super::state::State;
 use super::waiter::Waiter;
 use super::{Config, DeviceEvent};
-use crate::model::{DeviceId, FieldId, field_id};
+use crate::model::{DeviceId, FieldId, Menu, field_id};
+use crate::protocol::tab::{self, Kind};
 use crate::protocol::{
     BTM1_META_ADDR_FLAG, MbMessage, can_class, decode_value, frame_from_raw, parse_frame,
     waiter_key_for_frame,
@@ -119,9 +120,8 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             raw,
             ..
         } if device_addr & BTM1_META_ADDR_FLAG == 0 => {
-            // Monitoring data arrives on the Btm1 channel: build a Btm1
-            // `FieldId` from the wire field index.
-            let field = field_id::btm1(field_index);
+            // A Monitoring value.
+            let field = field_id::monitoring(field_index);
             state.touch(device_addr);
             // Wake any pending on-demand read/poll for this field.
             waiter.deliver(&value_key(device_addr, field), raw.clone());
@@ -133,21 +133,18 @@ fn handle_frame(raw_id: u32, data: &[u8], state: &State, waiter: &Waiter) {
             }
         }
         _ => {
-            // Btm3 live-value carrier: class `0x0B` on `addr | 0x800000`
-            // with a headerless 6-byte payload `[fid_lo, fid_hi, b0..b3]`.
-            // Same frame shape serves both unsolicited pushes *and*
-            // write-acks; both populate the value cache and wake any
-            // pending `poll_value` waiter via the channel-tagged value
-            // key. See PROTOCOL.md §6 / FINDINGS §3e+§3f.
-            if frame.can_class == can_class::SCHEMA_DATA_HISTORY
-                && frame.device_addr & BTM1_META_ADDR_FLAG != 0
+            // A value on one of the other tabs: `[idx_lo, idx_hi, b0..b3]`,
+            // the answer to a read or a write, or a push to another master
+            // that polls the device (PROTOCOL.md §2.1). It populates the
+            // value cache and wakes any pending read via the value key.
+            if let Some((menu, Kind::Data, false)) = tab::answer(frame.can_class, frame.device_addr)
+                && menu != Menu::Monitoring
                 && data.len() >= 6
             {
                 let real = frame.device_addr & !BTM1_META_ADDR_FLAG;
-                // The Btm3 channel uses an 8-bit wire index in our
-                // `FieldId` encoding; the on-the-wire high byte has been
-                // 0 on every device seen so far.
-                let field = field_id::btm3(data[0]);
+                // The index's high byte has been 0 on every device seen so
+                // far (see `FieldId`).
+                let field = field_id::new(menu, data[0]);
                 let raw_value = data[2..6].to_vec();
                 state.touch(real);
                 waiter.deliver(&value_key(real, field), raw_value.clone());
@@ -177,7 +174,9 @@ fn is_device_originated(can_class: u8) -> bool {
         | can_class::BTM3_META_DATA           // 0x0C — Btm3 metadata reply
         | can_class::WRITE_ACK                // 0x10 — write/no-value ack
         | can_class::SCHEMA_DATA_NA           // 0x11 — short / "n/a" schema reply
-        | 0x14 // metadata error reply (e.g. EasyView's 0x0C errors)
+        | 0x02 // Alarm value / "not available"
+        | 0x0D // History value
+        | 0x12..=0x15 // the other tabs' "not available" answers
     )
 }
 
@@ -220,8 +219,14 @@ mod tests {
 
     #[test]
     fn value_keys_are_channel_tagged() {
-        assert_eq!(value_key(ADDR, field_id::btm1(0x17)), "val:188EA2:0017");
-        assert_eq!(value_key(ADDR, field_id::btm3(0x17)), "val:188EA2:0117");
+        assert_eq!(
+            value_key(ADDR, field_id::monitoring(0x17)),
+            "val:188EA2:0017"
+        );
+        assert_eq!(
+            value_key(ADDR, field_id::configuration(0x17)),
+            "val:188EA2:0117"
+        );
     }
 
     /// Only device-originated classes register a device. Master-side classes
@@ -278,7 +283,7 @@ mod tests {
     /// decoded per the field's visualization type.
     #[test]
     fn a_btm1_value_wakes_the_reader_and_is_cached() {
-        let field = field_id::btm1(0x17);
+        let field = field_id::monitoring(0x17);
         let state = state_with_field(field, VisualizationType::Float);
         let waiter = Waiter::new();
         waiter.register(&value_key(ADDR, field));
@@ -303,7 +308,7 @@ mod tests {
     fn a_value_for_an_unknown_field_wakes_the_waiter_but_is_not_cached() {
         let state = State::new();
         let waiter = Waiter::new();
-        let field = field_id::btm1(0x17);
+        let field = field_id::monitoring(0x17);
         waiter.register(&value_key(ADDR, field));
 
         let mut data = vec![0x17, 0x00];
@@ -322,7 +327,7 @@ mod tests {
     /// the same frame shape for an unsolicited push and a write-ack.
     #[test]
     fn a_btm3_push_on_the_shadow_address_is_cached_against_the_real_one() {
-        let field = field_id::btm3(0x30);
+        let field = field_id::configuration(0x30);
         let state = State::new();
         state.put_all_fields(
             ADDR,
@@ -365,7 +370,7 @@ mod tests {
     fn a_metadata_reply_routes_to_its_discovery_key() {
         let state = State::new();
         let waiter = Waiter::new();
-        let key = "btm1_meta:188EA2:02:23";
+        let key = "prop:monitoring:188EA2:02:23";
         waiter.register(key);
 
         handle_frame(

@@ -52,7 +52,7 @@ fields, and curating the Signal K mapping.
 
 Devices are listed on the left with liveness; the selected device's
 groups and fields are on the right. `Tab` / `Shift-Tab` switch between
-the Summary / Monitoring / Configuration / Service / Settings tabs (each
+the Summary / Monitoring / Alarms / History / Configuration tabs (each
 discovered on demand). `Enter` edits a writable field — booleans toggle,
 numbers / lists / text open an edit modal. `l` opens the
 access-level (login) modal — higher levels unlock more fields. `q`
@@ -306,7 +306,9 @@ cron:
 
 - `<device_id>`: hex 24-bit address from the TUI's title bar, e.g. `188EA2`.
 - `<field_id>`: three-digit hex from the TUI field list, e.g. `0x013`
-  (Btm1) or `0x10E` (Btm3 — bit 8 selects the channel).
+  (Monitoring) or `0x10E` (Configuration). The first digit is the tab:
+  0 Monitoring, 1 Configuration, 2 Alarms, 3 History. Alarm and History
+  fields can't be written.
 - `<value>`: parsed per the field's type — boolean (`true`/`false`/`on`/
   `off`/`1`/`0`), number, list index *or* exact option label, or free
   text (max 16 printable-ASCII bytes for editable strings, the wire
@@ -322,14 +324,15 @@ Examples:
 
 Walks the whole bus and writes one JSON document: per device its
 identity and status, per group its id and menu, per field its
-channel-aware id, name, unit, visualization type, writability, range and
+tab-aware id, name, unit, visualization type, writability, range and
 enum option labels, plus the live values for the monitoring menu.
 
     masterbus-dump [options] [output.json]
 
 - `-o, --output <file>`: write here instead of stdout.
 - `--menus <list>`: which menus to enumerate, comma-separated, or `all`.
-  Default `monitoring,configuration,service`.
+  `monitoring`, `alarm`, `history`, `configuration`. Default
+  `monitoring,configuration`.
 - `--values <mode>`: `none`, `monitoring` (default) or `all`.
 - `--device <hex>`: restrict to one device address; repeatable.
 - `--probe`: also flat-probe the field-index space, finding fields no

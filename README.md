@@ -178,7 +178,7 @@ masterbus-tui --mapping   # also edit the Signal K mapping file
 ```
 
 Browse devices on the left; the selected device's tabs are on the right —
-`Summary` / `Monitoring` / `Configuration` / `Service` / `Settings`, each
+`Summary` / `Monitoring` / `Alarms` / `History` / `Configuration`, each
 discovered on demand. `Tab` / `Shift-Tab` switch tabs, `Enter` edits a writable
 field (booleans toggle, numbers / lists / text open a centred edit modal),
 `l` opens the access-level (login) modal — higher levels unlock more fields,
@@ -222,7 +222,7 @@ monitoring menu, the live values. It is the fastest way to hand someone without
 your hardware everything needed to write a mapping for a device class.
 
 ```sh
-masterbus-dump -o mybus.json          # monitoring + configuration + service
+masterbus-dump -o mybus.json          # monitoring + configuration
 masterbus-dump --values all --menus all -o mybus.json
 masterbus-dump --device 286CA9        # just one device, to stdout
 ```
@@ -276,10 +276,8 @@ been exercised against a live bus.
 
 ## TODO
 
-- [ ] **Alarms tab / event streams** — `Menu::Alarm` and `Menu::History` are
-  defined and discoverable, but the TUI tabs for them were removed during the
-  channel-aware redesign and not yet restored. The crate also doesn't surface
-  alarm broadcasts as events to API consumers.
+- [ ] **Alarm events** — the Alarm tab is read like the others, but the
+  crate doesn't surface alarm broadcasts as events to API consumers.
 - [ ] **`masterbus-set-field` Date / Time writes** — currently rejected; not a
   common need but the CLI advertises the omission.
 

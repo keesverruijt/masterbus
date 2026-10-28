@@ -6,9 +6,10 @@
 //!   "apply to this article" has a target. State of charge, voltage,
 //!   current and temperature, in the units real MLI batteries report.
 //! - **MSU Inverter**: a battery voltage, a `Device state` enum that cycles
-//!   `Standby` → `Inverting` → `Alarm` so notifications fire, and an
-//!   `Inverter` checkbox on its Configuration menu that is writable, so a
-//!   `"put": true` entry has something to switch.
+//!   `Standby` → `Inverting` → `Alarm` so notifications fire, and a writable
+//!   `Inverter` checkbox, so a `"put": true` entry has something to switch.
+//!   It also has one group on each of the other tabs: an alarm, a counter
+//!   and two settings.
 //!
 //! The values drift a little every second, so a client can see the stream
 //! move. Built only with the `fake-bus` feature.
@@ -37,16 +38,16 @@ fn battery(addr: u32, serial: &str, name: &str, soc: f32, volts: f32, amps: f32)
         .with_identity("66026000", serial, name)
         .with_group(Menu::Monitoring, 0, "Battery", &[0x00, 0x01, 0x02, 0x05])
         .with_field(
-            field_id::btm1(0x00),
+            field_id::monitoring(0x00),
             "State of charge",
             "%",
             VIZ_FLOAT,
             false,
         )
-        .with_field(field_id::btm1(0x01), "Voltage", "V", VIZ_FLOAT, false)
-        .with_field(field_id::btm1(0x02), "Current", "A", VIZ_FLOAT, false)
+        .with_field(field_id::monitoring(0x01), "Voltage", "V", VIZ_FLOAT, false)
+        .with_field(field_id::monitoring(0x02), "Current", "A", VIZ_FLOAT, false)
         .with_field(
-            field_id::btm1(0x05),
+            field_id::monitoring(0x05),
             "Temperature",
             "\u{b0}C",
             VIZ_FLOAT,
@@ -60,22 +61,62 @@ fn battery(addr: u32, serial: &str, name: &str, soc: f32, volts: f32, amps: f32)
     d
 }
 
+fn alarm(index: u8) -> masterbus::FieldId {
+    field_id::new(Menu::Alarm, index)
+}
+
+fn history(index: u8) -> masterbus::FieldId {
+    field_id::new(Menu::History, index)
+}
+
 fn inverter() -> Device {
     let mut d = Device::new()
         .with_identity("26024000", "FAKE-INV-1", "MSU Inverter")
         .with_group(Menu::Monitoring, 0, "DC", &[0x06])
         .with_group(Menu::Monitoring, 1, "State", &[0x10])
-        .with_group(Menu::Configuration, 2, "Inverter", &[0x13])
-        .with_field(field_id::btm1(0x06), "Main battery", "V", VIZ_FLOAT, false)
+        .with_group(Menu::Monitoring, 2, "Inverter", &[0x13])
+        .with_group(Menu::Alarm, 0, "Battery", &[0x00])
+        .with_group(Menu::History, 0, "Counters", &[0x00])
+        .with_group(Menu::Configuration, 0, "General", &[0x00, 0x01])
+        .with_field(
+            field_id::monitoring(0x06),
+            "Main battery",
+            "V",
+            VIZ_FLOAT,
+            false,
+        )
         .with_list_field(
-            field_id::btm1(0x10),
+            field_id::monitoring(0x10),
             "Device state",
             &["Standby", "Inverting", "Alarm"],
         )
-        .with_field(field_id::btm1(0x13), "Inverter", "", VIZ_CHECKBOX, true)
+        .with_field(
+            field_id::monitoring(0x13),
+            "Inverter",
+            "",
+            VIZ_CHECKBOX,
+            true,
+        )
+        .with_field(alarm(0x00), "Low battery", "", VIZ_CHECKBOX, false)
+        .with_field(history(0x00), "Inverter hours", "h", VIZ_FLOAT, false)
+        .with_list_field(
+            field_id::configuration(0x00),
+            "Language",
+            &["English", "Nederlands", "Deutsch"],
+        )
+        .with_field(
+            field_id::configuration(0x01),
+            "Low battery shutdown",
+            "V",
+            VIZ_FLOAT,
+            true,
+        )
         .with_btm1(0x06, 25.4)
         .with_btm1(0x10, 0.0)
-        .with_btm1(0x13, 1.0);
+        .with_btm1(0x13, 1.0)
+        .with_btm3(0x00, 1.0)
+        .with_btm3(0x01, 21.0);
+    d.tab_values.insert(history(0x00), 1234.5f32.to_le_bytes());
     d.addr = INVERTER;
     d
 }

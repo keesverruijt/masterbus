@@ -97,7 +97,7 @@ impl Tier {
 /// What the suggestion machinery knows about one field.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldCtx<'a> {
-    /// Channel-aware field id.
+    /// Tab-aware field id.
     pub id: FieldId,
     /// Name, as the installer left it.
     pub name: &'a str,

@@ -43,8 +43,9 @@ fn main() {
             }
         };
         for g in groups {
-            let menu = g.menu().unwrap_or(Menu::Other(0));
-            println!("  [{:?}] {}", menu, g.name().unwrap_or_default());
+            let menu = g.menu().ok();
+            let tag = menu.map(|m| m.tag()).unwrap_or("?");
+            println!("  [{tag}] {}", g.name().unwrap_or_default());
             for f in g.fields().unwrap_or_default() {
                 let fname = f.name().unwrap_or_default();
                 let unit = f.unit().unwrap_or_default();
@@ -54,7 +55,7 @@ fn main() {
                     "ro"
                 };
                 // Read values only for the monitoring menu to limit bus load.
-                let val = if menu == Menu::Monitoring {
+                let val = if menu == Some(Menu::Monitoring) {
                     match f.value() {
                         Ok(v) => format!("{:?}", v),
                         Err(_) => "-".into(),

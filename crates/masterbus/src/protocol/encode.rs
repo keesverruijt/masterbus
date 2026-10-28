@@ -1,16 +1,11 @@
 //! Encode requests/writes into raw `(can_id, data)` pairs for transmission.
 
-use super::{BTM1_META_ADDR_FLAG, TAB_DEFAULT, can_class, menu, meta_op};
+use super::tab::{self, Kind};
+use super::{TAB_DEFAULT, can_class, meta_op};
+use crate::model::Menu;
 
 fn id(class: u8, device_addr: u32) -> u32 {
     ((class as u32) << 24) | (device_addr & 0x00_FF_FF_FF)
-}
-
-/// Wire-level address transformation for Btm1 metadata requests. The Btm1
-/// metadata channel addresses the device at `addr | 0x800000`; everything
-/// else (Btm1 values, Btm3 metadata) uses the real address.
-fn btm1_meta_addr(device_addr: u32) -> u32 {
-    (device_addr | BTM1_META_ADDR_FLAG) & 0x00_FF_FF_FF
 }
 
 /// Bus-master heartbeat: class `0x05` from the master's own address, no data.
@@ -20,12 +15,21 @@ pub fn heartbeat_raw(master_addr: u32) -> (u32, Vec<u8>) {
     (id(can_class::BUS_POLL, master_addr), Vec::new())
 }
 
-/// Read a monitoring field: class `0x18`, `[field, tab]`.
-pub fn monitoring_req_raw(device_addr: u32, field_index: u8, tab_index: u8) -> (u32, Vec<u8>) {
-    (
-        id(can_class::MONITORING_REQ, device_addr),
-        vec![field_index, tab_index],
-    )
+/// A value read on `menu`'s tab: `[idx_lo, idx_hi]` (PROTOCOL.md §2.1). The
+/// device answers `[idx_lo, idx_hi, b0..b3]`; it sends a value only when
+/// asked, unless another master is polling it.
+pub fn value_read_raw(menu: Menu, device_addr: u32, index: u8) -> (u32, Vec<u8>) {
+    let e = tab::exchange(menu, Kind::Data);
+    (e.req.can_id(device_addr), vec![index, 0x00])
+}
+
+/// A value write on `menu`'s tab: `[idx_lo, idx_hi, f32]`. The device
+/// answers with the new value, as for a read.
+pub fn value_write_raw(menu: Menu, device_addr: u32, index: u8, value: f32) -> (u32, Vec<u8>) {
+    let e = tab::exchange(menu, Kind::Data);
+    let mut data = vec![index, 0x00];
+    data.extend_from_slice(&value.to_le_bytes());
+    (e.req.can_id(device_addr), data)
 }
 
 /// Firmware-version query: class `0x07`, `[0x82, n]`.
@@ -33,9 +37,9 @@ pub fn fw_req_raw(device_addr: u32, n: u8) -> (u32, Vec<u8>) {
     (id(can_class::PROPERTY_REQ, device_addr), vec![0x82, n])
 }
 
-/// Group-count query for a menu selector: class `0x07`, `[0x08, selector]`.
+/// Property-by-selector query: class `0x07`, `[0x08, selector]`, the
+/// selectors in [`super::menu`].
 pub fn group_count_req_raw(device_addr: u32, selector: u8) -> (u32, Vec<u8>) {
-    let _ = menu::MONITORING; // selectors documented in `menu`
     (
         id(can_class::PROPERTY_REQ, device_addr),
         vec![0x08, selector],
@@ -75,137 +79,36 @@ pub fn string_chunk_write_raw(
     (id(can_class::PROPERTY_REQ, device_addr), data)
 }
 
-/// Schema group-name query: class `0x19`, `[0x28, group_id, 0x00]`.
-pub fn schema_group_name_req_raw(device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
+/// A group request on `menu`'s tab: `[op, group, 0x00]`, with `op` `0x07`
+/// for the group's number of fields (`f32` at bytes 4..8 of the answer) or
+/// `0x28` for its name's string id (`u16` at bytes 4..6) (PROTOCOL.md §5).
+pub fn group_req_raw(menu: Menu, device_addr: u32, op: u8, group: u8) -> (u32, Vec<u8>) {
+    let e = tab::exchange(menu, Kind::Group);
+    (e.req.can_id(device_addr), vec![op, group, 0x00])
+}
+
+/// The field id at position `i` of a group on `menu`'s tab:
+/// `[0x03, group, 0x00, i]`; the answer carries it as a `u16` at bytes 4..6.
+pub fn group_field_id_req_raw(menu: Menu, device_addr: u32, group: u8, i: u8) -> (u32, Vec<u8>) {
+    let e = tab::exchange(menu, Kind::Group);
+    (e.req.can_id(device_addr), vec![0x03, group, 0x00, i])
+}
+
+/// A property of a field on `menu`'s tab: `[op, idx_lo, idx_hi]`, `op` one of
+/// [`meta_op`] (PROTOCOL.md §6).
+pub fn property_req_raw(menu: Menu, device_addr: u32, op: u8, index: u8) -> (u32, Vec<u8>) {
+    let e = tab::exchange(menu, Kind::Property);
+    (e.req.can_id(device_addr), vec![op, index, 0x00])
+}
+
+/// The label string id of option `opt` of a list field on `menu`'s tab:
+/// `[0x26, idx_lo, idx_hi, opt]`.
+pub fn property_option_req_raw(menu: Menu, device_addr: u32, index: u8, opt: u8) -> (u32, Vec<u8>) {
+    let e = tab::exchange(menu, Kind::Property);
     (
-        id(can_class::SCHEMA_REQ, device_addr),
-        vec![0x28, group_id, 0x00],
+        e.req.can_id(device_addr),
+        vec![meta_op::OPTION, index, 0x00, opt],
     )
-}
-
-/// Schema field-count query: class `0x19`, `[0x07, group_id, 0x00]`.
-pub fn schema_field_count_req_raw(device_addr: u32, group_id: u8) -> (u32, Vec<u8>) {
-    (
-        id(can_class::SCHEMA_REQ, device_addr),
-        vec![0x07, group_id, 0x00],
-    )
-}
-
-/// Schema field-id query: class `0x19`, `[0x03, group_id, 0x00, idx]`.
-pub fn schema_field_id_req_raw(device_addr: u32, group_id: u8, idx: u8) -> (u32, Vec<u8>) {
-    (
-        id(can_class::SCHEMA_REQ, device_addr),
-        vec![0x03, group_id, 0x00, idx],
-    )
-}
-
-/// Btm1 per-field metadata query: class `0x18` to the Btm1 metadata address
-/// (`real | 0x800000`), payload `[opcode, field_lo, field_hi]`. The device
-/// replies on class `0x08` at the same address.
-pub fn btm1_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
-    let [lo, hi] = field_id.to_le_bytes();
-    (
-        id(can_class::MONITORING_REQ, btm1_meta_addr(device_addr)),
-        vec![opcode, lo, hi],
-    )
-}
-
-/// Btm1 option-string query: class `0x18` to the Btm1 metadata address,
-/// payload `[0x26, field_id, 0x00, opt_idx]`.
-pub fn btm1_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
-    (
-        id(can_class::MONITORING_REQ, btm1_meta_addr(device_addr)),
-        vec![meta_op::OPTION, field_id, 0x00, opt_idx],
-    )
-}
-
-/// Btm3 per-field metadata query: class `0x1C` to the device's **real**
-/// address, payload `[opcode, field_lo, field_hi]`. Same opcode set as
-/// [`btm1_meta_req_raw`]; the device replies on class `0x0C`. Used by
-/// devices that speak the MasterBus v3 revision (e.g. the MacMagic
-/// family) — see PROTOCOL.md §6.
-pub fn btm3_meta_req_raw(device_addr: u32, opcode: u8, field_id: u16) -> (u32, Vec<u8>) {
-    let [lo, hi] = field_id.to_le_bytes();
-    (
-        id(can_class::BTM3_META_REQ, device_addr),
-        vec![opcode, lo, hi],
-    )
-}
-
-/// Btm3 option-string query: class `0x1C` to the real address, payload
-/// `[0x26, field_id, 0x00, opt_idx]`.
-pub fn btm3_meta_option_req_raw(device_addr: u32, field_id: u8, opt_idx: u8) -> (u32, Vec<u8>) {
-    (
-        id(can_class::BTM3_META_REQ, device_addr),
-        vec![meta_op::OPTION, field_id, 0x00, opt_idx],
-    )
-}
-
-/// Btm3 value read: class `0x1B` to the alternative address
-/// (`real | 0x800000`), headerless 2-byte payload `[fid_lo, fid_hi]`. The
-/// device replies on class `0x0B` at the same address with the current
-/// 4-byte value. Btm3 value pushes are NOT autonomous on a quiet bus —
-/// without an active read request the device never emits the value, so the
-/// crate must drive each value-fetch itself.
-pub fn btm3_read_raw(device_addr: u32, wire_idx: u8) -> (u32, Vec<u8>) {
-    let [fid_lo, fid_hi] = (wire_idx as u16).to_le_bytes();
-    (
-        id(can_class::SCHEMA_REQ_HISTORY, btm1_meta_addr(device_addr)),
-        vec![fid_lo, fid_hi],
-    )
-}
-
-/// Btm3 write: class `0x1B` to the alternative address (`real | 0x800000`),
-/// headerless payload `[fid_lo, fid_hi, b0, b1, b2, b3]` — a 16-bit wire
-/// field index followed by a 4-byte little-endian `f32` value.
-///
-/// Every Btm3 write is 4 bytes, even when the field is a boolean or a list
-/// pick: booleans go as `1.0` / `0.0`, list indices go as the index as
-/// `f32`. (Same "everything's a float" rule as the Btm1 monitoring write
-/// path; observed live in FINDINGS §3e.) The device acks by echoing the
-/// new value on class `0x0B` at the same address.
-pub fn btm3_write_raw(device_addr: u32, wire_idx: u8, value: f32) -> (u32, Vec<u8>) {
-    let [fid_lo, fid_hi] = (wire_idx as u16).to_le_bytes();
-    let [v0, v1, v2, v3] = value.to_le_bytes();
-    (
-        id(can_class::SCHEMA_REQ_HISTORY, btm1_meta_addr(device_addr)),
-        vec![fid_lo, fid_hi, v0, v1, v2, v3],
-    )
-}
-
-/// Schema group-name query on a non-default channel. `class` selects which
-/// schema tab to query:
-/// - [`can_class::SCHEMA_REQ`]         — Monitoring (default in [`schema_group_name_req_raw`])
-/// - [`can_class::SCHEMA_REQ_ALARM`]   — Alarms
-/// - [`can_class::SCHEMA_REQ_HISTORY`] — History / Service-events
-///
-/// Payload is the same `[0x28, group_id, 0x00]` regardless of channel; the
-/// device replies on the matching response class (`0x09` / `0x0A` / `0x0B`).
-pub fn schema_group_name_req_class_raw(
-    class: u8,
-    device_addr: u32,
-    group_id: u8,
-) -> (u32, Vec<u8>) {
-    (id(class, device_addr), vec![0x28, group_id, 0x00])
-}
-
-/// Channel-specific schema field-count query (see [`schema_group_name_req_class_raw`]).
-pub fn schema_field_count_req_class_raw(
-    class: u8,
-    device_addr: u32,
-    group_id: u8,
-) -> (u32, Vec<u8>) {
-    (id(class, device_addr), vec![0x07, group_id, 0x00])
-}
-
-/// Channel-specific schema field-id query (see [`schema_group_name_req_class_raw`]).
-pub fn schema_field_id_req_class_raw(
-    class: u8,
-    device_addr: u32,
-    group_id: u8,
-    idx: u8,
-) -> (u32, Vec<u8>) {
-    (id(class, device_addr), vec![0x03, group_id, 0x00, idx])
 }
 
 /// Boolean write: class `0x18`, `[field, tab, f32 LE]` with `1.0`=true / `0.0`=false.
@@ -354,26 +257,73 @@ mod tests {
     fn requests_use_address_as_is() {
         // No address munging: e.g. a monitoring read of the CombiMaster (0x188EA2)
         // is class 0x18 to that exact address.
-        assert_eq!(monitoring_req_raw(0x188EA2, 0x17, 0).0, 0x18188EA2);
-        assert_eq!(monitoring_req_raw(0x6E96CF, 0, 0).0, 0x186E96CF);
+        let read = |addr, i| value_read_raw(Menu::Monitoring, addr, i);
+        assert_eq!(read(0x188EA2, 0x17), (0x18188EA2, vec![0x17, 0x00]));
+        assert_eq!(read(0x6E96CF, 0).0, 0x186E96CF);
     }
 
     #[test]
-    fn btm3_write_matches_captured_wire_bytes() {
+    fn a_configuration_write_matches_captured_wire_bytes() {
         // From FINDINGS §3e: ShutDown voltage (field 0x30) on the Nav Chg
         // (`0x3A3B4B`) written to 17.0 V went on the wire as
         //     `Dn 1B BA3B4B [6] 30 00 00 00 88 41`
         // class 0x1B, address `3A3B4B | 0x800000`, headerless `[fid_lo,
         // fid_hi, b0..b3]` with the f32 value little-endian.
         assert_eq!(
-            btm3_write_raw(0x3A3B4B, 0x30, 17.0),
+            value_write_raw(Menu::Configuration, 0x3A3B4B, 0x30, 17.0),
             (0x1B_BA3B4B, vec![0x30, 0x00, 0x00, 0x00, 0x88, 0x41]),
         );
         // Mode field 0x2C set to option index 2 ("Stabilizer") — list pick
         // as `f32(2.0)`, same as Btm1's "everything is a float" rule.
         assert_eq!(
-            btm3_write_raw(0x3A3B4B, 0x2C, 2.0),
+            value_write_raw(Menu::Configuration, 0x3A3B4B, 0x2C, 2.0),
             (0x1B_BA3B4B, vec![0x2C, 0x00, 0x00, 0x00, 0x00, 0x40]),
+        );
+    }
+
+    /// The requests MasterAdjust sends a ChargeMaster Plus (#6).
+    #[test]
+    fn tab_requests_match_masteradjusts_trace() {
+        const CHG: u32 = 0x2A42F5;
+        assert_eq!(
+            group_req_raw(Menu::Configuration, CHG, 0x07, 0x0A),
+            (0x1C_AA42F5, vec![0x07, 0x0A, 0x00])
+        );
+        assert_eq!(
+            group_field_id_req_raw(Menu::Configuration, CHG, 0x00, 0x03),
+            (0x1C_AA42F5, vec![0x03, 0x00, 0x00, 0x03])
+        );
+        assert_eq!(
+            property_req_raw(Menu::Configuration, CHG, 0x02, 0x06),
+            (0x1C_2A42F5, vec![0x02, 0x06, 0x00])
+        );
+        assert_eq!(
+            value_read_raw(Menu::Configuration, CHG, 0x02),
+            (0x1B_AA42F5, vec![0x02, 0x00])
+        );
+        assert_eq!(
+            property_req_raw(Menu::Alarm, CHG, 0x02, 0x01),
+            (0x19_AA42F5, vec![0x02, 0x01, 0x00])
+        );
+        assert_eq!(
+            value_read_raw(Menu::Alarm, CHG, 0x11),
+            (0x03_2A42F5, vec![0x11, 0x00])
+        );
+        assert_eq!(
+            group_req_raw(Menu::History, CHG, 0x07, 0x05),
+            (0x1B_2A42F5, vec![0x07, 0x05, 0x00])
+        );
+        assert_eq!(
+            property_req_raw(Menu::History, CHG, 0x2C, 0x06),
+            (0x1A_AA42F5, vec![0x2C, 0x06, 0x00])
+        );
+        assert_eq!(
+            value_read_raw(Menu::History, CHG, 0x06),
+            (0x1D_AA42F5, vec![0x06, 0x00])
+        );
+        assert_eq!(
+            property_option_req_raw(Menu::Monitoring, CHG, 0x08, 0x01),
+            (0x18_AA42F5, vec![0x26, 0x08, 0x00, 0x01])
         );
     }
 

@@ -686,13 +686,7 @@ mod tests {
 
     /// Every menu, so seeding them all marks the device fully discovered and
     /// the handle layer runs without a discovery round trip.
-    const ALL_MENUS: [Menu; 5] = [
-        Menu::Monitoring,
-        Menu::Configuration,
-        Menu::Service,
-        Menu::Alarm,
-        Menu::History,
-    ];
+    const ALL_MENUS: [Menu; 4] = Menu::ALL;
 
     fn test_config() -> Config {
         Config {
@@ -776,13 +770,13 @@ mod tests {
                     Menu::Monitoring,
                     vec![
                         field_info(
-                            field_id::btm1(0x17),
+                            field_id::monitoring(0x17),
                             "Voltage",
                             VisualizationType::Float,
                             true,
                         ),
                         field_info(
-                            field_id::btm1(0x18),
+                            field_id::monitoring(0x18),
                             "Current",
                             VisualizationType::Float,
                             false,
@@ -794,7 +788,7 @@ mod tests {
                     "General",
                     Menu::Configuration,
                     vec![field_info(
-                        field_id::btm1(0x01),
+                        field_id::monitoring(0x01),
                         "Device name",
                         VisualizationType::Text,
                         true,
@@ -894,7 +888,7 @@ mod tests {
         assert_eq!(info.len(), 1);
         assert_eq!(info[0].fields[0].name, "Device name");
 
-        assert!(d.tab(Menu::Service).unwrap().is_empty());
+        assert!(d.tab(Menu::History).unwrap().is_empty());
     }
 
     #[test]
@@ -903,7 +897,7 @@ mod tests {
         bus.engine.state.put_all_fields(
             ADDR,
             vec![field_info(
-                field_id::btm3(0x30),
+                field_id::configuration(0x30),
                 "ShutDown",
                 VisualizationType::Float,
                 true,
@@ -931,14 +925,14 @@ mod tests {
                 "Relays",
                 Menu::Monitoring,
                 vec![
-                    eventable(field_id::btm1(0x20), "Relay 2"),
+                    eventable(field_id::monitoring(0x20), "Relay 2"),
                     field_info(
-                        field_id::btm1(0x05),
+                        field_id::monitoring(0x05),
                         "Voltage",
                         VisualizationType::Float,
                         false,
                     ),
-                    eventable(field_id::btm1(0x10), "Relay 1"),
+                    eventable(field_id::monitoring(0x10), "Relay 1"),
                 ],
             )],
         );
@@ -946,8 +940,8 @@ mod tests {
         bus.engine.state.put_all_fields(
             ADDR,
             vec![
-                eventable(field_id::btm1(0x10), "Relay 1"),
-                eventable(field_id::btm1(0x30), "Relay 3"),
+                eventable(field_id::monitoring(0x10), "Relay 1"),
+                eventable(field_id::monitoring(0x30), "Relay 3"),
             ],
         );
 
@@ -1032,15 +1026,15 @@ mod tests {
         let (bus, _fake) = connect(FakeDevice::new(), test_config());
         seed_default(&bus);
 
-        let f = bus.device(ADDR).field(field_id::btm1(0x17));
-        assert_eq!(f.index(), field_id::btm1(0x17));
+        let f = bus.device(ADDR).field(field_id::monitoring(0x17));
+        assert_eq!(f.index(), field_id::monitoring(0x17));
         assert_eq!(f.name().unwrap(), "Voltage");
         assert_eq!(f.unit().unwrap(), "V");
         assert_eq!(f.viz_type().unwrap(), VisualizationType::Float);
         assert!(f.is_writable().unwrap());
         assert!(
             !bus.device(ADDR)
-                .field(field_id::btm1(0x18))
+                .field(field_id::monitoring(0x18))
                 .is_writable()
                 .unwrap()
         );
@@ -1052,7 +1046,7 @@ mod tests {
         seed_default(&bus);
 
         assert!(matches!(
-            bus.device(ADDR).field(field_id::btm1(0x99)).info(),
+            bus.device(ADDR).field(field_id::monitoring(0x99)).info(),
             Err(Error::FieldNotAvailable(0x99))
         ));
     }
@@ -1065,7 +1059,7 @@ mod tests {
 
         assert_eq!(
             bus.device(ADDR)
-                .field(field_id::btm1(0x17))
+                .field(field_id::monitoring(0x17))
                 .value()
                 .unwrap(),
             Value::Float(12.5)
@@ -1080,7 +1074,7 @@ mod tests {
 
         let observed = bus
             .device(ADDR)
-            .field(field_id::btm1(0x17))
+            .field(field_id::monitoring(0x17))
             .set(Value::Float(13.2))
             .unwrap();
         assert_eq!(observed, Value::Float(13.2));
@@ -1099,15 +1093,16 @@ mod tests {
         let d = bus.device(ADDR);
 
         assert!(matches!(
-            d.field(field_id::btm1(0x17)).set(Value::Boolean(true)),
+            d.field(field_id::monitoring(0x17))
+                .set(Value::Boolean(true)),
             Err(Error::WrongType { expected: "Float" })
         ));
         assert!(matches!(
-            d.field(field_id::btm1(0x18)).set(Value::Float(1.0)),
+            d.field(field_id::monitoring(0x18)).set(Value::Float(1.0)),
             Err(Error::ReadOnly)
         ));
         assert!(matches!(
-            d.field(field_id::btm1(0x01)).set(Value::Text {
+            d.field(field_id::monitoring(0x01)).set(Value::Text {
                 sid: 1,
                 text: "far too long to fit".into()
             }),
@@ -1128,12 +1123,12 @@ mod tests {
 
         let sub = bus
             .device(ADDR)
-            .field(field_id::btm1(0x17))
+            .field(field_id::monitoring(0x17))
             .subscribe(Duration::from_millis(10), false);
 
         let update = sub.recv().unwrap();
         assert_eq!(update.device, ADDR);
-        assert_eq!(update.field, field_id::btm1(0x17));
+        assert_eq!(update.field, field_id::monitoring(0x17));
         assert_eq!(update.value, Value::Float(12.5));
         assert!(sub.receiver().recv_timeout(Duration::from_secs(2)).is_ok());
 
@@ -1153,7 +1148,7 @@ mod tests {
 
         let sub = bus.subscribe(
             ADDR,
-            [field_id::btm1(0x17), field_id::btm1(0x18)],
+            [field_id::monitoring(0x17), field_id::monitoring(0x18)],
             Duration::from_millis(10),
             false,
         );
