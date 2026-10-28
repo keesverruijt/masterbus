@@ -6,7 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`masterbus-dump --discovery-timeout <ms>`** sets how long discovery
+  waits for each reply (default 150 ms), to see whether a slow device
+  answers given more time. (#6)
+
 ### Fixed
+- **A slow device's late replies are kept in more places.** 0.5.2 kept a
+  field id that came in after its request was given up. A group's field
+  count, an option label and the later parts of a name are now kept too,
+  so a ChargeMaster Plus no longer comes out with an empty group, empty
+  option labels, or a name cut off after four characters ("Outp" for
+  "Output 2"). A menu where a field count still went unanswered is not
+  cached, so the next start reads it again; after two such starts in a row
+  it is cached as read, so a device that never answers is not read from
+  the bus at every start. Thanks to @Peter-Petrik. (#6)
 - **A device's recorded Signal K instance no longer follows the last field
   mapped.** A device can publish under two nodes, such as a regulator's
   readings under `electrical.alternators.alt-110a` and its `Stop charge`

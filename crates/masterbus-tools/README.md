@@ -334,6 +334,10 @@ enum option labels, plus the live values for the monitoring menu.
 - `--device <hex>`: restrict to one device address; repeatable.
 - `--probe`: also flat-probe the field-index space, finding fields no
   menu lists. Slow.
+- `--discovery-timeout <ms>`: how long to wait for each discovery reply,
+  in milliseconds. Default 150. A device that answers slowly, such as a
+  ChargeMaster Plus, can come out with missing fields or names; a longer
+  wait shows whether it answers given more time.
 - `--compact`: one-line JSON instead of pretty-printed.
 
 Examples:
