@@ -43,6 +43,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answers given more time. (#6)
 
 ### Fixed
+- **A switch at Monitoring field `0xFF` is no longer written.** Switching
+  an output writes a commit to the field after it, which for `0xFF` would
+  have been field 0. Such a write is now refused; no device has been seen
+  with a switch there.
 - **A slow device's late replies are kept in more places.** 0.5.2 kept a
   field id that came in after its request was given up. A group's field
   count, an option label and the later parts of a name are now kept too,
