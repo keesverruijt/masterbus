@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus"
-version = "0.5.2"
+version = "0.6.0-beta.1"
 dependencies = [
  "crossbeam-channel",
  "env_logger",
@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-ffi"
-version = "0.5.2"
+version = "0.6.0-beta.1"
 dependencies = [
  "cbindgen",
  "masterbus",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "masterbus-tools"
-version = "0.5.2"
+version = "0.6.0-beta.1"
 dependencies = [
  "crossbeam-channel",
  "env_logger",

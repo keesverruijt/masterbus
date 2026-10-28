@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-beta.1] - 2026-10-28
+
 ### Changed
 - **Devices are read the way MasterAdjust reads them: four tabs,
   Monitoring, Alarms, History and Configuration.** Each tab has its own
