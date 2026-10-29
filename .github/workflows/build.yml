@@ -105,7 +105,7 @@ jobs:
           # Cross-platform tools (with or without .exe). masterbus-signalk
           # ships everywhere too: the USB link works on every platform, and
           # the signalk-masterbus plugin bundles the daemon for each.
-          for b in masterbus-tui masterbus-set-field masterbus-dump masterbus-signalk; do
+          for b in masterbus-tui masterbus-set-field masterbus-dump masterbus-events masterbus-signalk; do
             if [ -f "$out/$b.exe" ]; then cp "$out/$b.exe" "$dist/"; else cp "$out/$b" "$dist/"; fi
           done
           # FFI library + static lib (whichever names this platform produced)

@@ -313,6 +313,16 @@ impl Device {
         self.engine.field_info(self.id, index)
     }
 
+    /// One property of a field (PROTOCOL.md §6), asked of the device now
+    /// rather than taken from the discovered schema: the answer's payload as
+    /// the device sent it, or `None` when it didn't answer. `op` is one of
+    /// [`crate::protocol::meta_op`]; with `opt`, the label of that option is
+    /// asked ([`meta_op::OPTION`](crate::protocol::meta_op::OPTION)) and `op`
+    /// is not used. Only asks; nothing is written.
+    pub fn property(&self, index: FieldId, op: u8, opt: Option<u8>) -> Result<Option<Vec<u8>>> {
+        self.engine.property(self.id, index, op, opt)
+    }
+
     /// A handle to a field by its channel-aware id.
     pub fn field(&self, index: FieldId) -> Field {
         Field {

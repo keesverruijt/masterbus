@@ -27,7 +27,7 @@ jobs:
         run: sh install.sh < /dev/null
       - name: Run the tools
         run: |
-          for t in masterbus-tui masterbus-signalk masterbus-set-field masterbus-dump; do
+          for t in masterbus-tui masterbus-signalk masterbus-set-field masterbus-dump masterbus-events; do
             "$t" --version
           done
 
@@ -43,7 +43,7 @@ jobs:
         shell: powershell
         run: |
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
-          foreach ($t in 'masterbus-tui', 'masterbus-signalk', 'masterbus-set-field', 'masterbus-dump') {
+          foreach ($t in 'masterbus-tui', 'masterbus-signalk', 'masterbus-set-field', 'masterbus-dump', 'masterbus-events') {
             & $t --version
             if ($LASTEXITCODE -ne 0) { throw "$t failed" }
           }

@@ -267,6 +267,30 @@ impl Disc<'_> {
             .map(|r| u16::from_le_bytes([r[2], r[3]]))
     }
 
+    /// One property of a field, asked of the device: the answer's payload,
+    /// `None` when it didn't answer. `opt` asks for that option's label
+    /// ([`crate::protocol::meta_op::OPTION`]).
+    pub(super) fn property(
+        &mut self,
+        addr: DeviceId,
+        fid: FieldId,
+        op: u8,
+        opt: Option<u8>,
+    ) -> Option<Vec<u8>> {
+        let menu = field_id::menu(fid);
+        let index = field_id::index(fid);
+        match opt {
+            Some(opt) => self.req_std(
+                &option_key(menu, addr, index, opt),
+                property_option_req_raw(menu, addr, index, opt),
+            ),
+            None => self.req_std(
+                &property_key(menu, addr, op, index),
+                property_req_raw(menu, addr, op, index),
+            ),
+        }
+    }
+
     /// Fetch several per-field properties in one pipelined round-trip on
     /// the field's tab. Returns op → raw response payload.
     ///

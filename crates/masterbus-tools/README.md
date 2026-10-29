@@ -64,7 +64,8 @@ the Signal K plugin), the TUI uses the bus through it and says so at
 start: `using the bus shared by masterbus-signalk`. Signal K keeps
 running while you browse, write fields or edit the mapping; the USB link
 can only be opened by one program, so before this the plugin had to be
-stopped first. `masterbus-dump` and `masterbus-set-field` do the same.
+stopped first. `masterbus-dump`, `masterbus-events` and
+`masterbus-set-field` do the same.
 This works for the same user account the daemon runs as (or root): the
 daemon leaves the connection details in `relay.json` in the schema cache
 folder, readable by that user only.
@@ -360,6 +361,35 @@ your work back into the bundled suggestions. Field ids print in the same
 three-digit hex `masterbus-set-field` accepts. Device, group and field
 *names* are installer-editable strings held in device EEPROM, so a
 mapping table should key on the ids and read the names as documentation.
+
+## `masterbus-events`
+
+Shows every event the devices on the bus have set up, and checks how a
+device stores the target of an event. It only reads; nothing is written.
+
+    masterbus-events [-o events.json] [--device HEX]... [--watch SECS]
+
+An event is set up on the device that acts: when its *source* changes
+(a switch, a charge state), it sends an *action* (Off, On, Copy, Copy
+invert, Toggle) to an output (the *command*) of another device (the
+*target*). For each event the tool prints the source, the target and the
+command as the numbers the device reports, each with the maximum the
+device allows, and a guess at which device and output they mean, plus
+the action:
+
+    DSI Digital in [43DF24] Event 2 target: Switch 2
+        target  3 (max 11)       → INT Inverter 1 (3959D3)
+        command 0 (max 1)        → State
+        action  Toggle
+
+The guess takes the target number as a position in the list of devices
+on the bus sorted by address, which the tool prints first. Whether the
+device keeps that position or the target's MasterBus id is what the
+watch mode is for: with `--watch 5` it reads everything again every 5
+seconds and prints a line whenever a device joins or leaves the bus or a
+number changes. Switch a device off (one listed above the event's target
+works best) and on again, and check whether the event still switches the
+right device. `-o` keeps every round in a JSON file to attach to an issue.
 
 ## License
 
