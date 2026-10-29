@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`masterbus-events`** shows the events set up on the devices on the
+  bus: for each, its source, target device, the target's output and the
+  action. With `--watch` it reads them again every few seconds and prints
+  what changes when a device leaves or joins the bus, to find out how a
+  device stores the target of an event. It only reads.
+- `Device::property` asks a field's property of the device, not of the
+  cache.
+
 ## [0.6.0-beta.1] - 2026-10-28
 
 ### Changed

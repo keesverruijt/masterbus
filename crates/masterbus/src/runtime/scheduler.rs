@@ -184,6 +184,16 @@ impl Sched {
                 Ok(Command::DiscoverField { addr, field, reply }) => {
                     let _ = reply.send(Ok(self.do_discover_field(addr, field)));
                 }
+                Ok(Command::Property {
+                    addr,
+                    field,
+                    op,
+                    opt,
+                    reply,
+                }) => {
+                    let r = self.with_disc(addr, |disc| disc.property(addr, field, op, opt));
+                    let _ = reply.send(Ok(r));
+                }
                 Ok(Command::Read {
                     addr,
                     field,

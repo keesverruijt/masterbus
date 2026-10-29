@@ -110,8 +110,8 @@ cross-check:
 	done
 
 # Release build of just the command-line tools (masterbus-tui,
-# masterbus-signalk, masterbus-set-field, masterbus-dump) — handy when you
-# don't need the core crate's tests or the FFI demos.
+# masterbus-signalk, masterbus-set-field, masterbus-dump, masterbus-events)
+# — handy when you don't need the core crate's tests or the FFI demos.
 tools:
 	$(CARGO) build --release -p masterbus-tools
 

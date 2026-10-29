@@ -151,6 +151,13 @@ pub(crate) enum Command {
         field: FieldId,
         reply: Sender<Result<Option<crate::model::FieldInfo>>>,
     },
+    Property {
+        addr: DeviceId,
+        field: FieldId,
+        op: u8,
+        opt: Option<u8>,
+        reply: Sender<Result<Option<Vec<u8>>>>,
+    },
     Read {
         addr: DeviceId,
         field: FieldId,
@@ -373,6 +380,24 @@ impl Engine {
             return Ok(Some(f));
         }
         self.call(|reply| Command::DiscoverField { addr, field, reply })?
+    }
+
+    /// One property of a field, asked of the device now (see
+    /// [`crate::Device::property`]).
+    pub fn property(
+        &self,
+        addr: DeviceId,
+        field: FieldId,
+        op: u8,
+        opt: Option<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.call(|reply| Command::Property {
+            addr,
+            field,
+            op,
+            opt,
+            reply,
+        })?
     }
 
     /// Read a field value (cache if fresh enough, else poll).
