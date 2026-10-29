@@ -1719,6 +1719,7 @@ mod tests {
 
     /// Devices identified together each get their own identity, in about
     /// the time of one: every step is asked of all of them at once (#40).
+    /// One named twice is asked once.
     #[test]
     fn devices_identified_together_take_about_as_long_as_one() {
         let delay = Duration::from_millis(40);
@@ -1745,7 +1746,7 @@ mod tests {
         let one = t.elapsed();
         let t = Instant::now();
         engine
-            .ensure_identities(&[0x100002, 0x100003, 0x100004])
+            .ensure_identities(&[0x100002, 0x100003, 0x100004, 0x100003])
             .unwrap();
         let three = t.elapsed();
 

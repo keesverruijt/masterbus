@@ -321,15 +321,20 @@ impl Engine {
     /// Ensure the identities of several devices are known, fetching the
     /// missing ones together (blocks until done).
     pub fn ensure_identities(&self, addrs: &[DeviceId]) -> Result<()> {
-        let addrs: Vec<DeviceId> = addrs
-            .iter()
-            .copied()
-            .filter(|&a| !self.state.has_identity(a))
-            .collect();
-        if addrs.is_empty() {
+        // Each device once: a repeated one would wait twice for one reply.
+        let mut unknown: Vec<DeviceId> = Vec::new();
+        for &a in addrs {
+            if !self.state.has_identity(a) && !unknown.contains(&a) {
+                unknown.push(a);
+            }
+        }
+        if unknown.is_empty() {
             return Ok(());
         }
-        self.call(|reply| Command::Identify { addrs, reply })?
+        self.call(|reply| Command::Identify {
+            addrs: unknown,
+            reply,
+        })?
     }
 
     /// Fetch (cheaply, identity-only) a device's identity.
