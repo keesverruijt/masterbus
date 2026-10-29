@@ -130,7 +130,7 @@ pub(crate) struct SubSpec {
 /// Commands sent from the API to the scheduler thread.
 pub(crate) enum Command {
     Identify {
-        addr: DeviceId,
+        addrs: Vec<DeviceId>,
         reply: Sender<Result<()>>,
     },
     DiscoverMenu {
@@ -312,7 +312,24 @@ impl Engine {
         if self.state.has_identity(addr) {
             return Ok(());
         }
-        self.call(|reply| Command::Identify { addr, reply })?
+        self.call(|reply| Command::Identify {
+            addrs: vec![addr],
+            reply,
+        })?
+    }
+
+    /// Ensure the identities of several devices are known, fetching the
+    /// missing ones together (blocks until done).
+    pub fn ensure_identities(&self, addrs: &[DeviceId]) -> Result<()> {
+        let addrs: Vec<DeviceId> = addrs
+            .iter()
+            .copied()
+            .filter(|&a| !self.state.has_identity(a))
+            .collect();
+        if addrs.is_empty() {
+            return Ok(());
+        }
+        self.call(|reply| Command::Identify { addrs, reply })?
     }
 
     /// Fetch (cheaply, identity-only) a device's identity.

@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The Signal K daemon identifies the devices on the bus five at a time.**
+  Each step of reading a device's identity (firmware, article, serial and
+  name) is asked of five devices at once, so five take about as long as
+  one. On a test boat with 13 devices the first pass went from 10.0 s to
+  6.7 s. The log has a line for each batch; the line of each device then
+  gives the time spent on it after that, such as its mapped fields. (#40)
+- `MasterBus::identify` fetches the identities of several devices
+  together.
+
 ## [0.6.0-beta.1] - 2026-10-28
 
 ### Changed

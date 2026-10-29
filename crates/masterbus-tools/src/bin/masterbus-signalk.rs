@@ -330,21 +330,31 @@ enum Found {
     Walked,
 }
 
+/// How many of the devices on the bus at start are identified together.
+/// Each step of identification is asked of all of them at once, so a batch
+/// takes about as long as one device; a smaller batch lets the first
+/// devices start publishing sooner. (#40)
+const IDENTIFY_AT_ONCE: usize = 5;
+
 /// The order devices are identified in: the ones on the bus at start
-/// (`first`), then each one that announces itself later, once. One at a
-/// time, on one thread, so each device can start publishing as soon as it
-/// is identified. (A thread per late device queued every identity request
-/// ahead of every menu request on the one scheduler, so none of them
-/// finished until nearly all had; #40.)
+/// (`first`), then each one that announces itself later, once. The ones at
+/// start are fetched in batches of [`IDENTIFY_AT_ONCE`] (`batch`), and each
+/// device of a batch is then made ready (`identify`) before the next batch,
+/// so it can start publishing as soon as it is. All on one thread: a thread
+/// per device queued every identity request ahead of every menu request on
+/// the one scheduler, so none of them finished until nearly all had (#40).
 fn walk(
     first: Vec<DeviceId>,
     events: Receiver<DeviceEvent>,
+    mut batch: impl FnMut(&[DeviceId]),
     mut identify: impl FnMut(DeviceId, bool),
     walked: impl FnOnce(),
 ) {
     let mut known: HashSet<DeviceId> = HashSet::new();
-    for id in first {
-        if known.insert(id) {
+    let first: Vec<DeviceId> = first.into_iter().filter(|&id| known.insert(id)).collect();
+    for ids in first.chunks(IDENTIFY_AT_ONCE) {
+        batch(ids);
+        for &id in ids {
             identify(id, false);
         }
     }
@@ -428,6 +438,15 @@ fn spawn_discovery(bus: MasterBus, shared: Arc<Shared>) -> Receiver<Found> {
             walk(
                 first,
                 events,
+                |ids| {
+                    let t0 = Instant::now();
+                    let _ = bus.identify(ids);
+                    eprintln!(
+                        "masterbus-signalk: read the identity of {} device(s) together in {:.1} s",
+                        ids.len(),
+                        secs(t0.elapsed()),
+                    );
+                },
                 |id, late| identify(&bus, &shared, id, late, &tx),
                 || {
                     let at = shared.started.elapsed();
@@ -1507,11 +1526,12 @@ mod tests {
         assert_eq!(civil_from_days(19_782), (2024, 2, 29));
     }
 
-    /// The devices on the bus at start are identified in order, one at a
-    /// time, before any that joins later; each device once, however often it
-    /// announces itself or goes away and comes back (#40).
+    /// The devices on the bus at start are identified in order, in batches,
+    /// each made ready before the next batch, and all before any that joins
+    /// later; each device once, however often it announces itself or goes
+    /// away and comes back (#40).
     #[test]
-    fn devices_are_identified_one_at_a_time_and_once() {
+    fn devices_are_identified_in_batches_and_once() {
         let (tx, rx) = crossbeam_channel::unbounded();
         for ev in [
             DeviceEvent::Alive(2), // on the bus at start: already done
@@ -1526,8 +1546,9 @@ mod tests {
         drop(tx);
         let order = std::cell::RefCell::new(Vec::new());
         walk(
-            vec![1, 2, 3],
+            vec![1, 2, 3, 4, 6, 8, 2],
             rx,
+            |ids| order.borrow_mut().push(format!("{ids:?}")),
             |id, late| {
                 order
                     .borrow_mut()
@@ -1537,7 +1558,20 @@ mod tests {
         );
         assert_eq!(
             order.into_inner(),
-            ["1", "2", "3", "walked", "7L", "5L"].map(String::from)
+            [
+                "[1, 2, 3, 4, 6]",
+                "1",
+                "2",
+                "3",
+                "4",
+                "6",
+                "[8]",
+                "8",
+                "walked",
+                "7L",
+                "5L"
+            ]
+            .map(String::from)
         );
     }
 
