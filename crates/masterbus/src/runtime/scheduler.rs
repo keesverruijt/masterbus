@@ -11,7 +11,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::discovery::{
     Disc, DiscBus, MENUS, discover_menu, enumerate_all_fields, enumerate_field, eventable_outputs,
-    fetch_identity, resolve_catalog,
+    fetch_identities, fetch_identity, resolve_catalog,
 };
 use super::framelog::frame_log;
 use super::reader::value_key;
@@ -165,8 +165,8 @@ impl Sched {
         while !shutdown.load(Ordering::Relaxed) {
             let timeout = self.loop_timeout();
             match cmd_rx.recv_timeout(timeout) {
-                Ok(Command::Identify { addr, reply }) => {
-                    self.do_identify(addr);
+                Ok(Command::Identify { addrs, reply }) => {
+                    self.do_identify(&addrs);
                     let _ = reply.send(Ok(()));
                 }
                 Ok(Command::DiscoverMenu { addr, menu, reply }) => {
@@ -285,13 +285,45 @@ impl Sched {
         let _ = self.tx.send(frame.0, &frame.1);
     }
 
-    /// Fetch (and cache) just a device's identity — the cheap half of discovery.
-    fn do_identify(&mut self, addr: DeviceId) {
-        if self.state.has_identity(addr) {
+    /// Fetch (and cache) just the identity of devices — the cheap half of
+    /// discovery — all of them together (see [`fetch_identities`]).
+    fn do_identify(&mut self, addrs: &[DeviceId]) {
+        let addrs: Vec<DeviceId> = addrs
+            .iter()
+            .copied()
+            .filter(|&a| !self.state.has_identity(a))
+            .collect();
+        let Some(&first) = addrs.first() else {
             return;
+        };
+        self.read_access_levels(&addrs);
+        let ids = self.with_disc(first, |disc| fetch_identities(disc, &addrs));
+        for (addr, id) in addrs.into_iter().zip(ids) {
+            self.state.put_identity(addr, id);
         }
-        let id = self.with_disc(addr, |disc| fetch_identity(disc, addr));
-        self.state.put_identity(addr, id);
+    }
+
+    /// Read the access level of the devices whose level isn't known yet, all
+    /// at once. One that doesn't answer is taken to be at `EndUser`, as in
+    /// [`Sched::with_disc`].
+    fn read_access_levels(&mut self, addrs: &[DeviceId]) {
+        let ask: Vec<DeviceId> = addrs
+            .iter()
+            .copied()
+            .filter(|&a| self.state.access_level(a).is_none())
+            .collect();
+        for &addr in &ask {
+            self.waiter.register(&format!("p:{:06X}:08:19", addr));
+            self.send(encode_login_read(addr));
+        }
+        let deadline = Instant::now() + VALUE_READ_TIMEOUT_MONITORING;
+        for addr in ask {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let level = self
+                .await_access_level(addr, left)
+                .unwrap_or(AccessLevel::EndUser);
+            self.state.put_access_level(addr, level);
+        }
     }
 
     /// Ensure the identity is known (reusing the cache), returning it.
@@ -620,11 +652,12 @@ impl Sched {
     // because the response is a class-0x06 frame `[0x08, 0x19, level, 0x00]`
     // in all three cases. The level byte at data[2] is what we return.
 
-    fn await_access_level(&mut self, addr: DeviceId) -> Result<AccessLevel> {
+    fn await_access_level(&mut self, addr: DeviceId, timeout: Duration) -> Result<AccessLevel> {
         let key = format!("p:{:06X}:08:19", addr);
-        // The login response shares timing with a Btm1 value-read echo —
-        // both arrive in the tens of ms.
-        match self.waiter.wait(&key, VALUE_READ_TIMEOUT_MONITORING) {
+        match self
+            .waiter
+            .wait(&key, timeout.max(Duration::from_millis(1)))
+        {
             Some(data) if data.len() >= 3 => AccessLevel::from_byte(data[2]).ok_or_else(|| {
                 Error::Protocol(format!("unknown access level byte 0x{:02X}", data[2]))
             }),
@@ -637,7 +670,9 @@ impl Sched {
         let key = format!("p:{:06X}:08:19", addr);
         self.waiter.register(&key);
         self.send(encode_login_read(addr));
-        let level = self.await_access_level(addr)?;
+        // The login response shares timing with a Btm1 value-read echo —
+        // both arrive in the tens of ms.
+        let level = self.await_access_level(addr, VALUE_READ_TIMEOUT_MONITORING)?;
         self.state.put_access_level(addr, level);
         Ok(level)
     }
@@ -655,7 +690,7 @@ impl Sched {
             None => encode_logout(addr),
         };
         self.send(frame);
-        let reported = self.await_access_level(addr)?;
+        let reported = self.await_access_level(addr, VALUE_READ_TIMEOUT_MONITORING)?;
         // A level change flips per-field WRITEABLE (meta op 0x0B) on many
         // fields; the in-memory schema cached at the prior level is now
         // stale. Drop it so the next field access reloads from the disk
@@ -1680,6 +1715,51 @@ mod tests {
         let (engine, _bus) = connect(device, test_config());
 
         assert_eq!(engine.identity(ADDR).unwrap().article, "44010250");
+    }
+
+    /// Devices identified together each get their own identity, in about
+    /// the time of one: every step is asked of all of them at once (#40).
+    /// One named twice is asked once.
+    #[test]
+    fn devices_identified_together_take_about_as_long_as_one() {
+        let delay = Duration::from_millis(40);
+        let device = |addr: u32, serial: &str, name: &str| {
+            let mut d = Device::new().with_identity("66025000", serial, name);
+            d.addr = addr;
+            d.reply_delay = delay;
+            d
+        };
+        let (_bus, transport) = FakeBus::start_many(vec![
+            device(0x100001, "K821Q0001", "BAT Main Batt 1"),
+            device(0x100002, "K821Q0002", "BAT Main Batt 2"),
+            device(0x100003, "K821Q0003", "BAT Main Batt 3"),
+            device(0x100004, "K821Q0004", "BAT Main Batt 4"),
+        ]);
+        let config = Config {
+            discovery_timeout: Duration::from_millis(200),
+            ..test_config()
+        };
+        let engine = Engine::connect(transport, config).expect("connect");
+
+        let t = Instant::now();
+        engine.ensure_identities(&[0x100001]).unwrap();
+        let one = t.elapsed();
+        let t = Instant::now();
+        engine
+            .ensure_identities(&[0x100002, 0x100003, 0x100004, 0x100003])
+            .unwrap();
+        let three = t.elapsed();
+
+        for n in 1..=4 {
+            let id = engine.identity(0x100000 + n).unwrap();
+            assert_eq!(id.serial, format!("K821Q000{n}"));
+            assert_eq!(id.name, format!("BAT Main Batt {n}"));
+            assert_eq!(id.article, "66025000");
+        }
+        assert!(
+            three < one * 2,
+            "three devices took {three:?}, one took {one:?}"
+        );
     }
 
     // ── subscriptions ───────────────────────────────────────────────────────

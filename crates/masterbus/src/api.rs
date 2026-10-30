@@ -167,6 +167,15 @@ impl MasterBus {
             .collect()
     }
 
+    /// Fetch the identities of several devices at once, so that
+    /// [`Device::identity`] on each of them is answered without touching the
+    /// bus. Each step of identification is asked of all of them together, so
+    /// this takes about as long as identifying the slowest one. A device that
+    /// doesn't answer gets empty strings, as with [`Device::identity`].
+    pub fn identify(&self, ids: &[DeviceId]) -> Result<()> {
+        self.engine.ensure_identities(ids)
+    }
+
     /// A handle to a specific device id (does not check presence).
     pub fn device(&self, id: DeviceId) -> Device {
         Device {

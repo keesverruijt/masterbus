@@ -200,6 +200,66 @@ impl Disc<'_> {
         self.req(key, frame, n)
     }
 
+    /// Several requests at once, each patient as in [`Disc::req_patient`]:
+    /// all are sent and then waited on together, and the unanswered ones are
+    /// sent again, up to the discovery retries. Replies are in the order of
+    /// `reqs`. Requests to different devices cost one round trip together
+    /// rather than one each, and the scheduler gets one turn per round
+    /// rather than one per request. (#40)
+    fn req_all(&mut self, reqs: &[(String, (u32, Vec<u8>))]) -> Vec<Option<Vec<u8>>> {
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; reqs.len()];
+        let retries = self.cfg.discovery_retries;
+        for attempt in 0..retries {
+            let open: Vec<usize> = (0..reqs.len()).filter(|&i| out[i].is_none()).collect();
+            if open.is_empty() {
+                return out;
+            }
+            self.bus.between();
+            for &i in &open {
+                self.waiter.register(&reqs[i].0);
+            }
+            for (n, &i) in open.iter().enumerate() {
+                if n > 0 {
+                    std::thread::sleep(self.cfg.min_send_interval);
+                }
+                let frame = &reqs[i].1;
+                frame_log("Tx", frame.0, &frame.1);
+                let _ = self.bus.tx().send(frame.0, &frame.1);
+            }
+            let last = attempt + 1 == retries;
+            let deadline = Instant::now() + self.cfg.discovery_timeout;
+            for &i in &open {
+                let key = &reqs[i].0;
+                let left = deadline
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(1));
+                out[i] = if last {
+                    self.waiter.wait_or_keep(key, left)
+                } else {
+                    self.waiter.wait(key, left)
+                };
+            }
+        }
+        // What every attempt left unanswered gets one more discovery timeout.
+        let late: Vec<(usize, String)> = (0..reqs.len())
+            .filter(|&i| out[i].is_none())
+            .map(|i| (i, reqs[i].0.clone()))
+            .collect();
+        for ((i, key), r) in late.iter().zip(self.collect_late(&late)) {
+            match r {
+                Some(r) => {
+                    log::debug!(target: "masterbus::discovery", "{key}: late reply kept");
+                    out[*i] = Some(r);
+                }
+                None => log::debug!(
+                    target: "masterbus::discovery",
+                    "{key}: giving up after {retries} attempt(s)"
+                ),
+            }
+        }
+        out
+    }
+
     /// Fetch a string by id. Served from the offline catalog when the id is in
     /// this device's spot-checked table (zero round trips); otherwise fetched
     /// live via [`Disc::fetch_str_wire`].
@@ -216,55 +276,95 @@ impl Disc<'_> {
     /// per round trip). Bypasses the catalog — used for the resolution
     /// spot-check and for any id the catalog doesn't cover.
     pub(super) fn fetch_str_wire(&mut self, addr: DeviceId, str_id: u16) -> String {
-        let id = (addr, str_id);
-        if let Some(s) = self.strs.known.get(&id) {
-            return s.clone();
-        }
-        if self.strs.unanswered.get(&id) >= Some(&UNANSWERED_STR_LIMIT) {
-            return String::new();
-        }
-        let mut s = String::new();
-        let mut seq: u8 = 0;
-        loop {
-            let key = format!("str:{:06X}:{:04X}:{}", addr, str_id, seq);
-            let r = match self.req_patient(&key, string_chunk_req_raw(addr, str_id, seq)) {
-                Some(r) => r,
-                // No answer at all counts against the id. A lost later chunk
-                // is the bus, not the id; the partial string is not kept.
-                None if seq == 0 => {
-                    let n = self.strs.unanswered.entry(id).or_insert(0);
-                    *n += 1;
-                    if *n >= UNANSWERED_STR_LIMIT {
-                        log::debug!(
-                            target: "masterbus::discovery",
-                            "{key}: unanswered {n} times; not asked again during this discovery",
-                        );
-                    }
-                    return s;
-                }
-                None => return s,
-            };
-            let last = r.len() < 8;
-            for &c in &r[4..r.len()] {
-                if c == 0 {
-                    break;
-                }
-                s.push(c as char);
-            }
-            if last || r[4..].contains(&0) {
-                self.strs.known.insert(id, s.clone());
-                return s;
-            }
-            seq = seq.wrapping_add(1);
-        }
+        self.fetch_strs_wire(&[(addr, str_id)]).remove(0)
     }
 
-    /// Property string id (`None` if no response; `Some(0)` is a valid id).
-    fn prop_str_id(&mut self, addr: DeviceId, n: u8) -> Option<u16> {
-        let key = format!("p:{:06X}:09:{:02X}", addr, n);
-        self.req_std(&key, prop_str_id_req_raw(addr, n))
-            .filter(|r| r.len() >= 4)
-            .map(|r| u16::from_le_bytes([r[2], r[3]]))
+    /// [`Disc::fetch_str_wire`] for several strings at once, of one device
+    /// or several: each round asks for the next chunk of every string not
+    /// yet whole, in one [`Disc::req_all`]. Strings are in the order of
+    /// `ids`.
+    pub(super) fn fetch_strs_wire(&mut self, ids: &[(DeviceId, u16)]) -> Vec<String> {
+        struct Fetch {
+            id: (DeviceId, u16),
+            s: String,
+            seq: u8,
+            done: bool,
+        }
+        let mut fetches: Vec<Fetch> = Vec::new();
+        for &id in ids {
+            let done = self.strs.known.contains_key(&id)
+                || self.strs.unanswered.get(&id) >= Some(&UNANSWERED_STR_LIMIT);
+            if !done && !fetches.iter().any(|f| f.id == id) {
+                fetches.push(Fetch {
+                    id,
+                    s: String::new(),
+                    seq: 0,
+                    done: false,
+                });
+            }
+        }
+        let key = |f: &Fetch| format!("str:{:06X}:{:04X}:{}", f.id.0, f.id.1, f.seq);
+        loop {
+            let open: Vec<usize> = (0..fetches.len()).filter(|&i| !fetches[i].done).collect();
+            if open.is_empty() {
+                break;
+            }
+            let reqs: Vec<(String, (u32, Vec<u8>))> = open
+                .iter()
+                .map(|&i| {
+                    let f = &fetches[i];
+                    (key(f), string_chunk_req_raw(f.id.0, f.id.1, f.seq))
+                })
+                .collect();
+            let replies = self.req_all(&reqs);
+            for (&i, r) in open.iter().zip(replies) {
+                let f = &mut fetches[i];
+                let Some(r) = r else {
+                    f.done = true;
+                    // No answer at all counts against the id. A lost later
+                    // chunk is the bus, not the id; the partial string is
+                    // not kept.
+                    if f.seq == 0 {
+                        let n = self.strs.unanswered.entry(f.id).or_insert(0);
+                        *n += 1;
+                        if *n >= UNANSWERED_STR_LIMIT {
+                            log::debug!(
+                                target: "masterbus::discovery",
+                                "{}: unanswered {n} times; not asked again during this discovery",
+                                key(f),
+                            );
+                        }
+                    }
+                    continue;
+                };
+                let last = r.len() < 8;
+                for &c in r.get(4..).unwrap_or_default() {
+                    if c == 0 {
+                        break;
+                    }
+                    f.s.push(c as char);
+                }
+                if last || r.get(4..).unwrap_or_default().contains(&0) {
+                    f.done = true;
+                    self.strs.known.insert(f.id, f.s.clone());
+                } else {
+                    f.seq = f.seq.wrapping_add(1);
+                }
+            }
+        }
+        ids.iter()
+            .map(|id| {
+                self.strs.known.get(id).cloned().unwrap_or_else(|| {
+                    // A string cut off by a lost chunk is not kept; it reads as
+                    // the part that came, as before.
+                    fetches
+                        .iter()
+                        .find(|f| f.id == *id)
+                        .map(|f| f.s.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .collect()
     }
 
     /// Fetch several per-field properties in one pipelined round-trip on
@@ -424,43 +524,103 @@ impl Disc<'_> {
 /// Fetch a device's identity (firmware + property strings). This is the cheap
 /// half of discovery — no group/field/metadata enumeration.
 pub(super) fn fetch_identity(disc: &mut Disc, addr: DeviceId) -> DeviceIdentity {
-    let firmware = {
-        let k0 = format!("p:{:06X}:82:00", addr);
-        let k1 = format!("p:{:06X}:82:01", addr);
-        let r0 = disc.req_std(&k0, fw_req_raw(addr, 0)).unwrap_or_default();
-        let r1 = disc.req_std(&k1, fw_req_raw(addr, 1)).unwrap_or_default();
-        let major = r0.get(3).copied().unwrap_or(0) as u32 + r1.get(3).copied().unwrap_or(0) as u32;
-        let minor = r0.get(2).copied().unwrap_or(0) as u32 + r1.get(2).copied().unwrap_or(0) as u32;
-        format!("{}.{}", major, minor)
-    };
-    // Property strings are trimmed: at least one shipping charger reports its
-    // article number with a trailing space ("44010250 "), which silently
-    // defeats every lookup that keys on it — the bundled string catalog, and
-    // any per-model mapping table. Serial is trimmed for the same reason; it
-    // keys the schema cache file and the Signal K mapping.
-    let fetch_prop = |disc: &mut Disc, n: u8| -> String {
-        disc.prop_str_id(addr, n)
-            .map(|sid| disc.fetch_str(addr, sid).trim().to_string())
-            .unwrap_or_default()
-    };
-    let article = fetch_prop(disc, 1);
-    let serial = fetch_prop(disc, 2);
-    let name = fetch_prop(disc, 3);
-    let revision = {
-        let r = fetch_prop(disc, 4);
-        if r.is_empty() {
-            serial.chars().nth(4).map(String::from).unwrap_or_default()
-        } else {
-            r
-        }
-    };
-    DeviceIdentity {
-        article,
-        serial,
-        revision,
-        name,
-        firmware,
-    }
+    fetch_identities(disc, &[addr]).remove(0)
+}
+
+/// The identities of several devices, fetched together: each step (the two
+/// firmware words, the four property string ids, then the strings chunk by
+/// chunk) is asked of every device at once, so a batch takes about as long
+/// as its slowest device rather than the sum of all. (#40)
+pub(super) fn fetch_identities(disc: &mut Disc, addrs: &[DeviceId]) -> Vec<DeviceIdentity> {
+    let fw_reqs: Vec<(String, (u32, Vec<u8>))> = addrs
+        .iter()
+        .flat_map(|&addr| {
+            [0u8, 1].map(|n| (format!("p:{:06X}:82:{n:02X}", addr), fw_req_raw(addr, n)))
+        })
+        .collect();
+    let fw = disc.req_all(&fw_reqs);
+    // Properties 1–4: article, serial, name, revision.
+    const PROPS: [u8; 4] = [1, 2, 3, 4];
+    let sid_reqs: Vec<(String, (u32, Vec<u8>))> = addrs
+        .iter()
+        .flat_map(|&addr| {
+            PROPS.map(|n| {
+                (
+                    format!("p:{:06X}:09:{:02X}", addr, n),
+                    prop_str_id_req_raw(addr, n),
+                )
+            })
+        })
+        .collect();
+    // `None` if no response; `Some(0)` is a valid id.
+    let sids: Vec<Option<u16>> = disc
+        .req_all(&sid_reqs)
+        .into_iter()
+        .map(|r| {
+            r.filter(|r| r.len() >= 4)
+                .map(|r| u16::from_le_bytes([r[2], r[3]]))
+        })
+        .collect();
+    let sid = |d: usize, p: usize| sids[d * PROPS.len() + p];
+    // What the catalog has is served from it, as `fetch_str` does.
+    let catalog = disc.catalog;
+    let in_catalog = |sid: u16| catalog.and_then(|c| c.get(&sid));
+    let live: Vec<(DeviceId, u16)> = addrs
+        .iter()
+        .enumerate()
+        .flat_map(|(d, &addr)| (0..PROPS.len()).filter_map(move |p| Some((addr, sid(d, p)?))))
+        .filter(|&(_, s)| in_catalog(s).is_none())
+        .collect();
+    let fetched: HashMap<(DeviceId, u16), String> = live
+        .iter()
+        .copied()
+        .zip(disc.fetch_strs_wire(&live))
+        .collect();
+    addrs
+        .iter()
+        .enumerate()
+        .map(|(d, &addr)| {
+            let firmware = {
+                let r0 = fw[2 * d].clone().unwrap_or_default();
+                let r1 = fw[2 * d + 1].clone().unwrap_or_default();
+                let major =
+                    r0.get(3).copied().unwrap_or(0) as u32 + r1.get(3).copied().unwrap_or(0) as u32;
+                let minor =
+                    r0.get(2).copied().unwrap_or(0) as u32 + r1.get(2).copied().unwrap_or(0) as u32;
+                format!("{}.{}", major, minor)
+            };
+            // Property strings are trimmed: at least one shipping charger
+            // reports its article number with a trailing space ("44010250 "),
+            // which silently defeats every lookup that keys on it — the
+            // bundled string catalog, and any per-model mapping table. Serial
+            // is trimmed for the same reason; it keys the schema cache file
+            // and the Signal K mapping.
+            let prop = |p: usize| -> String {
+                sid(d, p)
+                    .and_then(|s| in_catalog(s).or_else(|| fetched.get(&(addr, s))))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
+            };
+            let article = prop(0);
+            let serial = prop(1);
+            let name = prop(2);
+            let revision = {
+                let r = prop(3);
+                if r.is_empty() {
+                    serial.chars().nth(4).map(String::from).unwrap_or_default()
+                } else {
+                    r
+                }
+            };
+            DeviceIdentity {
+                article,
+                serial,
+                revision,
+                name,
+                firmware,
+            }
+        })
+        .collect()
 }
 
 /// Resolve this device's offline string table: pick the catalog candidate for
