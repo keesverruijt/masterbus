@@ -514,10 +514,13 @@ impl Sched {
             .wait(&key, remaining.max(Duration::from_millis(1)))
         {
             Some(raw) => {
+                // Wherever the field is known from: a field no menu lists
+                // (asked for on its own) keeps its labels too, or its enum
+                // reached Signal K without them and never published (#55).
                 let opts = self
                     .state
-                    .schema(addr)
-                    .and_then(|s| s.field(field).map(|f| f.options.clone()))
+                    .field_info(addr, field)
+                    .map(|f| f.options)
                     .unwrap_or_default();
                 let mut v = decode_value(&raw, viz).with_options(&opts);
                 // For Text-VIZ fields the value is the *sid* of the editable
@@ -1125,6 +1128,35 @@ mod tests {
             bus.sent_class(can_class::MONITORING_REQ),
             vec![(0x18_188EA2, vec![0x17, 0x00])]
         );
+    }
+
+    /// A field no menu lists, asked for on its own, still gets its option
+    /// labels on a read: an EasyView's `Outputs` enums reached Signal K
+    /// without them and never published (#55).
+    #[test]
+    fn a_field_asked_for_on_its_own_keeps_its_labels() {
+        let device = Device::new().with_btm1(0x00, 2.0);
+        let (engine, _bus) = connect(device, test_config());
+        seed_schema(&engine, vec![]);
+        let f = field_id::monitoring(0x00);
+        let labels = vec!["Off".to_string(), "On".to_string(), "Alarm".to_string()];
+        engine.state.put_extra_field(
+            ADDR,
+            FieldInfo {
+                options: labels.clone(),
+                ..field(f, "State", VisualizationType::DropDown)
+            },
+        );
+
+        let v = engine.read(ADDR, f, Duration::ZERO).unwrap();
+        assert_eq!(
+            v,
+            Value::List {
+                index: 2,
+                options: labels
+            }
+        );
+        assert_eq!(v.label(), Some("Alarm"));
     }
 
     /// The point of the value cache: a read inside `max_age` is answered from

@@ -18,6 +18,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   6.0 s. The log has a line for each batch; the line of each device then
   gives the time spent on it after that, such as its mapped fields. (#40)
 
+### Fixed
+- **Mapped fields that counted as streaming but never reached Signal K.**
+  - An option field that no menu lists, such as the EasyView-5's `State` and
+    `Feed back 1-6`, now publishes its option name. It used to arrive without
+    its option names and was dropped.
+  - An on/off input with no option names, such as a Mass Charger's
+    `Remote input`, now publishes `true` or `false`.
+  - A date, such as a MasterShunt's `Date`, now publishes as `2026-11-08`.
+
+  The value read through the API was always right. (#55)
+
 ## [0.6.0-beta.1] - 2026-10-28
 
 ### Changed
