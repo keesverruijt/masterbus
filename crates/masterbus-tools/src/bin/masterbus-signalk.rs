@@ -19,7 +19,10 @@
 //! `MASTERBUS_CONFIG_DIR` environment variable) says where the file is, so a
 //! supervisor can keep everything this daemon owns in one directory. Once
 //! both listeners are bound the daemon prints one `READY {...}` line on
-//! stdout naming them, which is what a supervisor waits for.
+//! stdout naming them, which is what a supervisor waits for. A supervisor
+//! that sets `MASTERBUS_EXIT_WITH_STDIN=1` and holds a pipe on stdin has the
+//! daemon exit when that pipe closes, so a supervisor that dies does not
+//! leave the daemon running.
 //!
 //! The daemon shares its bus connection with the masterbus tools on the same
 //! machine (`masterbus-tui`, `masterbus-dump`, `masterbus-set-field`): it
@@ -170,6 +173,34 @@ fn is_loopback(addr: &str) -> bool {
     }
 }
 
+/// Set to `1` by a supervisor that hands the daemon a stdin pipe and keeps
+/// its end open: the daemon then exits when that pipe closes. The pipe closes
+/// whenever the supervisor goes away, even when it is killed outright and
+/// cannot stop the daemon itself, so no daemon is left holding the USB link.
+/// An environment variable rather than a flag, so a supervisor can set it
+/// for an older daemon too. Off by default: under systemd or in a terminal,
+/// stdin is not tied to anyone's lifetime.
+const EXIT_WITH_STDIN_ENV: &str = "MASTERBUS_EXIT_WITH_STDIN";
+
+/// Watch stdin in a thread and exit once it reaches end of file or fails.
+fn exit_when_stdin_closes() {
+    std::thread::Builder::new()
+        .name("stdin-watch".into())
+        .spawn(|| {
+            let mut buf = [0u8; 256];
+            let mut stdin = std::io::stdin().lock();
+            loop {
+                match std::io::Read::read(&mut stdin, &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            eprintln!("masterbus-signalk: stdin closed; the supervisor is gone, exiting");
+            std::process::exit(0);
+        })
+        .expect("spawning the stdin watcher");
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = match parse_args(std::env::args().skip(1)) {
@@ -185,6 +216,9 @@ fn main() {
             );
         }
     };
+    if std::env::var_os(EXIT_WITH_STDIN_ENV).is_some_and(|v| v == "1") {
+        exit_when_stdin_closes();
+    }
     if let Some(dir) = &args.config_dir {
         // SAFETY: nothing else is running yet; the engine's threads start in
         // `MasterBus::auto` below, after the variable is set.
