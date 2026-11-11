@@ -1,7 +1,7 @@
 //! Single bus-TX thread: discovery (high priority), on-demand reads/writes, and
 //! rate-based subscription polling — paced to a bus budget, passive-first.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -110,6 +110,11 @@ pub(super) fn spawn(
                 tx,
                 state,
                 waiter,
+                cmd_rx,
+                backlog: VecDeque::new(),
+                slow: None,
+                draining: false,
+                reading_menus: HashSet::new(),
                 config,
                 last_send: Instant::now(),
                 next_heartbeat,
@@ -121,15 +126,52 @@ pub(super) fn spawn(
                 servicing: false,
                 discovering: 0,
             }
-            .run(cmd_rx, &shutdown)
+            .run(&shutdown)
         })
         .expect("spawn scheduler")
+}
+
+/// The device a command reads a whole tab of, other than Monitoring: a job
+/// of seconds to minutes. Such a job runs in the background: everything
+/// else queued gets its turn between the job's requests (#40).
+fn slow_job(cmd: &Command) -> Option<DeviceId> {
+    match cmd {
+        Command::DiscoverMenu { addr, menu, .. } if *menu != Menu::Monitoring => Some(*addr),
+        Command::Discover { addr, .. } | Command::DiscoverAllFields { addr, .. } => Some(*addr),
+        _ => None,
+    }
+}
+
+/// Whether a command asks `addr` for metadata. Run in the middle of a slow
+/// job on the same device, its requests could meet the job's own, so it
+/// waits until the job is done.
+fn discovers(cmd: &Command, addr: DeviceId) -> bool {
+    match cmd {
+        Command::Identify { addrs, .. } => addrs.contains(&addr),
+        Command::DiscoverMenu { addr: a, .. }
+        | Command::Discover { addr: a, .. }
+        | Command::DiscoverAllFields { addr: a, .. }
+        | Command::DiscoverField { addr: a, .. }
+        | Command::EventableOutputs { addr: a, .. } => *a == addr,
+        _ => false,
+    }
 }
 
 struct Sched {
     tx: Box<dyn TransportTx>,
     state: Arc<State>,
     waiter: Arc<Waiter>,
+    cmd_rx: Receiver<Command>,
+    /// Commands that wait for the running slow job: other slow jobs, and
+    /// metadata requests to the device it reads.
+    backlog: VecDeque<Command>,
+    /// The device whose tab a slow job is reading, while it runs.
+    slow: Option<DeviceId>,
+    /// Running queued commands from inside a slow job; they don't in turn.
+    draining: bool,
+    /// The tabs being read, so a command run in the middle of a slow job
+    /// does not start reading the same one again.
+    reading_menus: HashSet<(DeviceId, Menu)>,
     config: Config,
     last_send: Instant,
     next_heartbeat: Option<Instant>,
@@ -157,95 +199,160 @@ impl DiscBus for Sched {
     fn between(&mut self) {
         self.maybe_heartbeat();
         self.process_due();
+        self.serve_queued();
     }
 }
 
 impl Sched {
-    fn run(mut self, cmd_rx: Receiver<Command>, shutdown: &AtomicBool) {
+    fn run(mut self, shutdown: &AtomicBool) {
         while !shutdown.load(Ordering::Relaxed) {
-            let timeout = self.loop_timeout();
-            match cmd_rx.recv_timeout(timeout) {
-                Ok(Command::Identify { addrs, reply }) => {
-                    self.do_identify(&addrs);
-                    let _ = reply.send(Ok(()));
+            // What is queued now goes first; slow jobs wait in the backlog
+            // and run one at a time when nothing else is waiting.
+            let mut stop = false;
+            while let Ok(cmd) = self.cmd_rx.try_recv() {
+                stop |= !self.dispatch(cmd);
+            }
+            if stop {
+                break;
+            }
+            if let Some(cmd) = self.backlog.pop_front() {
+                self.slow = slow_job(&cmd);
+                let go_on = self.handle(cmd);
+                self.slow = None;
+                if !go_on {
+                    break;
                 }
-                Ok(Command::DiscoverMenu { addr, menu, reply }) => {
-                    self.do_discover_menu(addr, menu);
-                    let _ = reply.send(Ok(()));
+            } else {
+                let timeout = self.loop_timeout();
+                match self.cmd_rx.recv_timeout(timeout) {
+                    Ok(cmd) => {
+                        if !self.dispatch(cmd) {
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
-                Ok(Command::Discover { addr, reply }) => {
-                    self.do_discover_all(addr);
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(Command::DiscoverAllFields { addr, reply }) => {
-                    self.do_discover_all_fields(addr);
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(Command::DiscoverField { addr, field, reply }) => {
-                    let _ = reply.send(Ok(self.do_discover_field(addr, field)));
-                }
-                Ok(Command::Read {
-                    addr,
-                    field,
-                    max_age,
-                    reply,
-                }) => {
-                    let r = self.do_read(addr, field, max_age);
-                    let _ = reply.send(r);
-                }
-                Ok(Command::Write {
-                    addr,
-                    field,
-                    value,
-                    reply,
-                }) => {
-                    let r = self.do_write(addr, field, value);
-                    let _ = reply.send(r);
-                }
-                Ok(Command::EventableOutputs { addr, reply }) => {
-                    let _ = reply.send(Ok(self.do_eventable_outputs(addr)));
-                }
-                Ok(Command::SetOutput {
-                    addr,
-                    field,
-                    on,
-                    reply,
-                }) => {
-                    let r = self.do_set_output(addr, field, on);
-                    let _ = reply.send(r);
-                }
-                Ok(Command::WriteString {
-                    addr,
-                    str_id,
-                    text,
-                    reply,
-                }) => {
-                    let r = self.do_write_string(addr, str_id, &text);
-                    let _ = reply.send(r);
-                }
-                Ok(Command::AccessLevelRead { addr, reply }) => {
-                    let r = self.do_access_level_read(addr);
-                    let _ = reply.send(r);
-                }
-                Ok(Command::AccessLevelSet {
-                    addr,
-                    level,
-                    code,
-                    reply,
-                }) => {
-                    let r = self.do_access_level_set(addr, level, code);
-                    let _ = reply.send(r);
-                }
-                Ok(Command::Subscribe(spec)) => self.add_sub(spec),
-                Ok(Command::Unsubscribe(id)) => self.subs.retain(|s| s.spec.id != id),
-                Ok(Command::Shutdown) => break,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
             }
             self.maybe_heartbeat();
             self.process_due();
         }
         self.waiter.cancel_all();
+    }
+
+    /// Run a command now, or put a slow job in the backlog. `false` to stop.
+    fn dispatch(&mut self, cmd: Command) -> bool {
+        if slow_job(&cmd).is_some() {
+            self.backlog.push_back(cmd);
+            return true;
+        }
+        self.handle(cmd)
+    }
+
+    /// While a slow job runs: run what has been queued since, between two of
+    /// its requests, so a tab read holds up neither the devices still being
+    /// identified nor reads, writes and subscriptions (#40). Not from inside
+    /// a subscription pass (its list is taken out meanwhile), nor from a
+    /// command this already runs.
+    fn serve_queued(&mut self) {
+        let Some(addr) = self.slow else { return };
+        if self.draining || self.servicing {
+            return;
+        }
+        self.draining = true;
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            if matches!(cmd, Command::Shutdown) {
+                self.backlog.push_front(cmd);
+                break;
+            }
+            if slow_job(&cmd).is_some() || discovers(&cmd, addr) {
+                self.backlog.push_back(cmd);
+            } else {
+                self.handle(cmd);
+            }
+        }
+        self.draining = false;
+    }
+
+    /// Carry out one command. `false` for a shutdown.
+    fn handle(&mut self, cmd: Command) -> bool {
+        match cmd {
+            Command::Identify { addrs, reply } => {
+                self.do_identify(&addrs);
+                let _ = reply.send(Ok(()));
+            }
+            Command::DiscoverMenu { addr, menu, reply } => {
+                self.do_discover_menu(addr, menu);
+                let _ = reply.send(Ok(()));
+            }
+            Command::Discover { addr, reply } => {
+                self.do_discover_all(addr);
+                let _ = reply.send(Ok(()));
+            }
+            Command::DiscoverAllFields { addr, reply } => {
+                self.do_discover_all_fields(addr);
+                let _ = reply.send(Ok(()));
+            }
+            Command::DiscoverField { addr, field, reply } => {
+                let _ = reply.send(Ok(self.do_discover_field(addr, field)));
+            }
+            Command::Read {
+                addr,
+                field,
+                max_age,
+                reply,
+            } => {
+                let r = self.do_read(addr, field, max_age);
+                let _ = reply.send(r);
+            }
+            Command::Write {
+                addr,
+                field,
+                value,
+                reply,
+            } => {
+                let r = self.do_write(addr, field, value);
+                let _ = reply.send(r);
+            }
+            Command::EventableOutputs { addr, reply } => {
+                let _ = reply.send(Ok(self.do_eventable_outputs(addr)));
+            }
+            Command::SetOutput {
+                addr,
+                field,
+                on,
+                reply,
+            } => {
+                let r = self.do_set_output(addr, field, on);
+                let _ = reply.send(r);
+            }
+            Command::WriteString {
+                addr,
+                str_id,
+                text,
+                reply,
+            } => {
+                let r = self.do_write_string(addr, str_id, &text);
+                let _ = reply.send(r);
+            }
+            Command::AccessLevelRead { addr, reply } => {
+                let r = self.do_access_level_read(addr);
+                let _ = reply.send(r);
+            }
+            Command::AccessLevelSet {
+                addr,
+                level,
+                code,
+                reply,
+            } => {
+                let r = self.do_access_level_set(addr, level, code);
+                let _ = reply.send(r);
+            }
+            Command::Subscribe(spec) => self.add_sub(spec),
+            Command::Unsubscribe(id) => self.subs.retain(|s| s.spec.id != id),
+            Command::Shutdown => return false,
+        }
+        true
     }
 
     /// How long to block on the command channel: the soonest of the next due
@@ -361,12 +468,17 @@ impl Sched {
         {
             return;
         }
+        // Already being read, by the slow job this runs in the middle of.
+        if !self.reading_menus.insert((addr, menu)) {
+            return;
+        }
         let id = self.ensure_identity(addr);
         self.ensure_catalog(addr, &id);
         // Discover this device's own menu (per-device disk cache inside). We do
         // not reuse another same-article device's schema: devices that share an
         // article can differ (e.g. the cluster master battery has an extra group).
         let groups = self.with_disc(addr, |disc| discover_menu(disc, addr, &id, menu));
+        self.reading_menus.remove(&(addr, menu));
         self.last_send = Instant::now();
         match groups {
             Some(groups) => {
@@ -908,14 +1020,20 @@ impl Sched {
     // ── subscriptions ───────────────────────────────────────────────────────
 
     fn add_sub(&mut self, spec: SubSpec) {
-        // Ensure the subscribed fields' types are known. We don't know which menus
-        // they live in, so discover the full schema (one-time; disk-cached).
-        if !spec
+        // Ensure the subscribed fields' types are known: read the tabs of
+        // those that are not (one-time; disk-cached). Only those tabs: a
+        // subscription runs between a slow job's requests, and reading every
+        // tab would make it one (#40).
+        let mut menus: Vec<Menu> = spec
             .fields
             .iter()
-            .all(|&f| self.state.has_field(spec.device, f))
-        {
-            self.do_discover_all(spec.device);
+            .filter(|&&f| !self.state.has_field(spec.device, f))
+            .map(|&f| field_id::menu(f))
+            .collect();
+        menus.sort();
+        menus.dedup();
+        for menu in menus {
+            self.do_discover_menu(spec.device, menu);
         }
         let now = Instant::now();
         let next_due = spec.fields.iter().map(|&f| (f, now)).collect();
@@ -2064,6 +2182,53 @@ mod tests {
         let updates = rx.try_iter().count();
         assert!(updates >= 2, "only {updates} updates during the discovery");
         assert!(bus.sent_class(can_class::BUS_POLL).len() >= beats + 2);
+    }
+
+    /// A tab read is a background job: a read asked for meanwhile is answered
+    /// between two of its requests, not after it. A Configuration read held
+    /// up a device's identification for seven minutes (#40).
+    #[test]
+    fn a_tab_read_does_not_hold_up_other_commands() {
+        const OTHER: u32 = 0x28A11D;
+        let streaming = Device::new().with_btm1(0x17, 12.5);
+        let mut slow = Device::new().with_identity("40021006", "7654321", "CHG");
+        slow.addr = OTHER;
+        slow.mute_counts = true;
+        let config = Config {
+            discovery_timeout: Duration::from_millis(100),
+            discovery_retries: 3,
+            ..test_config()
+        };
+        let (_bus, transport) = FakeBus::start_many(vec![streaming, slow]);
+        let engine = Engine::connect(transport, config).expect("connect");
+        let f = field_id::monitoring(0x17);
+        seed_schema(&engine, vec![field(f, "Voltage", VisualizationType::Float)]);
+
+        // Three unanswered 100 ms group-count requests, and more.
+        let tab = {
+            let engine = engine.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                engine.ensure_menu(OTHER, Menu::Configuration).unwrap();
+                started.elapsed()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let asked = Instant::now();
+        assert_eq!(
+            engine.read(ADDR, f, Duration::ZERO).unwrap(),
+            Value::Float(12.5)
+        );
+        let waited = asked.elapsed();
+        let took = tab.join().unwrap();
+        assert!(
+            took >= Duration::from_millis(300),
+            "the tab read took {took:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(200),
+            "the read waited {waited:?} behind a tab read of {took:?}"
+        );
     }
 
     /// A discovery request goes out after one batch of subscription reads at

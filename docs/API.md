@@ -86,6 +86,7 @@ of every menu discovered on it (Monitoring at least).
     "firmware": "2.65",
     "instance": "inverter",
     "menus": ["monitoring"],
+    "loading": [],
     "mapped": 3,
     "fields": [
       {
@@ -136,9 +137,18 @@ of every menu discovered on it (Monitoring at least).
 ### `GET /api/devices/{serial}`
 
 One device, same shape. With `?menu=configuration` (or `alarm`, `history`) that menu
-is discovered first if it has not been, and its fields are merged in. A cold
-discovery can take a few seconds. `404` for an unknown serial, `400` for an
-unknown menu, `502` if the device would not enumerate.
+is read first if it has not been, and its fields are merged in. The response
+still lists all of the device's fields; each field's `menu` says which tab it
+is on. `404` for an unknown serial, `400` for an unknown menu, `502` if the
+device would not enumerate.
+
+Reading a tab from the bus can take from seconds to a few minutes (a large
+Configuration tab). The answer comes within 3 s: a tab still being read by
+then goes on in the background, and is listed under `loading` (here and in
+`GET /api/devices`) until its fields are in. Ask again, or watch `loading`;
+a second request does not start a second read. Meanwhile the bus carries on
+with everything else: identifying devices, reads, writes and the stream are
+served between the tab's requests.
 
 The first time a device is opened, the daemon also asks it for its
 eventable outputs, and adds the ones no menu lists (an alternator
