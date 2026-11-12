@@ -87,8 +87,23 @@ pub fn normalize(unit: &str) -> String {
         // but accept the bare form so a future firmware does not silently drop
         // temperatures.
         "C" => "\u{b0}C".to_string(),
-        other => other.to_string(),
+        // AC readings on some inverters and chargers say they are RMS values
+        // ("A(rms)", "V(rms)"); Signal K's AC paths hold RMS values in plain
+        // A and V. (#40)
+        other => match strip_rms(other) {
+            Some(base) => normalize(base),
+            None => other.to_string(),
+        },
     }
+}
+
+/// The unit in front of an "(rms)" suffix, in any case and with or without
+/// a space before it.
+fn strip_rms(unit: &str) -> Option<&str> {
+    let n = unit.len().checked_sub("(rms)".len())?;
+    let (base, suffix) = (unit.get(..n)?, unit.get(n..)?);
+    let base = base.trim_end();
+    (suffix.eq_ignore_ascii_case("(rms)") && !base.is_empty()).then_some(base)
 }
 
 /// The Signal K unit and conversion a device unit implies, from the device
@@ -251,6 +266,15 @@ mod tests {
         assert_eq!(to_si(" % ").unwrap().unit, "ratio");
     }
 
+    /// Gerard's inverter reports its AC readings as "A(rms)" and "V(rms)";
+    /// they publish as plain A and V, with no warning. (#40)
+    #[test]
+    fn rms_readings_are_plain_amps_and_volts() {
+        assert_eq!(to_si("A(rms)").unwrap().unit, "A");
+        assert!(to_si("V(rms)").unwrap().conv.is_identity());
+        assert!(conv("A(rms)", "A").is_identity());
+    }
+
     #[test]
     fn an_empty_or_unknown_unit_has_no_si_form() {
         assert_eq!(to_si(""), None);
@@ -268,6 +292,9 @@ mod tests {
     #[test]
     fn normalize_folds_the_spellings_seen_in_the_field() {
         assert_eq!(normalize("RPM"), "rpm");
+        assert_eq!(normalize("A(rms)"), "A");
+        assert_eq!(normalize("V (RMS)"), "V");
+        assert_eq!(normalize("(rms)"), "(rms)");
         assert_eq!(normalize(" "), "");
         assert_eq!(normalize(" V "), "V");
         assert_eq!(normalize("\u{b0}C"), "\u{b0}C");

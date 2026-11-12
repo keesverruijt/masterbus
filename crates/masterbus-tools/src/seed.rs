@@ -169,8 +169,10 @@ pub fn suggest_or_build(
 /// Charge` on a MasterShunt).
 pub fn suggest(class: &str, instance: &str, f: &FieldCtx) -> Option<Suggestion> {
     let deg = "\u{b0}C";
-    let unit = f.unit;
-    let ut = unit.trim();
+    // "A(rms)" is matched as "A", "RPM" as "rpm", and so on.
+    let normalized = crate::units::normalize(f.unit);
+    let unit = normalized.as_str();
+    let ut = unit;
     let lname = f.name.trim().to_lowercase();
     let name = lname.as_str();
     match class {

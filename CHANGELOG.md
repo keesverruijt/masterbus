@@ -9,6 +9,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - `MasterBus::identify` fetches the identities of several devices
   together.
+- `masterbus-signalk` exits when its stdin pipe closes if
+  `MASTERBUS_EXIT_WITH_STDIN=1` is set. The Signal K plugin sets it, so a
+  daemon whose plugin or server died no longer keeps running and holding the
+  USB link. Off by default, so systemd and terminal runs are unchanged.
+
+### Fixed
+- AC units reported as "A(rms)" and "V(rms)" are read as A and V. They no
+  longer cause an "unknown unit" warning per field at every start, and the
+  values publish with unit metadata. (#40)
 
 ### Changed
 - **The Signal K daemon identifies the devices on the bus five at a time.**
