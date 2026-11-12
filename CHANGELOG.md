@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-beta.2] - 2026-11-12
+
 ### Added
 - `MasterBus::identify` fetches the identities of several devices
   together.
