@@ -385,7 +385,7 @@ fn identify(bus: &MasterBus, shared: &Shared, id: DeviceId, late: bool, found: &
         }
     }
     if mapped {
-        shared.ensure_menus(&mapping);
+        let _ = shared.ensure_menus(&mapping);
     }
     let times = DeviceTimes {
         identified: shared.started.elapsed(),
@@ -500,6 +500,8 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
     // The state the API and this loop share. The mapping is loaded below,
     // once the bus has been walked, because seeding needs the devices.
     let (reload_tx, reload_rx) = crossbeam_channel::unbounded::<()>();
+    // A background read of the tabs a mapping needs is done (#40).
+    let (ensured_tx, ensured_rx) = crossbeam_channel::unbounded::<()>();
     let shared = Arc::new(Shared {
         bus: Box::new(bus.clone()),
         devices: Mutex::new(Vec::new()),
@@ -520,6 +522,8 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
         asked: Mutex::new(std::collections::HashSet::new()),
         outputs: Mutex::new(HashMap::new()),
         timeline: Mutex::new(api::Timeline::default()),
+        loading: Mutex::new(HashSet::new()),
+        menu_errors: Mutex::new(HashMap::new()),
     });
 
     {
@@ -648,11 +652,28 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
             active = activate(
                 &bus,
                 &shared,
+                &ensured_tx,
                 &clients,
                 &static_batch,
                 active,
                 &mut progress,
                 seeded,
+            );
+        }
+
+        // The tabs a new mapping needs are in: resolve it again, now with
+        // their fields.
+        if ensured_rx.try_recv().is_ok() {
+            while ensured_rx.try_recv().is_ok() {}
+            active = activate(
+                &bus,
+                &shared,
+                &ensured_tx,
+                &clients,
+                &static_batch,
+                active,
+                &mut progress,
+                false,
             );
         }
 
@@ -667,6 +688,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
             active = activate(
                 &bus,
                 &shared,
+                &ensured_tx,
                 &clients,
                 &static_batch,
                 active,
@@ -694,6 +716,7 @@ fn run(bus: MasterBus, opts: Options) -> std::io::Result<()> {
                         active = activate(
                             &bus,
                             &shared,
+                            &ensured_tx,
                             &clients,
                             &static_batch,
                             active,
@@ -930,12 +953,16 @@ fn notification(
 
 /// Resolve the mapping against the devices discovery is done with, subscribe
 /// to what it names, and (re)publish the static per-device metadata.
-/// `ensure` first discovers what the mapping needs beyond Monitoring, for a
-/// mapping that has just changed; for a device that joins, the discovery
-/// thread has done that already, so the stream does not wait for the bus.
+/// `ensure` also reads, in the background, what the mapping needs beyond
+/// Monitoring, for a mapping that has just changed, and has `ensured` told
+/// when that added fields, to resolve it again; for a device that joins,
+/// the discovery thread has done that already. The stream never waits for
+/// the bus.
+#[allow(clippy::too_many_arguments)]
 fn activate(
     bus: &MasterBus,
-    shared: &Shared,
+    shared: &Arc<Shared>,
+    ensured: &Sender<()>,
     clients: &Mutex<Vec<TcpStream>>,
     static_batch: &Mutex<Vec<u8>>,
     previous: Active,
@@ -944,7 +971,14 @@ fn activate(
 ) -> Active {
     let mapping = shared.mapping.lock().unwrap().clone();
     if ensure {
-        shared.ensure_menus(&mapping);
+        // Reading a tab can take minutes; values keep flowing meanwhile,
+        // and the mapping is resolved again once it is in (#40).
+        let (shared, mapping, ensured) = (shared.clone(), mapping.clone(), ensured.clone());
+        std::thread::spawn(move || {
+            if shared.ensure_menus(&mapping) {
+                let _ = ensured.send(());
+            }
+        });
     }
     let devices: Vec<DeviceRec> = shared
         .devices

@@ -143,6 +143,10 @@ pub struct Shared {
     pub outputs: Mutex<HashMap<DeviceId, (Vec<FieldId>, Instant)>>,
     /// When the devices were identified and started streaming.
     pub timeline: Mutex<Timeline>,
+    /// Tabs being read in the background for `?menu=` (#40).
+    pub loading: Mutex<HashSet<(DeviceId, Menu)>>,
+    /// Why a background tab read failed, until a client has been told.
+    pub menu_errors: Mutex<HashMap<(DeviceId, Menu), String>>,
 }
 
 /// How the start went, measured from the daemon's start: when the first
@@ -192,8 +196,10 @@ impl Shared {
     /// device, so the entry can be honoured rather than reported as "no
     /// such field"; a field no group lists is then asked for on its own.
     /// Bus access happens outside the lock; a device that will not
-    /// enumerate is logged and left alone.
-    pub fn ensure_menus(&self, mapping: &Mapping) {
+    /// enumerate is logged and left alone. Returns whether any fields were
+    /// added.
+    pub fn ensure_menus(&self, mapping: &Mapping) -> bool {
+        let mut added = false;
         let wanted: Vec<(DeviceId, String, String, Vec<Menu>)> = self
             .devices
             .lock()
@@ -223,6 +229,7 @@ impl Shared {
                         let mut devices = self.devices.lock().unwrap();
                         if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
                             d.merge_groups(menu, groups);
+                            added = true;
                         }
                     }
                     Err(e) => eprintln!(
@@ -231,7 +238,7 @@ impl Shared {
                 }
             }
         }
-        self.ensure_fields(mapping);
+        self.ensure_fields(mapping) || added
     }
 
     /// A field the mapping names that neither Monitoring nor Configuration
@@ -239,7 +246,8 @@ impl Shared {
     /// was made in `masterbus-tui` after an installer login, while the daemon
     /// runs at End User level. Such a field still answers its metadata and
     /// value reads, so it is asked for on its own. Each field is asked once.
-    fn ensure_fields(&self, mapping: &Mapping) {
+    fn ensure_fields(&self, mapping: &Mapping) -> bool {
+        let mut added = false;
         let wanted: Vec<(DeviceId, String, String, Vec<FieldId>)> = {
             let asked = self.asked.lock().unwrap();
             self.devices
@@ -289,8 +297,10 @@ impl Shared {
                         fields: found,
                     }],
                 );
+                added = true;
             }
         }
+        added
     }
 
     /// Ask a device for its eventable outputs, and add the ones no menu
@@ -373,7 +383,7 @@ impl Shared {
     /// daemon. Returns what resolving it had to say.
     fn adopt(&self, m: Mapping) -> Result<publish::Resolved, String> {
         self.persist(&m)?;
-        self.ensure_menus(&m);
+        let _ = self.ensure_menus(&m);
         let resolved = {
             let devices = self.devices.lock().unwrap();
             publish::resolve(&devices, &m)
@@ -449,7 +459,7 @@ impl Response {
 }
 
 /// Answer one request. The bearer check comes first; then the path.
-pub fn handle(shared: &Shared, req: &Request) -> Response {
+pub fn handle(shared: &Arc<Shared>, req: &Request) -> Response {
     if let Some(t) = &shared.token
         && req.bearer.as_deref() != Some(t.as_str())
     {
@@ -510,23 +520,72 @@ fn devices(shared: &Shared) -> Response {
     let values = shared.values.lock().unwrap();
     let outputs = shared.outputs.lock().unwrap();
     let timeline = shared.timeline.lock().unwrap();
+    let loading = shared.loading.lock().unwrap();
     let mut sorted: Vec<&DeviceRec> = devices.iter().collect();
     sorted.sort_by_key(|d| d.id);
     Response::ok(Json::Array(
         sorted
             .into_iter()
             .map(|d| {
-                device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o))
-                    .with_times(timeline.devices.get(&d.id))
+                let mut body =
+                    device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o))
+                        .with_times(timeline.devices.get(&d.id));
+                body["loading"] = loading_json(&loading, d.id);
+                body
             })
             .collect(),
     ))
 }
 
-/// One device; with `?menu=`, that menu is discovered first if it has not
-/// been, which is how the editor gets at Configuration fields. The device's
-/// eventable outputs are asked for the first time it is opened.
-fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
+/// The tabs of a device being read in the background, by name.
+fn loading_json(loading: &HashSet<(DeviceId, Menu)>, id: DeviceId) -> Json {
+    let mut menus: Vec<Menu> = loading
+        .iter()
+        .filter(|(d, _)| *d == id)
+        .map(|(_, m)| *m)
+        .collect();
+    menus.sort();
+    json!(menus.into_iter().map(menu_name).collect::<Vec<_>>())
+}
+
+/// How long `?menu=` waits for a tab it starts reading before it answers
+/// with what it has. A tab in the disk cache is there at once.
+#[cfg(not(test))]
+const MENU_WAIT: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const MENU_WAIT: Duration = Duration::from_millis(200);
+
+/// Read a device's tab in the background and merge it into the device, once.
+/// The bus reads it between its other work (#40); the caller does not wait.
+fn start_menu_read(shared: &Arc<Shared>, id: DeviceId, menu: Menu) {
+    if !shared.loading.lock().unwrap().insert((id, menu)) {
+        return;
+    }
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        match shared.bus.discover_menu(id, menu) {
+            Ok(groups) => {
+                let mut devices = shared.devices.lock().unwrap();
+                if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                    d.merge_groups(menu, groups);
+                }
+            }
+            Err(e) => {
+                let msg = format!("discovering {}: {e}", menu_name(menu));
+                shared.menu_errors.lock().unwrap().insert((id, menu), msg);
+            }
+        }
+        shared.loading.lock().unwrap().remove(&(id, menu));
+    });
+}
+
+/// One device; with `?menu=`, that menu is read first if it has not been,
+/// which is how the editor gets at Configuration fields. A tab that takes
+/// longer than [`MENU_WAIT`] goes on being read in the background: the
+/// answer then lists it under `loading`, and asking again later gives its
+/// fields. The device's eventable outputs are asked for the first time it is
+/// opened.
+fn device(shared: &Arc<Shared>, serial: &str, menu: Option<&String>) -> Response {
     let id = shared
         .devices
         .lock()
@@ -552,14 +611,14 @@ fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
             return Response::error(404, format!("no device with serial {serial}"));
         };
         if !known {
-            // Bus access outside the lock: a cold-cache discovery takes a while.
-            let groups = match shared.bus.discover_menu(id, menu) {
-                Ok(g) => g,
-                Err(e) => return Response::error(502, format!("discovering {m}: {e}")),
-            };
-            let mut devices = shared.devices.lock().unwrap();
-            if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
-                d.merge_groups(menu, groups);
+            start_menu_read(shared, id, menu);
+            let deadline = Instant::now() + MENU_WAIT;
+            while shared.loading.lock().unwrap().contains(&(id, menu)) && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if let Some(e) = shared.menu_errors.lock().unwrap().remove(&(id, menu)) {
+                return Response::error(502, e);
             }
         }
     }
@@ -568,11 +627,14 @@ fn device(shared: &Shared, serial: &str, menu: Option<&String>) -> Response {
     let values = shared.values.lock().unwrap();
     let outputs = shared.outputs.lock().unwrap();
     let timeline = shared.timeline.lock().unwrap();
+    let loading = shared.loading.lock().unwrap();
     match devices.iter().find(|d| d.serial == serial) {
-        Some(d) => Response::ok(
-            device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o))
-                .with_times(timeline.devices.get(&d.id)),
-        ),
+        Some(d) => {
+            let mut body = device_json(d, &mapping, &values, outputs.get(&d.id).map(|(o, _)| o))
+                .with_times(timeline.devices.get(&d.id));
+            body["loading"] = loading_json(&loading, d.id);
+            Response::ok(body)
+        }
         None => Response::error(404, format!("no device with serial {serial}")),
     }
 }
@@ -1124,7 +1186,7 @@ pub fn serve(server: Arc<tiny_http::Server>, shared: Arc<Shared>) {
     }
 }
 
-fn respond(mut req: tiny_http::Request, shared: &Shared) {
+fn respond(mut req: tiny_http::Request, shared: &Arc<Shared>) {
     let mut body = Vec::new();
     let _ = req.as_reader().read_to_end(&mut body);
     let mut r = Request::new(req.method().as_str(), req.url(), &body);
@@ -1178,6 +1240,8 @@ mod tests {
         /// Outputs switched, in order.
         switched: Mutex<Vec<(DeviceId, FieldId, bool)>>,
         output_asks: Mutex<usize>,
+        /// While set, a tab read waits until it is sent something.
+        hold: Mutex<Option<Receiver<()>>>,
     }
 
     impl StubBus {
@@ -1195,6 +1259,7 @@ mod tests {
                 outputs: Mutex::new(HashMap::new()),
                 switched: Mutex::new(Vec::new()),
                 output_asks: Mutex::new(0),
+                hold: Mutex::new(None),
             });
             (StubBus(state.clone()), state)
         }
@@ -1206,6 +1271,10 @@ mod tests {
     impl BusOps for StubBus {
         fn discover_menu(&self, id: DeviceId, menu: Menu) -> masterbus::Result<Vec<GroupInfo>> {
             *self.0.discoveries.lock().unwrap() += 1;
+            let hold = self.0.hold.lock().unwrap().take();
+            if let Some(hold) = hold {
+                let _ = hold.recv();
+            }
             self.0
                 .menus
                 .lock()
@@ -1315,14 +1384,16 @@ mod tests {
             asked: Mutex::new(HashSet::new()),
             outputs: Mutex::new(HashMap::new()),
             timeline: Mutex::new(Timeline::default()),
+            loading: Mutex::new(HashSet::new()),
+            menu_errors: Mutex::new(HashMap::new()),
         };
         (Arc::new(shared), rx)
     }
 
-    fn get(shared: &Shared, url: &str) -> Response {
+    fn get(shared: &Arc<Shared>, url: &str) -> Response {
         handle(shared, &Request::new("GET", url, b""))
     }
-    fn send(shared: &Shared, method: &str, url: &str, body: Json) -> Response {
+    fn send(shared: &Arc<Shared>, method: &str, url: &str, body: Json) -> Response {
         handle(
             shared,
             &Request::new(method, url, body.to_string().as_bytes()),
@@ -1334,6 +1405,7 @@ mod tests {
         let (shared, _) = shared_with(StubBus::plain(), vec![], Mapping::new());
         let mut s = Arc::try_unwrap(shared).ok().unwrap();
         s.token = Some("hunter2".into());
+        let s = Arc::new(s);
         assert_eq!(get(&s, "/api/status").status, 401);
         assert_eq!(
             handle(&s, &Request::new("GET", "/api/status", b"").bearer("wrong")).status,
@@ -1349,7 +1421,9 @@ mod tests {
         );
         // Without a configured token, anything goes (the daemon only allows
         // that on loopback).
+        let mut s = Arc::try_unwrap(s).ok().unwrap();
         s.token = None;
+        let s = Arc::new(s);
         assert_eq!(get(&s, "/api/status").status, 200);
         assert_eq!(get(&s, "/nope").status, 404);
         assert_eq!(get(&s, "/api/nope").status, 404);
@@ -1505,6 +1579,65 @@ mod tests {
         assert_eq!(get(&shared, "/api/devices/MLI-1?menu=service").status, 400);
     }
 
+    /// A tab that takes longer than the wait is answered with what the
+    /// device has, and listed under `loading`; asking again does not start a
+    /// second read, and once it is in, its fields are there (#40).
+    #[test]
+    fn a_slow_tab_is_read_in_the_background() {
+        let devices = vec![mli()];
+        let id = devices[0].id;
+        let (bus, state) = StubBus::new(0.0);
+        state.menus.lock().unwrap().insert(
+            (id, Menu::Configuration),
+            vec![GroupInfo {
+                id: 9,
+                name: "Inverter".into(),
+                menu: Menu::Configuration,
+                fields: vec![masterbus::FieldInfo {
+                    index: 0x113,
+                    name: "Inverter".into(),
+                    unit: String::new(),
+                    viz_type: masterbus::VisualizationType::CheckBox,
+                    writeable: true,
+                    eventable: false,
+                    min: 0.0,
+                    max: 1.0,
+                    step: 1.0,
+                    options: vec![],
+                }],
+            }],
+        );
+        let (release, hold) = unbounded();
+        *state.hold.lock().unwrap() = Some(hold);
+        let (shared, _) = shared_with(bus, devices, Mapping::new());
+        let has_inverter = |r: &Response| {
+            r.body["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["id"] == "0x113")
+        };
+
+        let r = get(&shared, "/api/devices/MLI-1?menu=configuration");
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.body["loading"], json!(["configuration"]));
+        assert!(!has_inverter(&r));
+        let r = get(&shared, "/api/devices/MLI-1?menu=configuration");
+        assert_eq!(r.body["loading"], json!(["configuration"]));
+        assert_eq!(*state.discoveries.lock().unwrap(), 1);
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !shared.loading.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let r = get(&shared, "/api/devices/MLI-1");
+        assert_eq!(r.body["loading"], json!([]));
+        assert!(has_inverter(&r));
+        assert_eq!(r.body["menus"], json!(["monitoring", "configuration"]));
+        assert_eq!(*state.discoveries.lock().unwrap(), 1);
+    }
+
     #[test]
     fn reading_a_field_polls_and_caches() {
         let devices = vec![mli()];
@@ -1652,6 +1785,7 @@ mod tests {
         let (shared, rx) = shared_with(StubBus::plain(), devices, Mapping::new());
         let mut s = Arc::try_unwrap(shared).ok().unwrap();
         s.mapping_path = Some(path.clone());
+        let s = Arc::new(s);
 
         let mut m = Mapping::new();
         let mut dm = DeviceMapping::default();

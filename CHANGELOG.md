@@ -17,6 +17,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one. On a test boat with 13 devices the first pass went from 10.0 s to
   6.0 s. The log has a line for each batch; the line of each device then
   gives the time spent on it after that, such as its mapped fields. (#40)
+- **Reading a tab no longer holds anything else up.** Reading a device's
+  Alarms, History or Configuration tab for the first time takes up to a few
+  minutes. Until now everything else on the bus waited until it was done.
+  On a 19-device bus, two Configuration reads held one device's
+  identification up for 7 minutes. Identifying devices, reading and writing
+  values and the Signal K stream now carry on while the tab is read.
+  - `GET /api/devices/{serial}?menu=…` answers within 3 s. A tab that is
+    still being read is listed under the new `loading` field until its fields
+    are in.
+  - In the Signal K mapping editor, the **Load … fields** button shows
+    "Loading … fields…" meanwhile, and the rest of the editor stays usable.
+  - A saved mapping that needs a tab not read yet no longer pauses the
+    values sent to Signal K while that tab is read.
+  (#40)
 
 ## [0.6.0-beta.1] - 2026-10-28
 
