@@ -92,9 +92,35 @@ pub fn normalize(unit: &str) -> String {
         // A and V. (#40)
         other => match strip_rms(other) {
             Some(base) => normalize(base),
-            None => other.to_string(),
+            None => spelled_out(other).unwrap_or(other).to_string(),
         },
     }
+}
+
+/// The short form of a unit some firmware spells out, in any case and with
+/// or without a full stop: `sec.`, `Minutes`, `Hour` and `days` on the
+/// Configuration and History tabs of #53's bus. Only words: `M` and `m` are
+/// not folded together, a megawatt is not a milliwatt.
+fn spelled_out(unit: &str) -> Option<&'static str> {
+    let word = unit.strip_suffix('.').unwrap_or(unit).to_ascii_lowercase();
+    Some(match word.as_str() {
+        "sec" | "secs" | "second" | "seconds" => "s",
+        "min" | "mins" | "minute" | "minutes" => "min",
+        "hour" | "hours" | "hr" | "hrs" => "h",
+        "day" | "days" => "d",
+        "% soc" => "%",
+        "cycle" | "cycles" => "cycles",
+        "time" | "times" => "times",
+        _ => return None,
+    })
+}
+
+/// Whether a device unit counts something: a battery's `cycles`, a
+/// MasterShunt's `times` (`Power cycles`, `Battery abuse`). Signal K has no
+/// unit for a count, so these publish as reported, without unit metadata
+/// and without the warning an unknown unit gets. (#53)
+pub fn is_count(device_unit: &str) -> bool {
+    matches!(normalize(device_unit).as_str(), "cycles" | "times")
 }
 
 /// The unit in front of an "(rms)" suffix, in any case and with or without
@@ -155,6 +181,7 @@ pub fn to_si(device_unit: &str) -> Option<Si> {
         "mA" => scaled("A", 0.001),
         "min" => scaled("s", 60.0),
         "h" => scaled("s", 3600.0),
+        "d" => scaled("s", 86_400.0),
         _ => None,
     }
 }
@@ -273,6 +300,38 @@ mod tests {
         assert_eq!(to_si("A(rms)").unwrap().unit, "A");
         assert!(to_si("V(rms)").unwrap().conv.is_identity());
         assert!(conv("A(rms)", "A").is_identity());
+    }
+
+    /// The spelled-out durations of #53's Configuration and History tabs.
+    #[test]
+    fn spelled_out_durations_become_seconds() {
+        for (dev, secs) in [
+            ("sec.", 1.0),
+            ("Min", 60.0),
+            ("Minutes", 60.0),
+            ("Hour", 3600.0),
+            ("days", 86_400.0),
+        ] {
+            let si = to_si(dev).unwrap_or_else(|| panic!("{dev}"));
+            assert_eq!(si.unit, "s", "{dev}");
+            assert!((si.conv.apply(1.0) - secs).abs() < 1e-9, "{dev}");
+        }
+        assert_eq!(to_si("% SOC").unwrap().unit, "ratio");
+        // Only words fold: a capital M is not a lower-case one.
+        assert_eq!(normalize("MV"), "MV");
+    }
+
+    /// Counts have no SI unit and are not unknown either. (#53)
+    #[test]
+    fn counts_are_known_but_have_no_si_form() {
+        for u in ["cycles", "times", "Times"] {
+            assert!(is_count(u), "{u}");
+            assert_eq!(to_si(u), None, "{u}");
+        }
+        assert!(!is_count("furlongs"));
+        // A count is no voltage.
+        assert_eq!(conversion("times", Some("V")), None);
+        assert!(conversion("times", None).unwrap().is_identity());
     }
 
     #[test]

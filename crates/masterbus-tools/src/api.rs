@@ -998,32 +998,46 @@ fn suggest(shared: &Shared, body: &[u8]) -> Response {
         .map(|m| m.instance.clone())
         .filter(|i| !i.is_empty())
         .unwrap_or_else(|| d.instance.clone());
-    let (path, invert, tier) = match dm.and_then(|m| m.fields.get(&field_key(f.id))) {
-        Some(e) => (e.path.clone(), e.invert, Some("existing")),
-        None => match seed::suggest_or_build(
+    let node = publish::mapped_node(dm);
+    let propose = |c: &seed::FieldCtx| {
+        seed::suggest_or_build(
             &d.article,
             &d.firmware,
             seed::class_of(&d.name),
             &instance,
-            publish::mapped_node(dm).as_deref(),
-            &seed::FieldCtx {
-                id: f.id,
-                name: &f.name,
-                unit: &f.unit,
-                group: &f.group,
-            },
-        ) {
+            node.as_deref(),
+            c,
+        )
+    };
+    fn ctx(f: &publish::FieldRec) -> seed::FieldCtx<'_> {
+        seed::FieldCtx {
+            id: f.id,
+            name: &f.name,
+            unit: &f.unit,
+            group: &f.group,
+        }
+    }
+    let (path, invert, tier) = match dm.and_then(|m| m.fields.get(&field_key(f.id))) {
+        Some(e) => (e.path.clone(), e.invert, Some("existing")),
+        None => match propose(&ctx(&f)) {
             Some((s, tier)) => (
-                // Not onto a path another field of this device already has.
-                seed::unique(
-                    s.path,
-                    f.id,
-                    dm.into_iter().flat_map(|m| {
-                        m.fields.iter().filter_map(|(k, e)| {
-                            crate::mapping::parse_field_key(k).map(|id| (id, e.path.as_str()))
-                        })
-                    }),
-                ),
+                // Not onto a path another field of this device has, or would
+                // be proposed.
+                {
+                    let siblings = seed::sibling_paths(&ctx(&f), d.fields.iter().map(ctx), propose);
+                    seed::unique(
+                        s.path,
+                        f.id,
+                        dm.into_iter()
+                            .flat_map(|m| {
+                                m.fields.iter().filter_map(|(k, e)| {
+                                    crate::mapping::parse_field_key(k)
+                                        .map(|id| (id, e.path.as_str()))
+                                })
+                            })
+                            .chain(siblings.iter().map(|(id, p)| (*id, p.as_str()))),
+                    )
+                },
                 s.invert,
                 Some(match tier {
                     seed::Tier::ModelFirmware => "modelFirmware",
