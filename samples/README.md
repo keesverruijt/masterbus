@@ -15,3 +15,4 @@ and values are as captured.
 | File | Captured | Devices | Notes |
 |------|----------|---------|-------|
 | `mcu-czone-19-devices.json` | 2026-10-01, masterbus-dump 0.4.2 | 19 | MCU charger/inverter/solar, 5× INT (one a CZone bridge), 4× DCD, 2× DSD, DSI, 2× MAC, ISO, MSH, BAT, DIS; mapping of 83 fields on 17 devices |
+| `mcu-czone-19-devices-all-tabs.json` | 2026-10-29, masterbus-dump 0.6.0-beta.1 (`"format": 2`) | 19 | The same bus read with the four tabs: 196 Monitoring, 111 Alarm, 51 History and 798 Configuration fields; mapping of 318 fields, the live one plus a suggestion for every Alarm and History field (#53) |

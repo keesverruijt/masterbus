@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Suggested paths for the Alarm and History tabs.** Found by
+  @susteranna, who asked for a suggestion for each of the 162 Alarm and
+  History fields of a 19-device bus. (#53)
+  - Fields of one device with the same name no longer get the same
+    suggested path, also when none of them is mapped yet. Each gets its
+    field id, such as `electrical.switches.cZoneMb.alarm0x203.alarm` for
+    the 16 Alarm fields of a CZone bridge all called `Alarm`. Before,
+    mapping them all put them on one path.
+  - The rules that know a device's live readings no longer apply to its
+    Alarm and History fields. An isolation transformer's History `Output`,
+    its reading at the latest alarm, was suggested as its live output.
+  - Units spelled out (`sec.`, `Min`, `Minutes`, `Hour`, `days`) are
+    converted to seconds, and `% SOC` to a ratio. Counts (`cycles`,
+    `times`) publish as numbers without unit metadata. Before, all of these
+    gave an "unknown unit" warning.
+- `samples/mcu-czone-19-devices-all-tabs.json`: the same bus read with its
+  four tabs, from #53.
+
 ## [0.6.0-beta.2] - 2026-11-12
 
 ### Added

@@ -168,6 +168,13 @@ pub fn suggest_or_build(
 /// firmware is not consistent (`State of charge` on a battery, `State of
 /// Charge` on a MasterShunt).
 pub fn suggest(class: &str, instance: &str, f: &FieldCtx) -> Option<Suggestion> {
+    // The rules below name live readings and controls. An Alarm or History
+    // field of the same name is something else (an isolation transformer's
+    // History `Output` in V is not its output voltage), so those are built
+    // from their own group instead. (#53)
+    if masterbus::model::field_id::menu(f.id) != masterbus::model::Menu::Monitoring {
+        return None;
+    }
     let deg = "\u{b0}C";
     // "A(rms)" is matched as "A", "RPM" as "rpm", and so on.
     let normalized = crate::units::normalize(f.unit);
@@ -414,6 +421,31 @@ pub fn unique<'a>(
         Some((head, leaf)) => format!("{head}{tag}.{leaf}"),
         None => format!("{path}{tag}"),
     }
+}
+
+/// What `propose` makes of the device's other fields named like `f`, for
+/// [`unique`]'s `taken` alongside the mapped paths. Without them, two
+/// unmapped fields of one name get the same proposal, and mapping both puts
+/// them on one path: the bridge's 16 Alarm fields all called `Alarm`, a
+/// MasterShunt's two `Discharged state` counters (#53). With them, each
+/// gets its field id.
+///
+/// Only fields of the same name are asked, which is where the proposals
+/// coincide; `propose` is the caller's [`suggest_or_build`] for this device.
+pub fn sibling_paths<'a, P>(
+    f: &FieldCtx,
+    others: impl IntoIterator<Item = FieldCtx<'a>>,
+    propose: P,
+) -> Vec<(FieldId, String)>
+where
+    P: Fn(&FieldCtx) -> Option<(Suggestion, Tier)>,
+{
+    let name = segment(f.name);
+    others
+        .into_iter()
+        .filter(|o| o.id != f.id && segment(o.name) == name)
+        .filter_map(|o| propose(&o).map(|(s, _)| (o.id, s.path)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -838,5 +870,148 @@ mod tests {
         let built = by_tier.get(Tier::Built.describe()).copied().unwrap_or(0);
         let known: usize = by_tier.values().sum::<usize>() - built;
         assert!(known >= 60, "{by_tier:?}");
+    }
+
+    /// #53: what the editor proposes for every Alarm and History field of the
+    /// same bus, read with its four tabs, one field at a time with nothing
+    /// mapped, as @susteranna asked for them. No two land on one path, none
+    /// carries a field id where no name repeats, and none warns about its
+    /// unit.
+    #[test]
+    fn alarm_and_history_fields_get_distinct_paths_without_unit_warnings() {
+        use crate::mapping::FieldMapping;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/mcu-czone-19-devices-all-tabs.json"
+        );
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let dump: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut proposed = std::collections::BTreeMap::<String, String>::new();
+        let mut count = 0;
+        for dev in dump["devices"].as_array().unwrap() {
+            let s = |k: &str| dev[k].as_str().unwrap_or_default();
+            let addr = u32::from_str_radix(s("id").trim_start_matches("0x"), 16).unwrap();
+            let instance = instance_of(s("name"), addr);
+            // Every field of the device, on every tab, as the API has them.
+            let mut fields = Vec::new();
+            for g in dev["groups"].as_array().unwrap() {
+                for f in g["fields"].as_array().unwrap() {
+                    let options: Vec<String> = f["options"]
+                        .as_array()
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    fields.push((
+                        g["menu"].as_str().unwrap_or_default(),
+                        crate::mapping::parse_field_key(f["id"].as_str().unwrap()).unwrap(),
+                        f["name"].as_str().unwrap_or_default(),
+                        f["unit"].as_str().unwrap_or_default(),
+                        g["name"].as_str().unwrap_or_default(),
+                        options,
+                    ));
+                }
+            }
+            let propose = |c: &FieldCtx| {
+                suggest_or_build(
+                    s("article"),
+                    s("firmware"),
+                    class_of(s("name")),
+                    &instance,
+                    None,
+                    c,
+                )
+            };
+            let all: Vec<FieldCtx> = fields
+                .iter()
+                .map(|(_, id, name, unit, group, _)| FieldCtx {
+                    id: *id,
+                    name,
+                    unit,
+                    group,
+                })
+                .collect();
+            let mut taken: Vec<String> = Vec::new();
+            for ((menu, id, name, unit, _, options), c) in fields.iter().zip(&all) {
+                if !matches!(*menu, "alarm" | "history") {
+                    continue;
+                }
+                let (sug, _) =
+                    propose(c).unwrap_or_else(|| panic!("{} {name}: nothing", s("name")));
+                let siblings = sibling_paths(c, all.iter().cloned(), propose);
+                let p = unique(
+                    sug.path,
+                    *id,
+                    siblings.iter().map(|(i, p)| (*i, p.as_str())),
+                );
+                let entry = FieldMapping {
+                    path: p.clone(),
+                    invert: sug.invert,
+                    ..Default::default()
+                };
+                match signalk::plan(&p, unit, options, &entry) {
+                    Ok(plan) => assert!(
+                        plan.warning.is_none(),
+                        "{} {name} ({unit:?}): {:?}",
+                        s("name"),
+                        plan.warning
+                    ),
+                    Err(signalk::Refusal::Truth { .. }) => {}
+                    Err(e) => panic!("{} {name}: {p} refused: {e}", s("name")),
+                }
+                assert!(
+                    !taken.contains(&p),
+                    "{} {name}: {p} proposed twice",
+                    s("name")
+                );
+                taken.push(p.clone());
+                proposed.insert(
+                    format!("{} {}", s("name"), crate::mapping::field_key(*id)),
+                    p,
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 162, "Alarm and History fields in the dump");
+        let at = |k: &str| {
+            proposed.get(k).map(String::as_str).unwrap_or_else(|| {
+                panic!(
+                    "{k} not proposed; have {:?}",
+                    proposed.keys().collect::<Vec<_>>()
+                )
+            })
+        };
+        // The repeated names each get their field id.
+        assert!(at("INT CZone-MB 0x200").contains("0x200"));
+        assert_eq!(
+            at("INT CZone-MB 0x20F"),
+            "electrical.switches.cZoneMb.alarm0x20f.alarm"
+        );
+        assert_eq!(
+            at("DSD 1 Power 0x227"),
+            "electrical.switches.1Power.alarmStatus0x227.spare"
+        );
+        assert_eq!(
+            at("MSH VITAL 0x304"),
+            "electrical.batteries.vital.standardHistory0x304.dischargedState"
+        );
+        // A name that does not repeat keeps a clean path.
+        assert_eq!(
+            at("DSD 1 Power 0x220"),
+            "electrical.switches.1Power.alarmStatus.showerPump"
+        );
+        // An isolation transformer's History `Output` is the reading at its
+        // latest alarm, not its live output.
+        assert_eq!(
+            at("ISO GI Trafo 0x310"),
+            "electrical.ac.giTrafo.latestAlarms.output.voltage"
+        );
+        for (k, p) in &proposed {
+            assert!(!p.contains(".phase.single"), "{k}: {p}");
+        }
     }
 }

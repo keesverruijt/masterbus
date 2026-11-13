@@ -1178,30 +1178,41 @@ impl App {
                     .unwrap_or_else(|| self.cur_instance.clone());
                 let group = self.group_of(self.row_sel);
                 let node = publish::mapped_node(device);
-                match seed::suggest_or_build(
-                    &article,
-                    &firmware,
-                    seed::class_of(&name),
-                    &instance,
-                    node.as_deref(),
-                    &seed::FieldCtx {
-                        id: field.index,
-                        name: &field.name,
-                        unit: &field.unit,
-                        group: &group,
-                    },
-                ) {
+                let propose = |c: &seed::FieldCtx| {
+                    seed::suggest_or_build(
+                        &article,
+                        &firmware,
+                        seed::class_of(&name),
+                        &instance,
+                        node.as_deref(),
+                        c,
+                    )
+                };
+                let ctx = seed::FieldCtx {
+                    id: field.index,
+                    name: &field.name,
+                    unit: &field.unit,
+                    group: &group,
+                };
+                match propose(&ctx) {
                     Some((s, tier)) => (
-                        // Not onto a path another field of this device has.
-                        seed::unique(
-                            s.path,
-                            field.index,
-                            device.into_iter().flat_map(|d| {
-                                d.fields.iter().filter_map(|(k, e)| {
-                                    parse_field_key(k).map(|id| (id, e.path.as_str()))
-                                })
-                            }),
-                        ),
+                        // Not onto a path another field of this device has,
+                        // or another field of this tab would be proposed.
+                        {
+                            let siblings = seed::sibling_paths(&ctx, self.tab_fields(), propose);
+                            seed::unique(
+                                s.path,
+                                field.index,
+                                device
+                                    .into_iter()
+                                    .flat_map(|d| {
+                                        d.fields.iter().filter_map(|(k, e)| {
+                                            parse_field_key(k).map(|id| (id, e.path.as_str()))
+                                        })
+                                    })
+                                    .chain(siblings.iter().map(|(id, p)| (*id, p.as_str()))),
+                            )
+                        },
                         s.invert,
                         BTreeMap::new(),
                         BTreeMap::new(),
@@ -1234,6 +1245,24 @@ impl App {
     }
 
     /// The group heading the row at `index` sits under, or empty.
+    /// The fields of the tab on screen, each with its group.
+    fn tab_fields(&self) -> Vec<seed::FieldCtx<'_>> {
+        let mut group = "";
+        let mut out = Vec::new();
+        for r in &self.rows {
+            match r {
+                Row::Group(g) => group = g,
+                Row::Field(f) => out.push(seed::FieldCtx {
+                    id: f.index,
+                    name: &f.name,
+                    unit: &f.unit,
+                    group,
+                }),
+            }
+        }
+        out
+    }
+
     fn group_of(&self, index: usize) -> String {
         self.rows
             .get(..=index)

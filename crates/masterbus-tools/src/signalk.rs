@@ -274,7 +274,9 @@ pub fn plan(
             });
         }
         (None, Some(si)) => (si.conv, Some(si.unit), None),
-        (None, None) if dev.is_empty() => (Conversion::IDENTITY, None, None),
+        (None, None) if dev.is_empty() || units::is_count(&dev) => {
+            (Conversion::IDENTITY, None, None)
+        }
         (None, None) => (
             Conversion::IDENTITY,
             None,
