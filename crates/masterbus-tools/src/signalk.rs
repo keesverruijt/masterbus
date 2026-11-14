@@ -493,6 +493,12 @@ pub fn encode(
                 .filter(|i| *i < n)
                 .map(|i| serde_json::Value::Bool((i != 0) ^ invert))
         }
+        // An eventable with no labels at all (a charger's `Remote input`,
+        // #55) is an on/off input too; it has no option count to check the
+        // index against.
+        Value::Eventable { index, labels } if labels.is_empty() && *index >= 0 => {
+            Some(serde_json::Value::Bool((*index != 0) ^ invert))
+        }
         // An enum with a truth table is a boolean in disguise.
         Value::List { .. } | Value::Eventable { .. } if !truth.is_empty() => {
             let label = value.label()?;
@@ -510,6 +516,11 @@ pub fn encode(
         Value::Text { text, .. } if !text.is_empty() => {
             Some(serde_json::Value::String(text.clone()))
         }
+        // Signal K has no date type: the ISO date as a string, as the API
+        // shows it (#55). A negative component is the "no value" sentinel.
+        Value::Date(d) if d.day > 0 && d.mon > 0 && d.year >= 0 => Some(serde_json::Value::String(
+            format!("{:04}-{:02}-{:02}", d.year, d.mon, d.day),
+        )),
         Value::Text { .. } | Value::Date(_) | Value::DeviceRef { .. } | Value::Invalid => None,
     }
 }
@@ -630,6 +641,38 @@ fn with_index(template: &Value, index: i32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An eventable with no labels at all publishes off or on; a date
+    /// publishes as an ISO string, and an unset date not at all (#55).
+    #[test]
+    fn a_label_less_eventable_and_a_date_publish() {
+        let none = BTreeMap::new();
+        let id = Conversion::IDENTITY;
+        let ev = |index| Value::Eventable {
+            index,
+            labels: Vec::new(),
+        };
+        assert_eq!(
+            encode(&ev(0), id, false, &none),
+            Some(serde_json::json!(false))
+        );
+        assert_eq!(
+            encode(&ev(1), id, false, &none),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(
+            encode(&ev(1), id, true, &none),
+            Some(serde_json::json!(false))
+        );
+        assert_eq!(encode(&ev(-1), id, false, &none), None);
+
+        let date = |day, mon, year| Value::Date(masterbus::Date { day, mon, year });
+        assert_eq!(
+            encode(&date(8, 11, 2026), id, false, &none),
+            Some(serde_json::json!("2026-11-08"))
+        );
+        assert_eq!(encode(&date(-1, -1, -1), id, false, &none), None);
+    }
 
     /// An APR's outputs are enums whose three labels are all empty (#29).
     /// They publish and take a boolean by option number, and a boolean leaf
