@@ -15,3 +15,4 @@ and values are as captured.
 | File | Captured | Devices | Notes |
 |------|----------|---------|-------|
 | `mcu-czone-19-devices.json` | 2026-10-01, masterbus-dump 0.4.2 | 19 | MCU charger/inverter/solar, 5× INT (one a CZone bridge), 4× DCD, 2× DSD, DSI, 2× MAC, ISO, MSH, BAT, DIS; mapping of 83 fields on 17 devices |
+| `mcu-czone-19-devices-fields.json`, `.md` | 2026-11-19, masterbus-signalk 0.6.0-beta.2 API | 19 | the same bus: every field of every menu (1254), with group, menu, access, unit, value, options and the boat's mapped path (404 fields). Not a dump: read through `GET /api/devices/{serial}?menu=...`. Firmware since the dump: BAT 2.13 → 2.15, MAC 1.7 → 1.8 |
