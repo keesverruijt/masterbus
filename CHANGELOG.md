@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Path suggestions for 11 more models in `masterbus-tui --mapping` (the
+  `+` key), and 32 more for the MCU combi: battery with BMS (66016000),
+  MasterShunt (77020110), DC distribution (77020200), DC switching
+  (77020400), interface relays (77030500, 77031500), DSI Input4x (77030900),
+  CZone MasterBus bridge (77033000), Magic DC-DC chargers (81205100,
+  81205105) and the isolation transformer (88000355). They come from one
+  boat's curated mapping, so the TUI still asks before using one.
+- `samples/mcu-czone-19-devices-fields.json` and `.md`: every field of every
+  menu of the 19-device sample bus, with its access, unit, value and options.
+
 ## [0.6.0-beta.2] - 2026-11-12
 
 ### Added
